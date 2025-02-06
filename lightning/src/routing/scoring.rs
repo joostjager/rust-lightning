@@ -1746,6 +1746,14 @@ impl<G: Deref<Target = NetworkGraph<L>> + Clone, L: Deref + Clone> CombinedScore
 			self.scorer.channel_liquidities.insert(scid, liquidity);
 		}
 	}
+
+	/// Set scorer state to match the provided external channel liquidity information. The state for channels that are
+	/// not present in the external data set will remain unchanged.
+	pub fn set(&mut self, external_scores: ChannelLiquidities) {
+		for (scid, liquidity) in external_scores.0 {
+			self.scorer.channel_liquidities.insert(scid, liquidity);
+		}
+	}
 }
 
 impl<G: Deref<Target = NetworkGraph<L>>, L: Deref> ScoreLookUp for CombinedScorer<G, L> where L::Target: Logger {
@@ -3962,6 +3970,19 @@ mod tests {
 			},
 		};
 
+		let logger_rc = Rc::new(&logger);
+
+		let mut external_liquidity = ChannelLiquidity::new(Duration::ZERO);
+		external_liquidity.as_directed_mut(&source_node_id(), &target_node_id(), 1_000).successful(
+			1000,
+			Duration::ZERO,
+			format_args!("test channel"),
+			logger_rc.as_ref(),
+		);
+
+		let mut external_scores = ChannelLiquidities::new();
+		external_scores.insert(42, external_liquidity);
+
 		{
 			let network_graph = network_graph.read_only();
 			let channel = network_graph.channel(42).unwrap();
@@ -3971,16 +3992,7 @@ mod tests {
 
 			let penalty = combined_scorer.channel_penalty_msat(&candidate, usage, &params);
 
-			let mut external_liquidity = ChannelLiquidity::new(Duration::ZERO);
-			let logger_rc = Rc::new(&logger); // Why necessary and not above for the network graph?
-			external_liquidity
-				.as_directed_mut(&source_node_id(), &target_node_id(), 1_000)
-				.successful(1000, Duration::ZERO, format_args!("test channel"), logger_rc.as_ref());
-
-			let mut external_scores = ChannelLiquidities::new();
-
-			external_scores.insert(42, external_liquidity);
-			combined_scorer.merge(external_scores, Duration::ZERO);
+			combined_scorer.merge(external_scores.clone(), Duration::ZERO);
 
 			let penalty_after_merge =
 				combined_scorer.channel_penalty_msat(&candidate, usage, &params);
@@ -3993,6 +4005,13 @@ mod tests {
 		let liquidity_range =
 			combined_scorer.scorer.estimated_channel_liquidity_range(42, &target_node_id());
 		assert_eq!(liquidity_range.unwrap(), (0, 300));
+
+		// Now set (overwrite) the scorer state with the external data which should lead to an even greater liquidity
+		// range. Just the success from the external source is now considered.
+		combined_scorer.set(external_scores);
+		let liquidity_range =
+			combined_scorer.scorer.estimated_channel_liquidity_range(42, &target_node_id());
+		assert_eq!(liquidity_range.unwrap(), (0, 0));
 	}
 }
 
