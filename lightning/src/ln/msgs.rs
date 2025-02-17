@@ -1882,6 +1882,13 @@ mod fuzzy_internal_msgs {
 		pub(crate) failuremsg: Vec<u8>,
 		pub(crate) pad: Vec<u8>,
 	}
+
+	pub struct DecodedAttributableOnionErrorPacket {
+		pub(crate) failuremsg: Vec<u8>,
+		pub(crate) pad: Vec<u8>,
+		pub(crate) payloads: Vec<u8>,
+		pub(crate) hmac: Vec<u8>,
+	}
 }
 #[cfg(fuzzing)]
 pub use self::fuzzy_internal_msgs::*;
@@ -2330,6 +2337,13 @@ impl_writeable!(DecodedOnionErrorPacket, {
 	hmac,
 	failuremsg,
 	pad
+});
+
+impl_writeable!(DecodedAttributableOnionErrorPacket, {
+	hmac,
+	failuremsg,
+	pad,
+	payloads
 });
 
 #[cfg(not(taproot))]

@@ -52,6 +52,8 @@ libm = { version = "0.2", default-features = false }
 [dev-dependencies]
 regex = "1.5.6"
 lightning-types = { version = "0.3.0", path = "../lightning-types", features = ["_test_utils"] }
+serde = { version = "1.0", default-features = false, features = ["derive", "alloc"] }
+serde_json = "1.0"
 
 [dev-dependencies.bitcoin]
 version = "0.32.2"

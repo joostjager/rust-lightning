@@ -912,6 +912,44 @@ pub(super) fn build_failure_packet(
 	packet
 }
 
+
+pub(super) fn build_attributable_failure_packet(shared_secret: &[u8], failure_type: u16, failure_data: &[u8], max_hops: u8, payload_len: u8) -> msgs::DecodedAttributableOnionErrorPacket {
+	assert_eq!(shared_secret.len(), 32);
+	assert!(failure_data.len() <= 256 - 2);
+
+	let max_hops = max_hops as usize;
+	let full_payload_len = payload_len as usize + 1; // Including the marker byte.ß
+
+	let failuremsg = {
+		let mut res = Vec::with_capacity(2 + failure_data.len());
+		res.push(((failure_type >> 8) & 0xff) as u8);
+		res.push(((failure_type >> 0) & 0xff) as u8);
+		res.extend_from_slice(&failure_data[..]);
+		res
+	};
+	let pad = {
+		let mut res = Vec::with_capacity(256 - 2 - failure_data.len());
+		res.resize(256 - 2 - failure_data.len(), 0);
+		res
+	};
+
+	let payloads = {
+		let mut payloads = vec![0; max_hops * full_payload_len];
+		payloads[0] = 1; // final node
+		payloads
+	};
+
+	let hmac_count = max_hops * (max_hops + 1) / 2;
+	let hmacs = vec![0;32*hmac_count];
+
+	msgs::DecodedAttributableOnionErrorPacket {
+		failuremsg: failuremsg,
+		pad: pad,
+		payloads: payloads,
+		hmac: hmacs,
+	}
+}
+
 #[cfg(test)]
 pub(super) fn build_first_hop_failure_packet(
 	shared_secret: &[u8], failure_type: u16, failure_data: &[u8],
@@ -1668,7 +1706,10 @@ fn decode_next_hop<T, R: ReadableArgs<T>, N: NextPacketBytes>(
 
 #[cfg(test)]
 mod tests {
-	use crate::io;
+	use std::fs::File;
+	use std::io::BufReader;
+
+use crate::io;
 	use crate::ln::msgs;
 	use crate::routing::router::{Path, PaymentParameters, Route, RouteHop};
 	use crate::types::features::{ChannelFeatures, NodeFeatures};
@@ -1678,9 +1719,10 @@ mod tests {
 	#[allow(unused_imports)]
 	use crate::prelude::*;
 
-	use bitcoin::hex::FromHex;
+	use bitcoin::hex::{DisplayHex, FromHex};
 	use bitcoin::secp256k1::Secp256k1;
 	use bitcoin::secp256k1::{PublicKey, SecretKey};
+    use serde_json::Value;
 
 	use super::*;
 
@@ -2011,5 +2053,63 @@ mod tests {
 		route_params.payment_params.max_total_cltv_expiry_delta = u32::MAX;
 		let recipient_onion = RecipientOnionFields::spontaneous_empty();
 		set_max_path_length(&mut route_params, &recipient_onion, None, None, 42).unwrap();
+	}
+
+	#[test]
+	fn test_attributable_failure_packet_onion() {
+		// Read json file
+		// let file = File::open("attributable_error.json").unwrap();
+		// let reader = BufReader::new(file);
+		// let data: Value = serde_json::from_reader(reader).unwrap();
+
+		// // data is an object. take property
+		// let data = data.as_object().unwrap();
+		// let hops = data.get("hops").unwrap().as_array().unwrap();
+
+		let onion_keys = build_test_onion_keys();
+		let onion_error =
+			super::build_attributable_failure_packet(onion_keys[4].shared_secret.as_ref(), 0x2002, &[0; 0], 20, 4);
+
+		println!("{}", &onion_error.encode().to_lower_hex_string());
+
+		// let hex = hops[0].as_object().unwrap().get("encryptedMessage").unwrap().as_str().unwrap();
+		let hex = "0140400f0000000000000064000c3500fd84d1fd012c80808080808080808080808080808080808080808080808080808080808080808080808080808080808080808080808080808080808080808080808080808080808080808080808080808080808080808080808080808080808080808080808080808080808080808080808080808080808080808080808080808080808080808080808080808080808080808080808080808080808080808080808080808080808080808080808080808080808080808080808080808080808080808080808080808080808080808080808080808080808080808080808080808080808080808080808080808080808080808080808080808080808080808080808080808080808080808080808080808080808080808080808080808080808080808080808080808080808080808080808002c00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000";
+		assert_eq!(onion_error.encode(), <Vec<u8>>::from_hex(hex).unwrap());
+
+
+		// let onion_packet_1 = super::encrypt_failure_packet(
+		// 	onion_keys[4].shared_secret.as_ref(),
+		// 	&onion_error.encode()[..],
+		// );
+		// let hex = "a5e6bd0c74cb347f10cce367f949098f2457d14c046fd8a22cb96efb30b0fdcda8cb9168b50f2fd45edd73c1b0c8b33002df376801ff58aaa94000bf8a86f92620f343baef38a580102395ae3abf9128d1047a0736ff9b83d456740ebbb4aeb3aa9737f18fb4afb4aa074fb26c4d702f42968888550a3bded8c05247e045b866baef0499f079fdaeef6538f31d44deafffdfd3afa2fb4ca9082b8f1c465371a9894dd8c243fb4847e004f5256b3e90e2edde4c9fb3082ddfe4d1e734cacd96ef0706bf63c9984e22dc98851bcccd1c3494351feb458c9c6af41c0044bea3c47552b1d992ae542b17a2d0bba1a096c78d169034ecb55b6e3a7263c26017f033031228833c1daefc0dedb8cf7c3e37c9c37ebfe42f3225c326e8bcfd338804c145b16e34e4";
+		// assert_eq!(onion_packet_1.data, <Vec<u8>>::from_hex(hex).unwrap());
+
+		// let onion_packet_2 = super::encrypt_failure_packet(
+		// 	onion_keys[3].shared_secret.as_ref(),
+		// 	&onion_packet_1.data[..],
+		// );
+		// let hex = "c49a1ce81680f78f5f2000cda36268de34a3f0a0662f55b4e837c83a8773c22aa081bab1616a0011585323930fa5b9fae0c85770a2279ff59ec427ad1bbff9001c0cd1497004bd2a0f68b50704cf6d6a4bf3c8b6a0833399a24b3456961ba00736785112594f65b6b2d44d9f5ea4e49b5e1ec2af978cbe31c67114440ac51a62081df0ed46d4a3df295da0b0fe25c0115019f03f15ec86fabb4c852f83449e812f141a9395b3f70b766ebbd4ec2fae2b6955bd8f32684c15abfe8fd3a6261e52650e8807a92158d9f1463261a925e4bfba44bd20b166d532f0017185c3a6ac7957adefe45559e3072c8dc35abeba835a8cb01a71a15c736911126f27d46a36168ca5ef7dccd4e2886212602b181463e0dd30185c96348f9743a02aca8ec27c0b90dca270";
+		// assert_eq!(onion_packet_2.data, <Vec<u8>>::from_hex(hex).unwrap());
+
+		// let onion_packet_3 = super::encrypt_failure_packet(
+		// 	onion_keys[2].shared_secret.as_ref(),
+		// 	&onion_packet_2.data[..],
+		// );
+		// let hex = "a5d3e8634cfe78b2307d87c6d90be6fe7855b4f2cc9b1dfb19e92e4b79103f61ff9ac25f412ddfb7466e74f81b3e545563cdd8f5524dae873de61d7bdfccd496af2584930d2b566b4f8d3881f8c043df92224f38cf094cfc09d92655989531524593ec6d6caec1863bdfaa79229b5020acc034cd6deeea1021c50586947b9b8e6faa83b81fbfa6133c0af5d6b07c017f7158fa94f0d206baf12dda6b68f785b773b360fd0497e16cc402d779c8d48d0fa6315536ef0660f3f4e1865f5b38ea49c7da4fd959de4e83ff3ab686f059a45c65ba2af4a6a79166aa0f496bf04d06987b6d2ea205bdb0d347718b9aeff5b61dfff344993a275b79717cd815b6ad4c0beb568c4ac9c36ff1c315ec1119a1993c4b61e6eaa0375e0aaf738ac691abd3263bf937e3";
+		// assert_eq!(onion_packet_3.data, <Vec<u8>>::from_hex(hex).unwrap());
+
+		// let onion_packet_4 = super::encrypt_failure_packet(
+		// 	onion_keys[1].shared_secret.as_ref(),
+		// 	&onion_packet_3.data[..],
+		// );
+		// let hex = "aac3200c4968f56b21f53e5e374e3a2383ad2b1b6501bbcc45abc31e59b26881b7dfadbb56ec8dae8857add94e6702fb4c3a4de22e2e669e1ed926b04447fc73034bb730f4932acd62727b75348a648a1128744657ca6a4e713b9b646c3ca66cac02cdab44dd3439890ef3aaf61708714f7375349b8da541b2548d452d84de7084bb95b3ac2345201d624d31f4d52078aa0fa05a88b4e20202bd2b86ac5b52919ea305a8949de95e935eed0319cf3cf19ebea61d76ba92532497fcdc9411d06bcd4275094d0a4a3c5d3a945e43305a5a9256e333e1f64dbca5fcd4e03a39b9012d197506e06f29339dfee3331995b21615337ae060233d39befea925cc262873e0530408e6990f1cbd233a150ef7b004ff6166c70c68d9f8c853c1abca640b8660db2921";
+		// assert_eq!(onion_packet_4.data, <Vec<u8>>::from_hex(hex).unwrap());
+
+		// let onion_packet_5 = super::encrypt_failure_packet(
+		// 	onion_keys[0].shared_secret.as_ref(),
+		// 	&onion_packet_4.data[..],
+		// );
+		// let hex = "9c5add3963fc7f6ed7f148623c84134b5647e1306419dbe2174e523fa9e2fbed3a06a19f899145610741c83ad40b7712aefaddec8c6baf7325d92ea4ca4d1df8bce517f7e54554608bf2bd8071a4f52a7a2f7ffbb1413edad81eeea5785aa9d990f2865dc23b4bc3c301a94eec4eabebca66be5cf638f693ec256aec514620cc28ee4a94bd9565bc4d4962b9d3641d4278fb319ed2b84de5b665f307a2db0f7fbb757366067d88c50f7e829138fde4f78d39b5b5802f1b92a8a820865af5cc79f9f30bc3f461c66af95d13e5e1f0381c184572a91dee1c849048a647a1158cf884064deddbf1b0b88dfe2f791428d0ba0f6fb2f04e14081f69165ae66d9297c118f0907705c9c4954a199bae0bb96fad763d690e7daa6cfda59ba7f2c8d11448b604d12d";
+		// assert_eq!(onion_packet_5.data, <Vec<u8>>::from_hex(hex).unwrap());
 	}
 }
