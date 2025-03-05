@@ -728,7 +728,7 @@ pub struct UpdateFulfillHTLC {
 /// A [`peer_storage`] message that can be sent to or received from a peer.
 ///
 /// This message is used to distribute backup data to peers.
-/// If data is lost or corrupted, users can retrieve it through [`PeerStorageRetrieval`]  
+/// If data is lost or corrupted, users can retrieve it through [`PeerStorageRetrieval`]
 /// to recover critical information, such as channel states, for fund recovery.
 ///
 /// [`peer_storage`] is used to send our own encrypted backup data to a peer.
@@ -743,7 +743,7 @@ pub struct PeerStorage {
 /// A [`peer_storage_retrieval`] message that can be sent to or received from a peer.
 ///
 /// This message is sent to peers for whom we store backup data.
-/// If we receive this message, it indicates that the peer had stored our backup data.  
+/// If we receive this message, it indicates that the peer had stored our backup data.
 /// This data can be used for fund recovery in case of data loss.
 ///
 /// [`peer_storage_retrieval`] is used to send the most recent backup of the peer.
@@ -764,7 +764,7 @@ pub struct UpdateFailHTLC {
 	pub channel_id: ChannelId,
 	/// The HTLC ID
 	pub htlc_id: u64,
-	pub(crate) reason: OnionErrorPacket,
+	pub(crate) reason: Vec<u8>,
 }
 
 /// An [`update_fail_malformed_htlc`] message to be sent to or received from a peer.
@@ -2300,6 +2300,14 @@ pub(crate) struct OnionErrorPacket {
 	pub(crate) data: Vec<u8>,
 }
 
+impl From<&UpdateFailHTLC> for OnionErrorPacket {
+	fn from(msg: &UpdateFailHTLC) -> Self {
+		OnionErrorPacket {
+			data: msg.reason.clone(),
+		}
+	}
+}
+
 impl fmt::Display for DecodeError {
 	fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
 		match *self {
@@ -2945,13 +2953,6 @@ impl_writeable_msg!(PeerStorage, {
 impl_writeable_msg!(PeerStorageRetrieval, {
 	data
 }, {});
-
-// Note that this is written as a part of ChannelManager objects, and thus cannot change its
-// serialization format in a way which assumes we know the total serialized length/message end
-// position.
-impl_writeable!(OnionErrorPacket, {
-	data
-});
 
 // Note that this is written as a part of ChannelManager objects, and thus cannot change its
 // serialization format in a way which assumes we know the total serialized length/message end
@@ -4698,13 +4699,10 @@ mod tests {
 
 	#[test]
 	fn encoding_update_fail_htlc() {
-		let reason = OnionErrorPacket {
-			data: [1; 32].to_vec(),
-		};
 		let update_fail_htlc = msgs::UpdateFailHTLC {
 			channel_id: ChannelId::from_bytes([2; 32]),
 			htlc_id: 2316138423780173,
-			reason
+			reason: [1; 32].to_vec()
 		};
 		let encoded_value = update_fail_htlc.encode();
 		let target_value = <Vec<u8>>::from_hex("020202020202020202020202020202020202020202020202020202020202020200083a840000034d00200101010101010101010101010101010101010101010101010101010101010101").unwrap();

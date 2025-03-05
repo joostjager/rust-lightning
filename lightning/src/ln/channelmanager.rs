@@ -4427,11 +4427,12 @@ where
 		} else {
 			(err_code, &res.0[..])
 		};
+		let failure = HTLCFailReason::reason(err_code, err_data.to_vec())
+		.get_encrypted_failure_packet(shared_secret, &None);
 		HTLCFailureMsg::Relay(msgs::UpdateFailHTLC {
 			channel_id: msg.channel_id,
 			htlc_id: msg.htlc_id,
-			reason: HTLCFailReason::reason(err_code, err_data.to_vec())
-				.get_encrypted_failure_packet(shared_secret, &None),
+			reason: failure.data.clone(),
 		})
 	}
 
@@ -4455,11 +4456,12 @@ where
 							}
 						))
 					}
+					let failure = HTLCFailReason::reason($err_code, $data.to_vec())
+						.get_encrypted_failure_packet(&shared_secret, &None);
 					return PendingHTLCStatus::Fail(HTLCFailureMsg::Relay(msgs::UpdateFailHTLC {
 						channel_id: msg.channel_id,
 						htlc_id: msg.htlc_id,
-						reason: HTLCFailReason::reason($err_code, $data.to_vec())
-							.get_encrypted_failure_packet(&shared_secret, &None),
+						reason: failure.data,
 					}));
 				}
 			}
@@ -5798,7 +5800,7 @@ where
 				let failure = match htlc_fail {
 					HTLCFailureMsg::Relay(fail_htlc) => HTLCForwardInfo::FailHTLC {
 						htlc_id: fail_htlc.htlc_id,
-						err_packet: fail_htlc.reason,
+						err_packet: (&fail_htlc).into(),
 					},
 					HTLCFailureMsg::Malformed(fail_malformed_htlc) => HTLCForwardInfo::FailMalformedHTLC {
 						htlc_id: fail_malformed_htlc.htlc_id,
@@ -13108,7 +13110,7 @@ impl Writeable for HTLCForwardInfo {
 				FAIL_HTLC_VARIANT_ID.write(w)?;
 				write_tlv_fields!(w, {
 					(0, htlc_id, required),
-					(2, err_packet, required),
+					(2, err_packet.data, required),
 				});
 			},
 			Self::FailMalformedHTLC { htlc_id, failure_code, sha256_of_onion } => {
@@ -13116,11 +13118,10 @@ impl Writeable for HTLCForwardInfo {
 				// packet so older versions have something to fail back with, but serialize the real data as
 				// optional TLVs for the benefit of newer versions.
 				FAIL_HTLC_VARIANT_ID.write(w)?;
-				let dummy_err_packet = msgs::OnionErrorPacket { data: Vec::new() };
 				write_tlv_fields!(w, {
 					(0, htlc_id, required),
 					(1, failure_code, required),
-					(2, dummy_err_packet, required),
+					(2, Vec::<u8>::new(), required),
 					(3, sha256_of_onion, required),
 				});
 			},
@@ -13150,7 +13151,9 @@ impl Readable for HTLCForwardInfo {
 				} else {
 					Self::FailHTLC {
 						htlc_id: _init_tlv_based_struct_field!(htlc_id, required),
-						err_packet: _init_tlv_based_struct_field!(err_packet, required),
+						err_packet: crate::ln::msgs::OnionErrorPacket {
+							data: _init_tlv_based_struct_field!(err_packet, required),
+						},
 					}
 				}
 			},
@@ -14851,7 +14854,7 @@ mod tests {
 	use crate::events::{Event, HTLCDestination, ClosureReason};
 	use crate::ln::types::ChannelId;
 	use crate::types::payment::{PaymentPreimage, PaymentHash, PaymentSecret};
-	use crate::ln::channelmanager::{create_recv_pending_htlc_info, inbound_payment, ChannelConfigOverrides, HTLCForwardInfo, InterceptId, PaymentId, RecipientOnionFields};
+	use crate::ln::channelmanager::{RAACommitmentOrder, create_recv_pending_htlc_info, inbound_payment, ChannelConfigOverrides, HTLCForwardInfo, InterceptId, PaymentId, RecipientOnionFields};
 	use crate::ln::functional_test_utils::*;
 	use crate::ln::msgs::{self, BaseMessageHandler, ChannelMessageHandler, AcceptChannel, ErrorAction, MessageSendEvent};
 	use crate::ln::outbound_payment::Retry;
@@ -15070,8 +15073,8 @@ mod tests {
 		let nodes = create_network(2, &node_cfgs, &node_chanmgrs);
 
 		create_announced_chan_between_nodes(&nodes, 0, 1);
-	
-		// Since we do not send peer storage, we manually simulate receiving a dummy 
+
+		// Since we do not send peer storage, we manually simulate receiving a dummy
 		// `PeerStorage` from the channel partner.
 		nodes[0].node.handle_peer_storage(nodes[1].node.get_our_node_id(), msgs::PeerStorage{data: vec![0; 100]});
 
@@ -16280,7 +16283,7 @@ mod tests {
 		let mut nodes = create_network(1, &node_cfg, &chanmgrs);
 
 		let dummy_failed_htlc = |htlc_id| {
-			HTLCForwardInfo::FailHTLC { htlc_id, err_packet: msgs::OnionErrorPacket { data: vec![42] }, }
+			HTLCForwardInfo::FailHTLC { htlc_id, err_packet: msgs::OnionErrorPacket { data: vec![42] } }
 		};
 		let dummy_malformed_htlc = |htlc_id| {
 			HTLCForwardInfo::FailMalformedHTLC { htlc_id, failure_code: 0x4000, sha256_of_onion: [0; 32] }
