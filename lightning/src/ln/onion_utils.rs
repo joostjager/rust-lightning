@@ -1401,9 +1401,9 @@ impl Readable for HTLCFailReason {
 
 impl_writeable_tlv_based_enum!(HTLCFailReasonRepr,
 	(0, LightningError) => {
-		(0, data, (legacy, Vec<u8>, |us|
+		(0, data, (legacy, &Vec<u8>, |us|
 			if let &HTLCFailReasonRepr::LightningError { err: msgs::OnionErrorPacket { ref data, .. } } = us {
-				Some(data.clone())
+				Some(data)
 			} else {
 				None
 			})
@@ -1415,7 +1415,7 @@ impl_writeable_tlv_based_enum!(HTLCFailReasonRepr,
 				None
 			})
 		),
-		(_unused, err, (static_value, msgs::OnionErrorPacket { data: data.ok_or(DecodeError::InvalidValue)?, attribution_data })),
+		(_unused, err, (static_value, msgs::OnionErrorPacket { data: *data.ok_or(DecodeError::InvalidValue)?, attribution_data })),
 	},
 	(1, Reason) => {
 		(0, failure_code, required),
