@@ -766,8 +766,10 @@ pub struct UpdateFailHTLC {
 	/// The HTLC ID
 	pub htlc_id: u64,
 	pub(crate) reason: Vec<u8>,
-}
 
+	/// Optional field for the attribution data that allows the sender to pinpoint the failing node under all conditions
+	pub attribution_data: Option<[u8; ATTRIBUTION_DATA_LEN]>
+}
 /// An [`update_fail_malformed_htlc`] message to be sent to or received from a peer.
 ///
 /// [`update_fail_malformed_htlc`]: https://github.com/lightning/bolts/blob/master/02-peer-protocol.md#removing-an-htlc-update_fulfill_htlc-update_fail_htlc-and-update_fail_malformed_htlc
@@ -1793,7 +1795,8 @@ pub struct FinalOnionHopData {
 mod fuzzy_internal_msgs {
 	use bitcoin::secp256k1::PublicKey;
 	use crate::blinded_path::payment::{BlindedPaymentPath, PaymentConstraints, PaymentContext, PaymentRelay};
-	use crate::offers::invoice_request::InvoiceRequest;
+	use crate::ln::onion_utils::ATTRIBUTION_DATA_LEN;
+use crate::offers::invoice_request::InvoiceRequest;
 	use crate::types::payment::{PaymentPreimage, PaymentSecret};
 	use crate::types::features::{BlindedHopFeatures, Bolt12InvoiceFeatures};
 	use super::{FinalOnionHopData, TrampolineOnionPacket};
@@ -1930,6 +1933,8 @@ pub use self::fuzzy_internal_msgs::*;
 #[cfg(not(fuzzing))]
 pub(crate) use self::fuzzy_internal_msgs::*;
 
+use super::onion_utils::ATTRIBUTION_DATA_LEN;
+
 /// BOLT 4 onion packet including hop data for the next peer.
 #[derive(Clone, Hash, PartialEq, Eq)]
 pub struct OnionPacket {
@@ -2036,12 +2041,14 @@ pub(crate) struct OnionErrorPacket {
 	// This really should be a constant size slice, but the spec lets these things be up to 128KB?
 	// (TODO) We limit it in decode to much lower...
 	pub(crate) data: Vec<u8>,
+	pub(crate) attribution_data: Option<[u8; ATTRIBUTION_DATA_LEN]>,
 }
 
 impl From<&UpdateFailHTLC> for OnionErrorPacket {
 	fn from(msg: &UpdateFailHTLC) -> Self {
 		OnionErrorPacket {
 			data: msg.reason.clone(),
+			attribution_data: msg.attribution_data,
 		}
 	}
 }
@@ -2382,6 +2389,7 @@ impl_writeable!(DecodedOnionErrorPacket, {
 	pad
 });
 
+
 #[cfg(not(taproot))]
 impl_writeable_msg!(FundingCreated, {
 	temporary_channel_id,
@@ -2664,7 +2672,9 @@ impl_writeable_msg!(UpdateFailHTLC, {
 	channel_id,
 	htlc_id,
 	reason
-}, {});
+}, {
+	(4333, attribution_data, option)
+});
 
 impl_writeable_msg!(UpdateFailMalformedHTLC, {
 	channel_id,
@@ -3435,7 +3445,8 @@ impl_writeable_msg!(GossipTimestampFilter, {
 mod tests {
 	use bitcoin::{Amount, Transaction, TxIn, ScriptBuf, Sequence, Witness, TxOut};
 	use bitcoin::hex::DisplayHex;
-	use crate::ln::types::ChannelId;
+	use crate::ln::onion_utils::ATTRIBUTION_DATA_LEN;
+use crate::ln::types::ChannelId;
 	use crate::types::payment::{PaymentPreimage, PaymentHash, PaymentSecret};
 	use crate::types::features::{ChannelFeatures, ChannelTypeFeatures, InitFeatures, NodeFeatures};
 	use crate::ln::msgs::{self, FinalOnionHopData, OnionErrorPacket, CommonOpenChannelFields, CommonAcceptChannelFields, OutboundTrampolinePayload, TrampolineOnionPacket, InboundOnionForwardPayload, InboundOnionReceivePayload};
@@ -4440,10 +4451,12 @@ mod tests {
 		let update_fail_htlc = msgs::UpdateFailHTLC {
 			channel_id: ChannelId::from_bytes([2; 32]),
 			htlc_id: 2316138423780173,
-			reason: [1; 32].to_vec()
+			reason: [1; 32].to_vec(),
+			attribution_data: Some([3; ATTRIBUTION_DATA_LEN])
 		};
 		let encoded_value = update_fail_htlc.encode();
-		let target_value = <Vec<u8>>::from_hex("020202020202020202020202020202020202020202020202020202020202020200083a840000034d00200101010101010101010101010101010101010101010101010101010101010101").unwrap();
+
+		let target_value = <Vec<u8>>::from_hex("020202020202020202020202020202020202020202020202020202020202020200083a840000034d00200101010101010101010101010101010101010101010101010101010101010101fd10edfd03980303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303").unwrap();
 		assert_eq!(encoded_value, target_value);
 	}
 
