@@ -59,7 +59,7 @@ use crate::routing::gossip::NodeId;
 use crate::routing::router::{BlindedTail, InFlightHtlcs, Path, Payee, PaymentParameters, RouteParameters, RouteParametersConfig, Router, FixedRouter, Route};
 use crate::ln::onion_payment::{check_incoming_htlc_cltv, create_recv_pending_htlc_info, create_fwd_pending_htlc_info, decode_incoming_update_add_htlc_onion, InboundHTLCErr, NextPacketDetails};
 use crate::ln::msgs;
-use crate::ln::onion_utils;
+use crate::ln::onion_utils::{self, ATTRIBUTION_DATA_LEN};
 use crate::ln::onion_utils::{HTLCFailReason, INVALID_ONION_BLINDING};
 use crate::ln::msgs::{BaseMessageHandler, ChannelMessageHandler, CommitmentUpdate, DecodeError, LightningError, MessageSendEvent};
 #[cfg(test)]
@@ -4433,6 +4433,7 @@ where
 			channel_id: msg.channel_id,
 			htlc_id: msg.htlc_id,
 			reason: failure.data.clone(),
+			attribution_data: failure.attribution_data,
 		})
 	}
 
@@ -4458,10 +4459,12 @@ where
 					}
 					let failure = HTLCFailReason::reason($err_code, $data.to_vec())
 						.get_encrypted_failure_packet(&shared_secret, &None);
+
 					return PendingHTLCStatus::Fail(HTLCFailureMsg::Relay(msgs::UpdateFailHTLC {
 						channel_id: msg.channel_id,
 						htlc_id: msg.htlc_id,
 						reason: failure.data,
+						attribution_data: failure.attribution_data,
 					}));
 				}
 			}
@@ -12852,11 +12855,15 @@ impl_writeable_tlv_based!(PendingHTLCInfo, {
 impl Writeable for HTLCFailureMsg {
 	fn write<W: Writer>(&self, writer: &mut W) -> Result<(), io::Error> {
 		match self {
-			HTLCFailureMsg::Relay(msgs::UpdateFailHTLC { channel_id, htlc_id, reason }) => {
+			HTLCFailureMsg::Relay(msgs::UpdateFailHTLC { channel_id, htlc_id, reason, attribution_data }) => {
 				0u8.write(writer)?;
 				channel_id.write(writer)?;
 				htlc_id.write(writer)?;
 				reason.write(writer)?;
+
+				// This code will only ever be hit for legacy data that is re-serialized. It isn't necessary to try
+				// writing out attribution data, because it can never be present.
+				debug_assert!(attribution_data.is_none());
 			},
 			HTLCFailureMsg::Malformed(msgs::UpdateFailMalformedHTLC {
 				channel_id, htlc_id, sha256_of_onion, failure_code
@@ -12881,6 +12888,7 @@ impl Readable for HTLCFailureMsg {
 					channel_id: Readable::read(reader)?,
 					htlc_id: Readable::read(reader)?,
 					reason: Readable::read(reader)?,
+					attribution_data: None,
 				}))
 			},
 			1 => {
@@ -13111,6 +13119,7 @@ impl Writeable for HTLCForwardInfo {
 				write_tlv_fields!(w, {
 					(0, htlc_id, required),
 					(2, err_packet.data, required),
+					(5, err_packet.attribution_data, option),
 				});
 			},
 			Self::FailMalformedHTLC { htlc_id, failure_code, sha256_of_onion } => {
@@ -13141,8 +13150,12 @@ impl Readable for HTLCForwardInfo {
 					(1, malformed_htlc_failure_code, option),
 					(2, err_packet, required),
 					(3, sha256_of_onion, option),
+					(5, attribution_data, option),
 				});
 				if let Some(failure_code) = malformed_htlc_failure_code {
+					if attribution_data.is_some() {
+						return Err(DecodeError::InvalidValue);
+					}
 					Self::FailMalformedHTLC {
 						htlc_id: _init_tlv_based_struct_field!(htlc_id, required),
 						failure_code,
@@ -13153,6 +13166,7 @@ impl Readable for HTLCForwardInfo {
 						htlc_id: _init_tlv_based_struct_field!(htlc_id, required),
 						err_packet: crate::ln::msgs::OnionErrorPacket {
 							data: _init_tlv_based_struct_field!(err_packet, required),
+							attribution_data: _init_tlv_based_struct_field!(attribution_data, option),
 						},
 					}
 				}
@@ -14852,6 +14866,7 @@ mod tests {
 	use bitcoin::secp256k1::{PublicKey, Secp256k1, SecretKey};
 	use core::sync::atomic::Ordering;
 	use crate::events::{Event, HTLCDestination, ClosureReason};
+	use crate::ln::onion_utils::ATTRIBUTION_DATA_LEN;
 	use crate::ln::types::ChannelId;
 	use crate::types::payment::{PaymentPreimage, PaymentHash, PaymentSecret};
 	use crate::ln::channelmanager::{RAACommitmentOrder, create_recv_pending_htlc_info, inbound_payment, ChannelConfigOverrides, HTLCForwardInfo, InterceptId, PaymentId, RecipientOnionFields};
@@ -15323,6 +15338,80 @@ mod tests {
 		let _ = get_htlc_update_msgs!(nodes[1], nodes[0].node.get_our_node_id());
 
 		nodes[1].logger.assert_log_contains("lightning::ln::channelmanager", "Payment preimage didn't match payment hash", 1);
+	}
+
+	#[test]
+	fn test_htlc_localremoved_persistence() {
+		let chanmon_cfgs: Vec<TestChanMonCfg> = create_chanmon_cfgs(2);
+		let node_cfgs = create_node_cfgs(2, &chanmon_cfgs);
+
+		let persister;
+		let chain_monitor;
+		let deserialized_chanmgr;
+
+		// Send a keysend payment that fails because of a preimage mismatch.
+		let node_chanmgrs = create_node_chanmgrs(2, &node_cfgs, &[None, None]);
+		let mut nodes = create_network(2, &node_cfgs, &node_chanmgrs);
+
+		let payer_pubkey = nodes[0].node.get_our_node_id();
+		let payee_pubkey = nodes[1].node.get_our_node_id();
+
+		let _chan = create_chan_between_nodes(&nodes[0], &nodes[1]);
+		let route_params = RouteParameters::from_payment_params_and_value(
+			PaymentParameters::for_keysend(payee_pubkey, 40, false), 10_000);
+		let network_graph = nodes[0].network_graph;
+		let first_hops = nodes[0].node.list_usable_channels();
+		let scorer = test_utils::TestScorer::new();
+		let random_seed_bytes = chanmon_cfgs[1].keys_manager.get_secure_random_bytes();
+		let route = find_route(
+			&payer_pubkey, &route_params, &network_graph, Some(&first_hops.iter().collect::<Vec<_>>()),
+			nodes[0].logger, &scorer, &Default::default(), &random_seed_bytes
+		).unwrap();
+
+		let test_preimage = PaymentPreimage([42; 32]);
+		let mismatch_payment_hash = PaymentHash([43; 32]);
+		let session_privs = nodes[0].node.test_add_new_pending_payment(mismatch_payment_hash,
+			RecipientOnionFields::spontaneous_empty(), PaymentId(mismatch_payment_hash.0), &route).unwrap();
+		nodes[0].node.test_send_payment_internal(&route, mismatch_payment_hash,
+			RecipientOnionFields::spontaneous_empty(), Some(test_preimage), PaymentId(mismatch_payment_hash.0), None, session_privs).unwrap();
+		check_added_monitors!(nodes[0], 1);
+
+		let updates = get_htlc_update_msgs!(nodes[0], nodes[1].node.get_our_node_id());
+		nodes[1].node.handle_update_add_htlc(nodes[0].node.get_our_node_id(), &updates.update_add_htlcs[0]);
+		commitment_signed_dance!(nodes[1], nodes[0], &updates.commitment_signed, false);
+		expect_pending_htlcs_forwardable!(nodes[1]);
+		expect_htlc_handling_failed_destinations!(nodes[1].node.get_and_clear_pending_events(), &[HTLCDestination::FailedPayment { payment_hash: mismatch_payment_hash }]);
+		check_added_monitors(&nodes[1], 1);
+
+		// Save the update_fail_htlc message for later comparison.
+		let msgs = get_htlc_update_msgs!(nodes[1], nodes[0].node.get_our_node_id());
+		let htlc_fail_msg = msgs.update_fail_htlcs[0].clone();
+
+		// Reload node.
+		nodes[0].node.peer_disconnected(nodes[1].node.get_our_node_id());
+		nodes[1].node.peer_disconnected(nodes[0].node.get_our_node_id());
+
+		let monitor_encoded = get_monitor!(nodes[1], _chan.3).encode();
+		reload_node!(nodes[1], nodes[1].node.encode(), &[&monitor_encoded], persister, chain_monitor, deserialized_chanmgr);
+
+		nodes[0].node.peer_connected(nodes[1].node.get_our_node_id(), &msgs::Init {
+			features: nodes[1].node.init_features(), networks: None, remote_network_address: None
+		}, true).unwrap();
+		let reestablish_1 = get_chan_reestablish_msgs!(nodes[0], nodes[1]);
+		assert_eq!(reestablish_1.len(), 1);
+		nodes[1].node.peer_connected(nodes[0].node.get_our_node_id(), &msgs::Init {
+			features: nodes[0].node.init_features(), networks: None, remote_network_address: None
+		}, false).unwrap();
+		let reestablish_2 = get_chan_reestablish_msgs!(nodes[1], nodes[0]);
+		assert_eq!(reestablish_2.len(), 1);
+		nodes[0].node.handle_channel_reestablish(nodes[1].node.get_our_node_id(), &reestablish_2[0]);
+		handle_chan_reestablish_msgs!(nodes[0], nodes[1]);
+		nodes[1].node.handle_channel_reestablish(nodes[0].node.get_our_node_id(), &reestablish_1[0]);
+
+		// Assert that same failure message is resent after reload.
+		let msgs = handle_chan_reestablish_msgs!(nodes[1], nodes[0]);
+		let htlc_fail_msg_after_reload = msgs.2.unwrap().update_fail_htlcs[0].clone();
+		assert_eq!(htlc_fail_msg, htlc_fail_msg_after_reload);
 	}
 
 	#[test]
@@ -16283,7 +16372,7 @@ mod tests {
 		let mut nodes = create_network(1, &node_cfg, &chanmgrs);
 
 		let dummy_failed_htlc = |htlc_id| {
-			HTLCForwardInfo::FailHTLC { htlc_id, err_packet: msgs::OnionErrorPacket { data: vec![42] } }
+			HTLCForwardInfo::FailHTLC { htlc_id, err_packet: msgs::OnionErrorPacket { data: vec![42], attribution_data: Some([0; ATTRIBUTION_DATA_LEN]) } }
 		};
 		let dummy_malformed_htlc = |htlc_id| {
 			HTLCForwardInfo::FailMalformedHTLC { htlc_id, failure_code: 0x4000, sha256_of_onion: [0; 32] }
