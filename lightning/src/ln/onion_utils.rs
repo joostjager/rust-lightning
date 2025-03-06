@@ -1369,7 +1369,7 @@ pub(super) struct HTLCFailReason(HTLCFailReasonRepr);
 #[derive(Clone)] // See Channel::revoke_and_ack for why, tl;dr: Rust bug
 #[cfg_attr(test, derive(PartialEq))]
 enum HTLCFailReasonRepr {
-	LightningError { err: msgs::OnionErrorPacket },
+	LightningError { err: msgs::OnionErrorPacket, hold_time: u32 },
 	Reason { failure_code: u16, data: Vec<u8> },
 }
 
@@ -1400,20 +1400,28 @@ impl Readable for HTLCFailReason {
 impl_writeable_tlv_based_enum!(HTLCFailReasonRepr,
 	(0, LightningError) => {
 		(0, data, (legacy, Vec<u8>, |us|
-			if let &HTLCFailReasonRepr::LightningError { err: msgs::OnionErrorPacket { ref data, .. } } = us {
+			if let &HTLCFailReasonRepr::LightningError { err: msgs::OnionErrorPacket { ref data, .. }, .. } = us {
 				Some(data)
 			} else {
 				None
 			})
 		),
 		(1, attribution_data, (legacy, [u8; ATTRIBUTION_DATA_LEN], |us|
-			if let &HTLCFailReasonRepr::LightningError { err: msgs::OnionErrorPacket { ref attribution_data, .. } } = us {
+			if let &HTLCFailReasonRepr::LightningError { err: msgs::OnionErrorPacket { ref attribution_data, .. }, .. } = us {
 				*attribution_data
 			} else {
 				None
 			})
 		),
+		(2, hold_time, (legacy, u32, |us|
+			if let &HTLCFailReasonRepr::LightningError { err: _, hold_time } = us {
+				Some(hold_time)
+			} else {
+				None
+			})
+		),
 		(_unused, err, (static_value, msgs::OnionErrorPacket { data: data.ok_or(DecodeError::InvalidValue)?, attribution_data })),
+		(_unused, hold_time, (static_value, hold_time)),
 	},
 	(1, Reason) => {
 		(0, failure_code, required),
@@ -1469,12 +1477,13 @@ impl HTLCFailReason {
 		Self::reason(failure_code, Vec::new())
 	}
 
-	pub(super) fn from_msg(msg: &msgs::UpdateFailHTLC) -> Self {
+	pub(super) fn from_msg(msg: &msgs::UpdateFailHTLC, hold_time: u32) -> Self {
 		Self(HTLCFailReasonRepr::LightningError {
 			err: OnionErrorPacket {
 				data: msg.reason.clone(),
 				attribution_data: msg.attribution_data,
 			},
+			hold_time,
 		})
 	}
 
@@ -1514,11 +1523,8 @@ impl HTLCFailReason {
 					packet
 				}
 			},
-			HTLCFailReasonRepr::LightningError { ref err } => {
+			HTLCFailReasonRepr::LightningError { ref err, hold_time } => {
 				let mut err = err.clone();
-
-				// DEBUG: Use bogus hold time that differs per hop.
-				let hold_time: u32 = incoming_packet_shared_secret[0] as u32;
 				let payload: [u8; 4] = hold_time.to_be_bytes();
 
 				process_failure_packet(&mut err, incoming_packet_shared_secret, &payload);
@@ -1536,7 +1542,7 @@ impl HTLCFailReason {
 		L::Target: Logger,
 	{
 		match self.0 {
-			HTLCFailReasonRepr::LightningError { ref err } => {
+			HTLCFailReasonRepr::LightningError { ref err, .. } => {
 				process_onion_failure(secp_ctx, logger, &htlc_source, err.clone())
 			},
 			#[allow(unused)]
