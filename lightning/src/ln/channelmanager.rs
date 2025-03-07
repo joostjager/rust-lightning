@@ -13238,7 +13238,9 @@ where
 		// LDK versions prior to 0.0.115 don't support post-event actions, thus if there's no
 		// actions at all, skip writing the required TLV. Otherwise, pre-0.0.115 versions will
 		// refuse to read the new ChannelManager.
-		let events_not_backwards_compatible = events.iter().any(|(_, action)| action.is_some());
+
+		// Force no event written because read generates new events?
+		let events_not_backwards_compatible = true; // events.iter().any(|(_, action)| action.is_some());
 		if events_not_backwards_compatible {
 			// If we're gonna write a even TLV that will overwrite our events anyway we might as
 			// well save the space and not write any events here.

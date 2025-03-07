@@ -110,6 +110,40 @@ impl Writer for TestVecWriter {
 	}
 }
 
+
+pub struct ComparingTestVecWriter{
+	ref_data: Vec<u8>,
+	cur_idx: usize,
+}
+
+impl ComparingTestVecWriter {
+	pub fn new(ref_data: Vec<u8>) -> ComparingTestVecWriter {
+		ComparingTestVecWriter {
+			ref_data,
+			cur_idx: 0,
+		}
+	}
+}
+
+impl Writer for ComparingTestVecWriter {
+	fn write_all(&mut self, buf: &[u8]) -> Result<(), io::Error> {
+		// Compare buf with ref_data
+		for b in buf.iter() {
+			if self.cur_idx >= self.ref_data.len() {
+				panic!("data too long");
+				// return Err(io::Error::new(io::ErrorKind::InvalidData, "Data too long"));
+			}
+			if *b != self.ref_data[self.cur_idx] {
+				panic!("data not matching");
+				// return Err(io::Error::new(io::ErrorKind::InvalidData, "Data mismatch"));
+			}
+			self.cur_idx += 1;
+		}
+
+		Ok(())
+	}
+}
+
 pub struct TestFeeEstimator {
 	pub sat_per_kw: Mutex<u32>,
 	pub target_override: Mutex<HashMap<ConfirmationTarget, u32>>,

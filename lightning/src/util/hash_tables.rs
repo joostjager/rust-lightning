@@ -6,11 +6,11 @@
 pub use hashbrown::hash_map;
 
 mod hashbrown_tables {
-	#[cfg(feature = "std")]
-	mod hasher {
-		pub use std::collections::hash_map::RandomState;
-	}
-	#[cfg(not(feature = "std"))]
+	// #[cfg(feature = "std")]
+	// mod hasher {
+	// 	pub use std::collections::hash_map::RandomState;
+	// }
+	// #[cfg(not(feature = "std"))]
 	mod hasher {
 		#![allow(deprecated)] // hash::SipHasher was deprecated in favor of something only in std.
 		use core::hash::{BuildHasher, SipHasher};
@@ -28,23 +28,23 @@ mod hashbrown_tables {
 			/// target platform.
 			pub fn new() -> RandomState {
 				let (k0, k1);
-				#[cfg(not(fuzzing))]
-				{
-					let mut keys = [0; 16];
-					possiblyrandom::getpossiblyrandom(&mut keys);
+				// #[cfg(not(fuzzing))]
+				// {
+				// 	let mut keys = [0; 16];
+				// 	possiblyrandom::getpossiblyrandom(&mut keys);
 
-					let mut k0_bytes = [0; 8];
-					let mut k1_bytes = [0; 8];
-					k0_bytes.copy_from_slice(&keys[..8]);
-					k1_bytes.copy_from_slice(&keys[8..]);
-					k0 = u64::from_le_bytes(k0_bytes);
-					k1 = u64::from_le_bytes(k1_bytes);
-				}
-				#[cfg(fuzzing)]
-				{
+				// 	let mut k0_bytes = [0; 8];
+				// 	let mut k1_bytes = [0; 8];
+				// 	k0_bytes.copy_from_slice(&keys[..8]);
+				// 	k1_bytes.copy_from_slice(&keys[8..]);
+				// 	k0 = u64::from_le_bytes(k0_bytes);
+				// 	k1 = u64::from_le_bytes(k1_bytes);
+				// }
+				// #[cfg(fuzzing)]
+				// {
 					k0 = 0;
 					k1 = 0;
-				}
+				// }
 				RandomState { k0, k1 }
 			}
 		}

@@ -36,6 +36,7 @@ use crate::util::test_utils;
 use crate::util::test_utils::{TestChainMonitor, TestScorer, TestKeysInterface};
 use crate::util::ser::{ReadableArgs, Writeable};
 
+use bitcoin::hex::DisplayHex;
 use bitcoin::WPubkeyHash;
 use bitcoin::amount::Amount;
 use bitcoin::block::{Block, Header, Version as BlockVersion};
@@ -714,19 +715,27 @@ impl<'a, 'b, 'c> Drop for Node<'a, 'b, 'c> {
 				let scorer = RwLock::new(test_utils::TestScorer::new());
 				let mut w = test_utils::TestVecWriter(Vec::new());
 				self.node.write(&mut w).unwrap();
-				<(BlockHash, ChannelManager<&test_utils::TestChainMonitor, &test_utils::TestBroadcaster, &test_utils::TestKeysInterface, &test_utils::TestKeysInterface, &test_utils::TestKeysInterface, &test_utils::TestFeeEstimator, &test_utils::TestRouter, &test_utils::TestMessageRouter, &test_utils::TestLogger>)>::read(&mut io::Cursor::new(w.0), ChannelManagerReadArgs {
+
+				let fee_estimator = &test_utils::TestFeeEstimator::new(253);
+				let router = &test_utils::TestRouter::new(Arc::clone(&network_graph), &self.logger, &scorer);
+				let message_router = &test_utils::TestMessageRouter::new(network_graph, self.keys_manager);
+
+				let restored_channel_manager = <(BlockHash, ChannelManager<&test_utils::TestChainMonitor, &test_utils::TestBroadcaster, &test_utils::TestKeysInterface, &test_utils::TestKeysInterface, &test_utils::TestKeysInterface, &test_utils::TestFeeEstimator, &test_utils::TestRouter, &test_utils::TestMessageRouter, &test_utils::TestLogger>)>::read(&mut io::Cursor::new(&w.0), ChannelManagerReadArgs {
 					default_config: *self.node.get_current_default_configuration(),
 					entropy_source: self.keys_manager,
 					node_signer: self.keys_manager,
 					signer_provider: self.keys_manager,
-					fee_estimator: &test_utils::TestFeeEstimator::new(253),
-					router: &test_utils::TestRouter::new(Arc::clone(&network_graph), &self.logger, &scorer),
-					message_router: &test_utils::TestMessageRouter::new(network_graph, self.keys_manager),
+					fee_estimator,
+					router,
+					message_router,
 					chain_monitor: self.chain_monitor,
 					tx_broadcaster: &broadcaster,
 					logger: &self.logger,
 					channel_monitors,
 				}).unwrap();
+
+				let mut restored_w = test_utils::ComparingTestVecWriter::new(w.0);
+				restored_channel_manager.1.write(&mut restored_w).unwrap();
 			}
 
 			let persister = test_utils::TestPersister::new();
