@@ -987,7 +987,8 @@ where
 	.expect("Route we used spontaneously grew invalid keys in the middle of it?");
 
 	// Handle packed channel/node updates for passing back for the route handler
-	for (route_hop_idx, (route_hop_option, shared_secret)) in onion_keys.into_iter().enumerate() {
+	let mut iterator = onion_keys.into_iter().peekable();
+	while let Some((route_hop_option, shared_secret)) = iterator.next() {
 		let route_hop = match route_hop_option.as_ref() {
 			Some(hop) => hop,
 			None => {
@@ -1008,13 +1009,13 @@ where
 		// from the current hop (i.e., the next hop's inbound channel).
 		let num_blinded_hops = path.blinded_tail.as_ref().map_or(0, |bt| bt.hops.len());
 		// For 1-hop blinded paths, the final `path.hops` entry is the recipient.
-		is_from_final_node = route_hop_idx + 1 == path.hops.len() && num_blinded_hops <= 1;
+		is_from_final_node = iterator.peek().is_none() && num_blinded_hops <= 1;
 		let failing_route_hop = if is_from_final_node {
 			route_hop
 		} else {
-			match path.hops.get(route_hop_idx + 1) {
-				Some(hop) => hop,
-				None => {
+			match iterator.peek() {
+				Some((Some(hop), _)) => hop,
+				_ => {
 					// The failing hop is within a multi-hop blinded path.
 					#[cfg(not(test))]
 					{
