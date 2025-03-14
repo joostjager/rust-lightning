@@ -41,6 +41,8 @@ use core::ops::Deref;
 #[allow(unused_imports)]
 use crate::prelude::*;
 
+const DEFAULT_MIN_FAILURE_PACKET_LEN: usize = 256;
+
 pub(crate) struct OnionKeys {
 	#[cfg(test)]
 	pub(crate) shared_secret: SharedSecret,
@@ -889,12 +891,15 @@ fn process_chacha(key: &[u8; 32], packet: &mut [u8]) {
 }
 
 fn build_unencrypted_failure_packet(
-	shared_secret: &[u8], failure_type: u16, failure_data: &[u8],
+	shared_secret: &[u8], failure_type: u16, failure_data: &[u8], min_packet_len: usize,
 ) -> OnionErrorPacket {
 	assert_eq!(shared_secret.len(), 32);
-	assert!(failure_data.len() <= 256 - 2);
 
-	let pad_len = 256 - 2 - failure_data.len();
+	let pad_len = if failure_data.len() > min_packet_len - 2 {
+		0
+	} else {
+		min_packet_len - 2 - failure_data.len()
+	};
 
 	// Failure len is 2 bytes type plus the data.
 	let failure_len = 2 + failure_data.len();
@@ -931,8 +936,12 @@ fn build_unencrypted_failure_packet(
 pub(super) fn build_failure_packet(
 	shared_secret: &[u8], failure_type: u16, failure_data: &[u8],
 ) -> OnionErrorPacket {
-	let mut onion_error_packet =
-		build_unencrypted_failure_packet(shared_secret, failure_type, failure_data);
+	let mut onion_error_packet = build_unencrypted_failure_packet(
+		shared_secret,
+		failure_type,
+		failure_data,
+		DEFAULT_MIN_FAILURE_PACKET_LEN,
+	);
 
 	crypt_failure_packet(shared_secret, &mut onion_error_packet);
 
@@ -2438,6 +2447,7 @@ mod tests {
 			onion_keys[4].shared_secret.as_ref(),
 			0x2002,
 			&[0; 0],
+			DEFAULT_MIN_FAILURE_PACKET_LEN,
 		);
 		let hex = "4c2fc8bc08510334b6833ad9c3e79cd1b52ae59dfe5c2a4b23ead50f09f7ee0b0002200200fe0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000";
 		assert_eq!(onion_error.data, <Vec<u8>>::from_hex(hex).unwrap());
@@ -2614,6 +2624,7 @@ mod tests {
 					outer_onion_keys[0].shared_secret.as_ref(),
 					error_code,
 					&[0; 0],
+					DEFAULT_MIN_FAILURE_PACKET_LEN,
 				);
 
 				crypt_failure_packet(
@@ -2633,6 +2644,7 @@ mod tests {
 					outer_onion_keys[1].shared_secret.as_ref(),
 					error_code,
 					&[0; 0],
+					DEFAULT_MIN_FAILURE_PACKET_LEN,
 				);
 
 				crypt_failure_packet(
@@ -2661,6 +2673,7 @@ mod tests {
 					trampoline_onion_keys[0].shared_secret.as_ref(),
 					error_code,
 					&[0; 0],
+					DEFAULT_MIN_FAILURE_PACKET_LEN,
 				);
 
 				crypt_failure_packet(
@@ -2694,6 +2707,7 @@ mod tests {
 					trampoline_onion_keys[1].shared_secret.as_ref(),
 					error_code,
 					&[0; 0],
+					DEFAULT_MIN_FAILURE_PACKET_LEN,
 				);
 
 				crypt_failure_packet(
