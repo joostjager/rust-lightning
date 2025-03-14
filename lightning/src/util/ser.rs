@@ -728,6 +728,10 @@ impl_array!(1300, u8); // for OnionPacket.hop_data
 impl_array!(8, u16);
 impl_array!(32, u16);
 
+// Implement array serialization for attribution_data. The field consists of 20 x 4 bytes hold times plus 210 x 4 bytes
+// HMACs.
+impl_array!(920, u8);
+
 /// A type for variable-length values within TLV record where the length is encoded as part of the record.
 /// Used to prevent encoding the length twice.
 ///
@@ -1077,6 +1081,7 @@ impl_for_vec!((A, B), A, B);
 impl_writeable_for_vec!(&crate::routing::router::BlindedTail);
 impl_readable_for_vec!(crate::routing::router::BlindedTail);
 impl_for_vec!(crate::routing::router::TrampolineHop);
+impl_for_vec!(Option<[u8; 920]>);
 impl_for_vec_with_element_length_prefix!(crate::ln::msgs::UpdateAddHTLC);
 impl_writeable_for_vec_with_element_length_prefix!(&crate::ln::msgs::UpdateAddHTLC);
 
