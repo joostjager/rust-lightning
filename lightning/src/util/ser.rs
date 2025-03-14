@@ -15,6 +15,7 @@
 
 use crate::io::{self, BufRead, Read, Write};
 use crate::io_extras::{copy, sink};
+use crate::ln::onion_utils::{TruncatedHmac, HMAC_COUNT, HMAC_LEN, MAX_HOPS};
 use crate::prelude::*;
 use crate::sync::{Mutex, RwLock};
 use core::cmp;
@@ -727,6 +728,30 @@ impl_array!(1300, u8); // for OnionPacket.hop_data
 
 impl_array!(8, u16);
 impl_array!(32, u16);
+
+// Implement array serialization for attribution_data.
+impl_array!(MAX_HOPS, u32);
+
+impl Writeable for [TruncatedHmac; HMAC_COUNT] {
+	fn write<W: Writer>(&self, w: &mut W) -> Result<(), io::Error> {
+		for v in self.iter() {
+			v.write(w)?;
+		}
+
+		Ok(())
+	}
+}
+
+impl Readable for [TruncatedHmac; HMAC_COUNT] {
+	fn read<R: Read>(r: &mut R) -> Result<Self, DecodeError> {
+		let mut res = [[0; HMAC_LEN]; HMAC_COUNT];
+		for v in res.iter_mut() {
+			r.read_exact(v)?;
+		}
+
+		Ok(res)
+	}
+}
 
 /// A type for variable-length values within TLV record where the length is encoded as part of the record.
 /// Used to prevent encoding the length twice.
