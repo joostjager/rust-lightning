@@ -15,7 +15,10 @@ use crate::io;
 use crate::ln::msgs::DecodeError;
 use crate::ln::types::ChannelId;
 use crate::prelude::*;
-use crate::sign::{ChangeDestinationSource, OutputSpender, SpendableOutputDescriptor};
+use crate::sign::{
+	ChangeDestinationSource, ChangeDestinationSourceSync, ChangeDestinationSourceSyncWrapper,
+	OutputSpender, SpendableOutputDescriptor,
+};
 use crate::sync::Mutex;
 use crate::util::logger::Logger;
 use crate::util::persist::{
@@ -28,9 +31,14 @@ use crate::{impl_writeable_tlv_based, log_debug, log_error};
 use bitcoin::block::Header;
 use bitcoin::locktime::absolute::LockTime;
 use bitcoin::secp256k1::Secp256k1;
-use bitcoin::{BlockHash, Transaction, Txid};
+use bitcoin::{BlockHash, ScriptBuf, Transaction, Txid};
 
+use crate::sync::Arc;
+use core::future::Future;
 use core::ops::Deref;
+use core::task;
+
+use super::async_poll::dummy_waker;
 
 /// The number of blocks we wait before we prune the tracked spendable outputs.
 pub const PRUNE_DELAY_BLOCKS: u32 = ARCHIVAL_DELAY_BLOCKS + ANTI_REORG_DELAY;
@@ -372,8 +380,10 @@ where
 		output_spender: O, change_destination_source: D, kv_store: K, logger: L,
 	) -> Self {
 		let outputs = Vec::new();
-		let sweeper_state =
-			Mutex::new(RuntimeSweeperState { persistent: SweeperState { outputs, best_block } });
+		let sweeper_state = Mutex::new(RuntimeSweeperState {
+			persistent: SweeperState { outputs, best_block },
+			sweep_pending: false,
+		});
 		Self {
 			sweeper_state,
 			broadcaster,
@@ -451,7 +461,7 @@ where
 	}
 
 	/// Regenerates and broadcasts the spending transaction for any outputs that are pending
-	pub fn regenerate_and_broadcast_spend_if_necessary(&self) -> Result<(), ()> {
+	pub async fn regenerate_and_broadcast_spend_if_necessary(&self) -> Result<(), ()> {
 		let filter_fn = |o: &TrackedSpendableOutput, cur_height: u32| {
 			if o.status.is_confirmed() {
 				// Don't rebroadcast confirmed txs.
@@ -471,56 +481,94 @@ where
 			true
 		};
 
-		let sweeper_state = &mut self.sweeper_state.lock().unwrap().persistent;
+		// See if there is anything to sweep before requesting a change address.
+		{
+			let mut sweeper_state = self.sweeper_state.lock().unwrap();
 
-		let cur_height = sweeper_state.best_block.height;
-		let cur_hash = sweeper_state.best_block.block_hash;
-
-		let respend_descriptors: Vec<&SpendableOutputDescriptor> = sweeper_state
-			.outputs
-			.iter()
-			.filter(|o| filter_fn(*o, cur_height))
-			.map(|o| &o.descriptor)
-			.collect();
-
-		if respend_descriptors.is_empty() {
-			// Nothing to do.
-			return Ok(());
-		}
-
-		let spending_tx = match self.spend_outputs(&*sweeper_state, respend_descriptors) {
-			Ok(spending_tx) => {
-				log_debug!(
-					self.logger,
-					"Generating and broadcasting sweeping transaction {}",
-					spending_tx.compute_txid()
-				);
-				spending_tx
-			},
-			Err(e) => {
-				log_error!(self.logger, "Error spending outputs: {:?}", e);
+			// Prevent concurrent sweeping.
+			if sweeper_state.sweep_pending {
 				return Ok(());
-			},
-		};
-
-		// As we didn't modify the state so far, the same filter_fn yields the same elements as
-		// above.
-		let respend_outputs =
-			sweeper_state.outputs.iter_mut().filter(|o| filter_fn(&**o, cur_height));
-		for output_info in respend_outputs {
-			if let Some(filter) = self.chain_data_source.as_ref() {
-				let watched_output = output_info.to_watched_output(cur_hash);
-				filter.register_output(watched_output);
 			}
 
-			output_info.status.broadcast(cur_hash, cur_height, spending_tx.clone());
+			let cur_height = sweeper_state.persistent.best_block.height;
+			let has_respends =
+				sweeper_state.persistent.outputs.iter().any(|o| filter_fn(o, cur_height));
+			if !has_respends {
+				return Ok(());
+			}
+
+			// There is something to sweep. Block concurrent sweeps.
+			sweeper_state.sweep_pending = true;
 		}
 
-		self.persist_state(&*sweeper_state).map_err(|e| {
-			log_error!(self.logger, "Error persisting OutputSweeper: {:?}", e);
-		})?;
+		// Request a new change address outside of the mutex to avoid the mutex crossing await.
+		let change_destination_script_result =
+			self.change_destination_source.get_change_destination_script().await;
 
-		self.broadcaster.broadcast_transactions(&[&spending_tx]);
+		// Sweep the outputs.
+		{
+			let mut runtime_sweeper_state = self.sweeper_state.lock().unwrap();
+
+			// Always allow a new sweep after this spend, also in the error case.
+			runtime_sweeper_state.sweep_pending = false;
+
+			let sweeper_state = &mut runtime_sweeper_state.persistent;
+
+			let change_destination_script = change_destination_script_result?;
+
+			let cur_height = sweeper_state.best_block.height;
+			let cur_hash = sweeper_state.best_block.block_hash;
+
+			let respend_descriptors: Vec<&SpendableOutputDescriptor> = sweeper_state
+				.outputs
+				.iter()
+				.filter(|o| filter_fn(*o, cur_height))
+				.map(|o| &o.descriptor)
+				.collect();
+
+			if respend_descriptors.is_empty() {
+				// It could be that a tx confirmed and there is now nothing to sweep anymore.
+				return Ok(());
+			}
+
+			let spending_tx = match self.spend_outputs(
+				sweeper_state,
+				&respend_descriptors,
+				change_destination_script,
+			) {
+				Ok(spending_tx) => {
+					log_debug!(
+						self.logger,
+						"Generating and broadcasting sweeping transaction {}",
+						spending_tx.compute_txid()
+					);
+					spending_tx
+				},
+				Err(e) => {
+					log_error!(self.logger, "Error spending outputs: {:?}", e);
+					return Ok(());
+				},
+			};
+
+			// As we didn't modify the state so far, the same filter_fn yields the same elements as
+			// above.
+			let respend_outputs =
+				sweeper_state.outputs.iter_mut().filter(|o| filter_fn(&**o, cur_height));
+			for output_info in respend_outputs {
+				if let Some(filter) = self.chain_data_source.as_ref() {
+					let watched_output = output_info.to_watched_output(cur_hash);
+					filter.register_output(watched_output);
+				}
+
+				output_info.status.broadcast(cur_hash, cur_height, spending_tx.clone());
+			}
+
+			self.persist_state(&sweeper_state).map_err(|e| {
+				log_error!(self.logger, "Error persisting OutputSweeper: {:?}", e);
+			})?;
+
+			self.broadcaster.broadcast_transactions(&[&spending_tx]);
+		}
 
 		Ok(())
 	}
@@ -567,16 +615,15 @@ where
 	}
 
 	fn spend_outputs(
-		&self, sweeper_state: &SweeperState, descriptors: Vec<&SpendableOutputDescriptor>,
+		&self, sweeper_state: &SweeperState, descriptors: &Vec<&SpendableOutputDescriptor>,
+		change_destination_script: ScriptBuf,
 	) -> Result<Transaction, ()> {
 		let tx_feerate =
 			self.fee_estimator.get_est_sat_per_1000_weight(ConfirmationTarget::OutputSpendingFee);
-		let change_destination_script =
-			self.change_destination_source.get_change_destination_script()?;
 		let cur_height = sweeper_state.best_block.height;
 		let locktime = Some(LockTime::from_height(cur_height).unwrap_or(LockTime::ZERO));
 		self.output_spender.spend_spendable_outputs(
-			&descriptors,
+			descriptors,
 			Vec::new(),
 			change_destination_script,
 			tx_feerate,
@@ -737,6 +784,7 @@ where
 
 struct RuntimeSweeperState {
 	persistent: SweeperState,
+	sweep_pending: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -801,7 +849,8 @@ where
 			}
 		}
 
-		let sweeper_state = Mutex::new(RuntimeSweeperState { persistent: state });
+		let sweeper_state =
+			Mutex::new(RuntimeSweeperState { persistent: state, sweep_pending: false });
 		Ok(Self {
 			sweeper_state,
 			broadcaster,
@@ -849,7 +898,8 @@ where
 			}
 		}
 
-		let sweeper_state = Mutex::new(RuntimeSweeperState { persistent: state });
+		let sweeper_state =
+			Mutex::new(RuntimeSweeperState { persistent: state, sweep_pending: false });
 		Ok((
 			best_block,
 			OutputSweeper {
@@ -863,5 +913,123 @@ where
 				logger,
 			},
 		))
+	}
+}
+
+/// A synchronous wrapper around [`OutputSweeper`] to be used in contexts where async is not available.
+pub struct OutputSweeperSync<B: Deref, D: Deref, E: Deref, F: Deref, K: Deref, L: Deref, O: Deref>
+where
+	B::Target: BroadcasterInterface,
+	D::Target: ChangeDestinationSourceSync,
+	E::Target: FeeEstimator,
+	F::Target: Filter + Sync + Send,
+	K::Target: KVStore,
+	L::Target: Logger,
+	O::Target: OutputSpender,
+{
+	sweeper: Arc<OutputSweeper<B, Arc<ChangeDestinationSourceSyncWrapper<D>>, E, F, K, L, O>>,
+}
+
+impl<B: Deref, D: Deref, E: Deref, F: Deref, K: Deref, L: Deref, O: Deref>
+	OutputSweeperSync<B, D, E, F, K, L, O>
+where
+	B::Target: BroadcasterInterface,
+	D::Target: ChangeDestinationSourceSync,
+	E::Target: FeeEstimator,
+	F::Target: Filter + Sync + Send,
+	K::Target: KVStore,
+	L::Target: Logger,
+	O::Target: OutputSpender,
+{
+	/// Constructs a new [`OutputSweeperSync`] instance.
+	pub fn new(
+		best_block: BestBlock, broadcaster: B, fee_estimator: E, chain_data_source: Option<F>,
+		output_spender: O, change_destination_source: D, kv_store: K, logger: L,
+	) -> Self {
+		let change_destination_source =
+			Arc::new(ChangeDestinationSourceSyncWrapper::new(change_destination_source));
+
+		let sweeper = OutputSweeper::new(
+			best_block,
+			broadcaster,
+			fee_estimator,
+			chain_data_source,
+			output_spender,
+			change_destination_source,
+			kv_store,
+			logger,
+		);
+		Self { sweeper: Arc::new(sweeper) }
+	}
+
+	/// Regenerates and broadcasts the spending transaction for any outputs that are pending. Wraps
+	/// [`OutputSweeper::regenerate_and_broadcast_spend_if_necessary`].
+	pub fn regenerate_and_broadcast_spend_if_necessary(&self) -> Result<(), ()> {
+		let mut fut = Box::pin(self.sweeper.regenerate_and_broadcast_spend_if_necessary());
+		let mut waker = dummy_waker();
+		let mut ctx = task::Context::from_waker(&mut waker);
+		match fut.as_mut().poll(&mut ctx) {
+			task::Poll::Ready(result) => result,
+			task::Poll::Pending => {
+				// In a sync context, we can't wait for the future to complete.
+				unreachable!("OutputSweeper::regenerate_and_broadcast_spend_if_necessary should not be pending in a sync context");
+			},
+		}
+	}
+
+	/// Tells the sweeper to track the given outputs descriptors. Wraps [`OutputSweeper::track_spendable_outputs`].
+	pub fn track_spendable_outputs(
+		&self, output_descriptors: Vec<SpendableOutputDescriptor>, channel_id: Option<ChannelId>,
+		exclude_static_outputs: bool, delay_until_height: Option<u32>,
+	) -> Result<(), ()> {
+		self.sweeper.track_spendable_outputs(
+			output_descriptors,
+			channel_id,
+			exclude_static_outputs,
+			delay_until_height,
+		)
+	}
+
+	/// Returns a list of the currently tracked spendable outputs. Wraps [`OutputSweeper::tracked_spendable_outputs`].
+	pub fn tracked_spendable_outputs(&self) -> Vec<TrackedSpendableOutput> {
+		self.sweeper.tracked_spendable_outputs()
+	}
+
+	/// Returns the inner async sweeper for testing purposes.
+	#[cfg(any(test, feature = "_test_utils"))]
+	pub fn sweeper_async(
+		&self,
+	) -> Arc<OutputSweeper<B, Arc<ChangeDestinationSourceSyncWrapper<D>>, E, F, K, L, O>> {
+		self.sweeper.clone()
+	}
+}
+
+impl<B: Deref, D: Deref, E: Deref, F: Deref, K: Deref, L: Deref, O: Deref> Confirm
+	for OutputSweeperSync<B, D, E, F, K, L, O>
+where
+	B::Target: BroadcasterInterface,
+	D::Target: ChangeDestinationSourceSync,
+	E::Target: FeeEstimator,
+	F::Target: Filter + Sync + Send,
+	K::Target: KVStore,
+	L::Target: Logger,
+	O::Target: OutputSpender,
+{
+	fn transactions_confirmed(
+		&self, header: &Header, txdata: &chain::transaction::TransactionData, height: u32,
+	) {
+		self.sweeper.transactions_confirmed(header, txdata, height)
+	}
+
+	fn transaction_unconfirmed(&self, txid: &Txid) {
+		self.sweeper.transaction_unconfirmed(txid)
+	}
+
+	fn best_block_updated(&self, header: &Header, height: u32) {
+		self.sweeper.best_block_updated(header, height);
+	}
+
+	fn get_relevant_txids(&self) -> Vec<(Txid, u32, Option<BlockHash>)> {
+		self.sweeper.get_relevant_txids()
 	}
 }
