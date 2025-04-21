@@ -342,7 +342,7 @@ where
 	L::Target: Logger,
 	O::Target: OutputSpender,
 {
-	sweeper_state: Mutex<SweeperState>,
+	sweeper_state: Mutex<RuntimeSweeperState>,
 	broadcaster: B,
 	fee_estimator: E,
 	chain_data_source: Option<F>,
@@ -372,7 +372,8 @@ where
 		output_spender: O, change_destination_source: D, kv_store: K, logger: L,
 	) -> Self {
 		let outputs = Vec::new();
-		let sweeper_state = Mutex::new(SweeperState { outputs, best_block });
+		let sweeper_state =
+			Mutex::new(RuntimeSweeperState { persistent: SweeperState { outputs, best_block } });
 		Self {
 			sweeper_state,
 			broadcaster,
@@ -416,7 +417,7 @@ where
 			return Ok(());
 		}
 
-		let mut state_lock = self.sweeper_state.lock().unwrap();
+		let state_lock = &mut self.sweeper_state.lock().unwrap().persistent;
 		for descriptor in relevant_descriptors {
 			let output_info = TrackedSpendableOutput {
 				descriptor,
@@ -433,25 +434,25 @@ where
 
 			state_lock.outputs.push(output_info);
 		}
-		self.persist_state(&*state_lock).map_err(|e| {
+		self.persist_state(&state_lock).map_err(|e| {
 			log_error!(self.logger, "Error persisting OutputSweeper: {:?}", e);
 		})
 	}
 
 	/// Returns a list of the currently tracked spendable outputs.
 	pub fn tracked_spendable_outputs(&self) -> Vec<TrackedSpendableOutput> {
-		self.sweeper_state.lock().unwrap().outputs.clone()
+		self.sweeper_state.lock().unwrap().persistent.outputs.clone()
 	}
 
 	/// Gets the latest best block which was connected either via the [`Listen`] or
 	/// [`Confirm`] interfaces.
 	pub fn current_best_block(&self) -> BestBlock {
-		self.sweeper_state.lock().unwrap().best_block
+		self.sweeper_state.lock().unwrap().persistent.best_block
 	}
 
 	/// Regenerates and broadcasts the spending transaction for any outputs that are pending
 	pub fn regenerate_and_broadcast_spend_if_necessary(&self) -> Result<(), ()> {
-		let mut sweeper_state = self.sweeper_state.lock().unwrap();
+		let sweeper_state = &mut self.sweeper_state.lock().unwrap().persistent;
 
 		let cur_height = sweeper_state.best_block.height;
 		let cur_hash = sweeper_state.best_block.block_hash;
@@ -614,22 +615,22 @@ where
 	fn filtered_block_connected(
 		&self, header: &Header, txdata: &chain::transaction::TransactionData, height: u32,
 	) {
-		let mut state_lock = self.sweeper_state.lock().unwrap();
+		let state_lock = &mut self.sweeper_state.lock().unwrap().persistent;
 		assert_eq!(state_lock.best_block.block_hash, header.prev_blockhash,
 			"Blocks must be connected in chain-order - the connected header must build on the last connected header");
 		assert_eq!(state_lock.best_block.height, height - 1,
 			"Blocks must be connected in chain-order - the connected block height must be one greater than the previous height");
 
-		self.transactions_confirmed_internal(&mut *state_lock, header, txdata, height);
-		self.best_block_updated_internal(&mut *state_lock, header, height);
+		self.transactions_confirmed_internal(state_lock, header, txdata, height);
+		self.best_block_updated_internal(state_lock, header, height);
 
-		let _ = self.persist_state(&*state_lock).map_err(|e| {
+		let _ = self.persist_state(&state_lock).map_err(|e| {
 			log_error!(self.logger, "Error persisting OutputSweeper: {:?}", e);
 		});
 	}
 
 	fn block_disconnected(&self, header: &Header, height: u32) {
-		let mut state_lock = self.sweeper_state.lock().unwrap();
+		let state_lock = &mut self.sweeper_state.lock().unwrap().persistent;
 
 		let new_height = height - 1;
 		let block_hash = header.block_hash();
@@ -667,15 +668,15 @@ where
 	fn transactions_confirmed(
 		&self, header: &Header, txdata: &chain::transaction::TransactionData, height: u32,
 	) {
-		let mut state_lock = self.sweeper_state.lock().unwrap();
-		self.transactions_confirmed_internal(&mut *state_lock, header, txdata, height);
-		self.persist_state(&*state_lock).unwrap_or_else(|e| {
+		let state_lock = &mut self.sweeper_state.lock().unwrap().persistent;
+		self.transactions_confirmed_internal(state_lock, header, txdata, height);
+		self.persist_state(state_lock).unwrap_or_else(|e| {
 			log_error!(self.logger, "Error persisting OutputSweeper: {:?}", e);
 		});
 	}
 
 	fn transaction_unconfirmed(&self, txid: &Txid) {
-		let mut state_lock = self.sweeper_state.lock().unwrap();
+		let state_lock = &mut self.sweeper_state.lock().unwrap().persistent;
 
 		// Get what height was unconfirmed.
 		let unconf_height = state_lock
@@ -692,22 +693,22 @@ where
 				.filter(|o| o.status.confirmation_height() >= Some(unconf_height))
 				.for_each(|o| o.status.unconfirmed());
 
-			self.persist_state(&*state_lock).unwrap_or_else(|e| {
+			self.persist_state(state_lock).unwrap_or_else(|e| {
 				log_error!(self.logger, "Error persisting OutputSweeper: {:?}", e);
 			});
 		}
 	}
 
 	fn best_block_updated(&self, header: &Header, height: u32) {
-		let mut state_lock = self.sweeper_state.lock().unwrap();
-		self.best_block_updated_internal(&mut *state_lock, header, height);
-		let _ = self.persist_state(&*state_lock).map_err(|e| {
+		let state_lock = &mut self.sweeper_state.lock().unwrap().persistent;
+		self.best_block_updated_internal(state_lock, header, height);
+		let _ = self.persist_state(state_lock).map_err(|e| {
 			log_error!(self.logger, "Error persisting OutputSweeper: {:?}", e);
 		});
 	}
 
 	fn get_relevant_txids(&self) -> Vec<(Txid, u32, Option<BlockHash>)> {
-		let state_lock = self.sweeper_state.lock().unwrap();
+		let state_lock = &self.sweeper_state.lock().unwrap().persistent;
 		state_lock
 			.outputs
 			.iter()
@@ -726,6 +727,10 @@ where
 			})
 			.collect::<Vec<_>>()
 	}
+}
+
+struct RuntimeSweeperState {
+	persistent: SweeperState,
 }
 
 #[derive(Debug, Clone)]
@@ -790,7 +795,7 @@ where
 			}
 		}
 
-		let sweeper_state = Mutex::new(state);
+		let sweeper_state = Mutex::new(RuntimeSweeperState { persistent: state });
 		Ok(Self {
 			sweeper_state,
 			broadcaster,
@@ -838,7 +843,7 @@ where
 			}
 		}
 
-		let sweeper_state = Mutex::new(state);
+		let sweeper_state = Mutex::new(RuntimeSweeperState { persistent: state });
 		Ok((
 			best_block,
 			OutputSweeper {
