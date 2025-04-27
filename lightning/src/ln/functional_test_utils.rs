@@ -20,6 +20,7 @@ use crate::events::{
 	ClaimedHTLC, ClosureReason, Event, HTLCHandlingFailureType, PaidBolt12Invoice, PathFailure,
 	PaymentFailureReason, PaymentPurpose,
 };
+use crate::ln::chan_utils::{commitment_tx_base_weight, COMMITMENT_TX_WEIGHT_PER_HTLC};
 use crate::ln::channelmanager::{
 	AChannelManager, ChainParameters, ChannelManager, ChannelManagerReadArgs, PaymentId,
 	RAACommitmentOrder, RecipientOnionFields, MIN_CLTV_EXPIRY_DELTA,
@@ -36,6 +37,7 @@ use crate::onion_message::messenger::OnionMessenger;
 use crate::routing::gossip::{NetworkGraph, NetworkUpdate, P2PGossipSync};
 use crate::routing::router::{self, PaymentParameters, Route, RouteParameters};
 use crate::sign::{EntropySource, RandomBytes};
+use crate::types::features::ChannelTypeFeatures;
 use crate::types::features::InitFeatures;
 use crate::types::payment::{PaymentHash, PaymentPreimage, PaymentSecret};
 use crate::util::config::{MaxDustHTLCExposure, UserConfig};
@@ -1196,6 +1198,14 @@ macro_rules! unwrap_send_err {
 			_ => panic!(),
 		}
 	};
+}
+
+pub fn commit_tx_fee_msat(
+	feerate: u32, num_htlcs: u64, channel_type_features: &ChannelTypeFeatures,
+) -> u64 {
+	(commitment_tx_base_weight(channel_type_features) + num_htlcs * COMMITMENT_TX_WEIGHT_PER_HTLC)
+		* feerate as u64
+		/ 1000 * 1000
 }
 
 /// Check whether N channel monitor(s) have been added.
