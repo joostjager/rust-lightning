@@ -113,5 +113,8 @@ mod shutdown_tests;
 #[cfg(all(test, splicing))]
 #[allow(unused_mut)]
 mod splicing_tests;
+#[cfg(any(test, feature = "_externalize_tests"))]
+#[allow(unused_mut)]
+pub mod update_fee_tests;
 
 pub use self::peer_channel_encryptor::LN_MAX_MSG_LEN;
