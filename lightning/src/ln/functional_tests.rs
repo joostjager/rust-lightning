@@ -30,11 +30,9 @@ use crate::ln::chan_utils::{
 	COMMITMENT_TX_WEIGHT_PER_HTLC, OFFERED_HTLC_SCRIPT_WEIGHT,
 };
 use crate::ln::channel::{
-	get_holder_selected_channel_reserve_satoshis, Channel, InboundV1Channel, OutboundV1Channel,
-	COINBASE_MATURITY,
-};
-use crate::ln::channel::{
-	ChannelError, DISCONNECT_PEER_AWAITING_RESPONSE_TICKS, MIN_CHAN_DUST_LIMIT_SATOSHIS,
+	get_holder_selected_channel_reserve_satoshis, Channel, ChannelError, InboundV1Channel,
+	OutboundV1Channel, COINBASE_MATURITY, DISCONNECT_PEER_AWAITING_RESPONSE_TICKS,
+	MIN_CHAN_DUST_LIMIT_SATOSHIS,
 };
 use crate::ln::channelmanager::{
 	self, PaymentId, RAACommitmentOrder, RecipientOnionFields, BREAKDOWN_TIMEOUT,
