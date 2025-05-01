@@ -1845,7 +1845,7 @@ fn abandoned_send_payment_idempotent() {
 			match send_result {
 				Err(RetryableSendFailure::DuplicatePayment) => {},
 				_ => panic!("Unexpected send result: {:?}", send_result),
-			}
+			};
 
 			// Further, if we try to send a spontaneous payment with the same payment_id it should
 			// also be rejected.
