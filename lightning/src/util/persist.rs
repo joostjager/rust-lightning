@@ -32,6 +32,8 @@ use crate::sign::{ecdsa::EcdsaChannelSigner, EntropySource, SignerProvider};
 use crate::util::logger::Logger;
 use crate::util::ser::{Readable, ReadableArgs, Writeable};
 
+use super::async_poll::AsyncResult;
+
 /// The alphabet of characters allowed for namespaces and keys.
 pub const KVSTORE_NAMESPACE_KEY_ALPHABET: &str =
 	"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-";
@@ -137,6 +139,10 @@ pub trait KVStore {
 	fn write(
 		&self, primary_namespace: &str, secondary_namespace: &str, key: &str, buf: &[u8],
 	) -> Result<(), io::Error>;
+
+	fn write_async<'a>(
+		&'a self, primary_namespace: &str, secondary_namespace: &str, key: &str, buf: &[u8],
+	) -> AsyncResult<'a, ()>;
 	/// Removes any data that had previously been persisted under the given `key`.
 	///
 	/// If the `lazy` flag is set to `true`, the backend implementation might choose to lazily
@@ -254,24 +260,26 @@ where
 	}
 }
 
-impl<ChannelSigner: EcdsaChannelSigner, K: KVStore + ?Sized> Persist<ChannelSigner> for K {
+impl<ChannelSigner: EcdsaChannelSigner + Send, K: KVStore + ?Sized + Sync>
+	Persist<ChannelSigner> for K
+{
 	// TODO: We really need a way for the persister to inform the user that its time to crash/shut
 	// down once these start returning failure.
 	// Then we should return InProgress rather than UnrecoverableError, implying we should probably
 	// just shut down the node since we're not retrying persistence!
 
-	fn persist_new_channel(
-		&self, monitor_name: MonitorName, monitor: &ChannelMonitor<ChannelSigner>,
-	) -> chain::ChannelMonitorUpdateStatus {
-		match self.write(
-			CHANNEL_MONITOR_PERSISTENCE_PRIMARY_NAMESPACE,
-			CHANNEL_MONITOR_PERSISTENCE_SECONDARY_NAMESPACE,
-			&monitor_name.to_string(),
-			&monitor.encode(),
-		) {
-			Ok(()) => chain::ChannelMonitorUpdateStatus::Completed,
-			Err(_) => chain::ChannelMonitorUpdateStatus::UnrecoverableError,
-		}
+	fn persist_new_channel<'a>(
+		&'a self, monitor_name: MonitorName, monitor: &'a ChannelMonitor<ChannelSigner>,
+	) -> AsyncResult<'a, ()> {
+		Box::pin(async move {
+			self.write_async(
+				CHANNEL_MONITOR_PERSISTENCE_PRIMARY_NAMESPACE,
+				CHANNEL_MONITOR_PERSISTENCE_SECONDARY_NAMESPACE,
+				&monitor_name.to_string(),
+				&monitor.encode(),
+			)
+			.await
+		})
 	}
 
 	fn update_persisted_channel(

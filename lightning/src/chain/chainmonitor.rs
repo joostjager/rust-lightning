@@ -121,7 +121,7 @@ pub trait Persist<ChannelSigner: EcdsaChannelSigner> {
 	///
 	/// [`ChannelManager`]: crate::ln::channelmanager::ChannelManager
 	/// [`Writeable::write`]: crate::util::ser::Writeable::write
-	fn persist_new_channel<'a>(&'a self, monitor_name: MonitorName, monitor: &ChannelMonitor<ChannelSigner>) -> AsyncResult<'a, ()>;
+	fn persist_new_channel<'a>(&'a self, monitor_name: MonitorName, monitor: &'a ChannelMonitor<ChannelSigner>) -> AsyncResult<'a, ()>;
 
 	/// Update one channel's data. The provided [`ChannelMonitor`] has already applied the given
 	/// update.
