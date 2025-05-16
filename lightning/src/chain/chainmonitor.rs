@@ -34,6 +34,7 @@ use crate::chain::transaction::{OutPoint, TransactionData};
 use crate::ln::types::ChannelId;
 use crate::sign::ecdsa::EcdsaChannelSigner;
 use crate::events::{self, Event, EventHandler, ReplayEvent};
+use crate::util::async_poll::{poll_or_spawn, AsyncResult, FutureSpawner};
 use crate::util::logger::{Logger, WithContext};
 use crate::util::errors::APIError;
 use crate::util::persist::MonitorName;
@@ -120,7 +121,7 @@ pub trait Persist<ChannelSigner: EcdsaChannelSigner> {
 	///
 	/// [`ChannelManager`]: crate::ln::channelmanager::ChannelManager
 	/// [`Writeable::write`]: crate::util::ser::Writeable::write
-	fn persist_new_channel(&self, monitor_name: MonitorName, monitor: &ChannelMonitor<ChannelSigner>) -> ChannelMonitorUpdateStatus;
+	fn persist_new_channel<'a>(&'a self, monitor_name: MonitorName, monitor: &ChannelMonitor<ChannelSigner>) -> AsyncResult<'a, ()>;
 
 	/// Update one channel's data. The provided [`ChannelMonitor`] has already applied the given
 	/// update.
@@ -231,7 +232,7 @@ impl<ChannelSigner: EcdsaChannelSigner> Deref for LockedChannelMonitor<'_, Chann
 /// [`ChannelManager`]: crate::ln::channelmanager::ChannelManager
 /// [module-level documentation]: crate::chain::chainmonitor
 /// [`rebroadcast_pending_claims`]: Self::rebroadcast_pending_claims
-pub struct ChainMonitor<ChannelSigner: EcdsaChannelSigner, C: Deref, T: Deref, F: Deref, L: Deref, P: Deref>
+pub struct ChainMonitor<ChannelSigner: EcdsaChannelSigner, C: Deref, T: Deref, F: Deref, L: Deref, P: Deref, FS: FutureSpawner>
 	where C::Target: chain::Filter,
         T::Target: BroadcasterInterface,
         F::Target: FeeEstimator,
@@ -253,9 +254,11 @@ pub struct ChainMonitor<ChannelSigner: EcdsaChannelSigner, C: Deref, T: Deref, F
 	/// A [`Notifier`] used to wake up the background processor in case we have any [`Event`]s for
 	/// it to give to users (or [`MonitorEvent`]s for `ChannelManager` to process).
 	event_notifier: Notifier,
+
+	future_spawner: FS,
 }
 
-impl<ChannelSigner: EcdsaChannelSigner, C: Deref, T: Deref, F: Deref, L: Deref, P: Deref> ChainMonitor<ChannelSigner, C, T, F, L, P>
+impl<ChannelSigner: EcdsaChannelSigner, C: Deref, T: Deref, F: Deref, L: Deref, P: Deref, FS: FutureSpawner> ChainMonitor<ChannelSigner, C, T, F, L, P, FS>
 where C::Target: chain::Filter,
 	    T::Target: BroadcasterInterface,
 	    F::Target: FeeEstimator,
@@ -386,7 +389,7 @@ where C::Target: chain::Filter,
 	/// pre-filter blocks or only fetch blocks matching a compact filter. Otherwise, clients may
 	/// always need to fetch full blocks absent another means for determining which blocks contain
 	/// transactions relevant to the watched channels.
-	pub fn new(chain_source: Option<C>, broadcaster: T, logger: L, feeest: F, persister: P) -> Self {
+	pub fn new(chain_source: Option<C>, broadcaster: T, logger: L, feeest: F, persister: P, future_spawner: FS) -> Self {
 		Self {
 			monitors: RwLock::new(new_hash_map()),
 			chain_source,
@@ -397,6 +400,7 @@ where C::Target: chain::Filter,
 			pending_monitor_events: Mutex::new(Vec::new()),
 			highest_chain_height: AtomicUsize::new(0),
 			event_notifier: Notifier::new(),
+			future_spawner,
 		}
 	}
 
@@ -667,8 +671,8 @@ where C::Target: chain::Filter,
 	}
 }
 
-impl<ChannelSigner: EcdsaChannelSigner, C: Deref, T: Deref, F: Deref, L: Deref, P: Deref>
-chain::Listen for ChainMonitor<ChannelSigner, C, T, F, L, P>
+impl<ChannelSigner: EcdsaChannelSigner, C: Deref, T: Deref, F: Deref, L: Deref, P: Deref, FS: FutureSpawner>
+chain::Listen for ChainMonitor<ChannelSigner, C, T, F, L, P, FS>
 where
 	C::Target: chain::Filter,
 	T::Target: BroadcasterInterface,
@@ -772,15 +776,21 @@ where C::Target: chain::Filter,
 		let update_id = monitor.get_latest_update_id();
 		let mut pending_monitor_updates = Vec::new();
 		let persist_res = self.persister.persist_new_channel(monitor.persistence_key(), &monitor);
-		match persist_res {
-			ChannelMonitorUpdateStatus::InProgress => {
+
+		let update_status;
+		match poll_or_spawn(persist_res, || {
+			self.channel_monitor_updated(channel_id, update_id);
+		}, self.future_spawner) {
+			Ok(true) => {
+				log_info!(logger, "Persistence of new ChannelMonitor for channel {} completed", log_funding_info!(monitor));
+				update_status = ChannelMonitorUpdateStatus::Completed;
+			},
+			Ok(false) => {
 				log_info!(logger, "Persistence of new ChannelMonitor for channel {} in progress", log_funding_info!(monitor));
 				pending_monitor_updates.push(update_id);
-			},
-			ChannelMonitorUpdateStatus::Completed => {
-				log_info!(logger, "Persistence of new ChannelMonitor for channel {} completed", log_funding_info!(monitor));
-			},
-			ChannelMonitorUpdateStatus::UnrecoverableError => {
+				update_status = ChannelMonitorUpdateStatus::InProgress;
+			}
+			Err(_) => {
 				let err_str = "ChannelMonitor[Update] persistence failed unrecoverably. This indicates we cannot continue normal operation and must shut down.";
 				log_error!(logger, "{}", err_str);
 				panic!("{}", err_str);
@@ -793,7 +803,7 @@ where C::Target: chain::Filter,
 			monitor,
 			pending_monitor_updates: Mutex::new(pending_monitor_updates),
 		});
-		Ok(persist_res)
+		Ok(update_status)
 	}
 
 	fn update_channel(&self, channel_id: ChannelId, update: &ChannelMonitorUpdate) -> ChannelMonitorUpdateStatus {
@@ -1136,4 +1146,3 @@ mod tests {
 		}).is_err());
 	}
 }
-

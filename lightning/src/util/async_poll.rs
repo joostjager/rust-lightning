@@ -98,3 +98,33 @@ pub(crate) fn dummy_waker() -> Waker {
 
 /// A type alias for a future that returns a result of type T.
 pub type AsyncResult<'a, T> = Pin<Box<dyn Future<Output = Result<T, ()>> + 'a + Send>>;
+
+pub trait FutureSpawner: Send + Sync + 'static {
+	fn spawn<T: Future<Output = ()> + Send + 'static>(&self, future: T);
+}
+
+pub fn poll_or_spawn<F, C, S>(mut fut: Pin<Box<F>>, callback: C, future_spawner: S) -> Result<bool, ()>
+where
+    F: Future<Output = Result<(), ()>> + Send + 'static + ?Sized,
+    C: FnOnce() + Send + 'static,
+	S: FutureSpawner,
+{
+    let waker = dummy_waker();
+    let mut cx = Context::from_waker(&waker);
+
+    match fut.as_mut().poll(&mut cx) {
+        Poll::Ready(Ok(())) => Ok(true),
+		Poll::Ready(Err(_)) => Err(()),
+        Poll::Pending => {
+            println!("Future not ready, using tokio runtime");
+
+            let callback = Box::new(callback);
+            future_spawner.spawn(async move {
+                fut.await;
+                callback();
+            });
+
+            Ok(false)
+        }
+    }
+}
