@@ -19,6 +19,7 @@ use core::str::FromStr;
 use crate::prelude::*;
 use crate::{io, log_error};
 
+use crate::sync::{Arc};
 use crate::chain;
 use crate::chain::chaininterface::{BroadcasterInterface, FeeEstimator};
 use crate::chain::chainmonitor::Persist;
@@ -698,7 +699,7 @@ where
 
 impl<
 		ChannelSigner: EcdsaChannelSigner + Send + Sync,
-		K: Deref + Send + Sync + Clone,
+		K: Deref + Send + Sync,
 		L: Deref,
 		ES: Deref,
 		SP: Deref,
@@ -718,7 +719,7 @@ where
 	fn persist_new_channel<'a>(
 		&'a self, monitor_name: MonitorName, monitor: &ChannelMonitor<ChannelSigner>,
 	) -> AsyncResult<'a, ()> {
-		let kv_store = self.kv_store.clone();
+		let kv_store = self.kv_store;
 
 		// Determine the proper key for this monitor
 		let monitor_key = monitor_name.to_string();
