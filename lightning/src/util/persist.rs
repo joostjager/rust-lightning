@@ -269,14 +269,16 @@ impl<ChannelSigner: EcdsaChannelSigner + Send, K: KVStore + ?Sized + Sync>
 	// just shut down the node since we're not retrying persistence!
 
 	fn persist_new_channel<'a>(
-		&'a self, monitor_name: MonitorName, monitor: &'a ChannelMonitor<ChannelSigner>,
+		&'a self, monitor_name: MonitorName, monitor: &ChannelMonitor<ChannelSigner>,
 	) -> AsyncResult<'a, ()> {
+		let encoded = monitor.encode();
+
 		Box::pin(async move {
 			self.write_async(
 				CHANNEL_MONITOR_PERSISTENCE_PRIMARY_NAMESPACE,
 				CHANNEL_MONITOR_PERSISTENCE_SECONDARY_NAMESPACE,
 				&monitor_name.to_string(),
-				&monitor.encode(),
+				&encoded,
 			)
 			.await
 		})
@@ -695,8 +697,8 @@ where
 }
 
 impl<
-		ChannelSigner: EcdsaChannelSigner,
-		K: Deref,
+		ChannelSigner: EcdsaChannelSigner + Send + Sync,
+		K: Deref + Send + Sync + Clone,
 		L: Deref,
 		ES: Deref,
 		SP: Deref,
@@ -713,36 +715,27 @@ where
 {
 	/// Persists a new channel. This means writing the entire monitor to the
 	/// parametrized [`KVStore`].
-	fn persist_new_channel(
-		&self, monitor_name: MonitorName, monitor: &ChannelMonitor<ChannelSigner>,
-	) -> chain::ChannelMonitorUpdateStatus {
-		// Determine the proper key for this monitor
-		let monitor_key = monitor_name.to_string();
-		// Serialize and write the new monitor
-		let mut monitor_bytes = Vec::with_capacity(
-			MONITOR_UPDATING_PERSISTER_PREPEND_SENTINEL.len() + monitor.serialized_length(),
-		);
-		monitor_bytes.extend_from_slice(MONITOR_UPDATING_PERSISTER_PREPEND_SENTINEL);
-		monitor.write(&mut monitor_bytes).unwrap();
-		match self.kv_store.write(
-			CHANNEL_MONITOR_PERSISTENCE_PRIMARY_NAMESPACE,
-			CHANNEL_MONITOR_PERSISTENCE_SECONDARY_NAMESPACE,
-			monitor_key.as_str(),
-			&monitor_bytes,
-		) {
-			Ok(_) => chain::ChannelMonitorUpdateStatus::Completed,
-			Err(e) => {
-				log_error!(
-					self.logger,
-					"Failed to write ChannelMonitor {}/{}/{} reason: {}",
-					CHANNEL_MONITOR_PERSISTENCE_PRIMARY_NAMESPACE,
-					CHANNEL_MONITOR_PERSISTENCE_SECONDARY_NAMESPACE,
-					monitor_key.as_str(),
-					e
-				);
-				chain::ChannelMonitorUpdateStatus::UnrecoverableError
-			},
-		}
+	fn persist_new_channel<'a>(
+		&'a self, monitor_name: MonitorName, monitor: &'a ChannelMonitor<ChannelSigner>,
+	) -> AsyncResult<'a, ()> {
+		let kv_store = self.kv_store.clone();
+
+		Box::pin(async move {
+			// Determine the proper key for this monitor
+			let monitor_key = monitor_name.to_string();
+			// Serialize and write the new monitor
+			let mut monitor_bytes = Vec::with_capacity(
+				MONITOR_UPDATING_PERSISTER_PREPEND_SENTINEL.len() + monitor.serialized_length(),
+			);
+			monitor_bytes.extend_from_slice(MONITOR_UPDATING_PERSISTER_PREPEND_SENTINEL);
+			monitor.write(&mut monitor_bytes).unwrap();
+			kv_store.write_async(
+				CHANNEL_MONITOR_PERSISTENCE_PRIMARY_NAMESPACE,
+				CHANNEL_MONITOR_PERSISTENCE_SECONDARY_NAMESPACE,
+				monitor_key.as_str(),
+				&monitor_bytes,
+			).await
+		})
 	}
 
 	/// Persists a channel update, writing only the update to the parameterized [`KVStore`] if possible.
