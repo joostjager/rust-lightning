@@ -466,7 +466,7 @@ where
 	BI::Target: BroadcasterInterface,
 	FE::Target: FeeEstimator,
 {
-	kv_store: K,
+	kv_store: Arc<K>,
 	logger: L,
 	maximum_pending_updates: u64,
 	entropy_source: ES,
@@ -507,7 +507,7 @@ where
 		signer_provider: SP, broadcaster: BI, fee_estimator: FE,
 	) -> Self {
 		MonitorUpdatingPersister {
-			kv_store,
+			kv_store: Arc::new(kv_store),
 			logger,
 			maximum_pending_updates,
 			entropy_source,
@@ -707,7 +707,7 @@ impl<
 		FE: Deref,
 	> Persist<ChannelSigner> for MonitorUpdatingPersister<K, L, ES, SP, BI, FE>
 where
-	K::Target: KVStore,
+	K::Target: KVStore + Sync,
 	L::Target: Logger,
 	ES::Target: EntropySource + Sized,
 	SP::Target: SignerProvider + Sized,
@@ -719,7 +719,7 @@ where
 	fn persist_new_channel<'a>(
 		&'a self, monitor_name: MonitorName, monitor: &ChannelMonitor<ChannelSigner>,
 	) -> AsyncResult<'a, ()> {
-		let kv_store = self.kv_store;
+		let kv_store = self.kv_store.clone();
 
 		// Determine the proper key for this monitor
 		let monitor_key = monitor_name.to_string();
