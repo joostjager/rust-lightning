@@ -122,7 +122,7 @@ pub trait Persist<ChannelSigner: EcdsaChannelSigner> {
 	///
 	/// [`ChannelManager`]: crate::ln::channelmanager::ChannelManager
 	/// [`Writeable::write`]: crate::util::ser::Writeable::write
-	fn persist_new_channel<'a>(&'a self, monitor_name: MonitorName, monitor: &ChannelMonitor<ChannelSigner>) -> AsyncResult<'a, ()>;
+	fn persist_new_channel(&self, monitor_name: MonitorName, monitor: &ChannelMonitor<ChannelSigner>) -> AsyncResult<'static, ()>;
 
 	/// Update one channel's data. The provided [`ChannelMonitor`] has already applied the given
 	/// update.
@@ -534,7 +534,7 @@ where C::Target: chain::Filter,
 		Ok(())
 	}
 
-	pub fn channel_monitor_updated_internal(
+	fn channel_monitor_updated_internal(
 		monitors: &RwLock<HashMap<ChannelId, MonitorHolder<ChannelSigner>>>,
 		pending_monitor_events: &Mutex<Vec<(OutPoint, ChannelId, Vec<MonitorEvent>, PublicKey)>>,
 		event_notifier: &Notifier,
@@ -789,7 +789,7 @@ where
 	}
 }
 
-impl<ChannelSigner: EcdsaChannelSigner + Send, C: Deref , T: Deref , F: Deref , L: Deref , P: Deref, FS: FutureSpawner + Clone>
+impl<ChannelSigner: EcdsaChannelSigner + Send + 'static, C: Deref , T: Deref , F: Deref , L: Deref , P: Deref, FS: FutureSpawner + Clone>
 chain::Watch<ChannelSigner> for ChainMonitor<ChannelSigner, C, T, F, L, P, FS>
 where C::Target: chain::Filter,
 	    T::Target: BroadcasterInterface,

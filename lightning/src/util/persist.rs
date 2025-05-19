@@ -12,7 +12,6 @@
 
 use bitcoin::hashes::hex::FromHex;
 use bitcoin::{BlockHash, Txid};
-use core::cmp;
 use core::ops::Deref;
 use core::str::FromStr;
 
@@ -141,9 +140,10 @@ pub trait KVStore {
 		&self, primary_namespace: &str, secondary_namespace: &str, key: &str, buf: &[u8],
 	) -> Result<(), io::Error>;
 
-	fn write_async<'a>(
-		&'a self, primary_namespace: &str, secondary_namespace: &str, key: &str, buf: &[u8],
-	) -> AsyncResult<'a, ()>;
+	/// Asynchronously persists the given data under the given `key`.
+	fn write_async(
+		&self, primary_namespace: &str, secondary_namespace: &str, key: &str, buf: &[u8],
+	) -> AsyncResult<'static, ()>;
 	/// Removes any data that had previously been persisted under the given `key`.
 	///
 	/// If the `lazy` flag is set to `true`, the backend implementation might choose to lazily
@@ -261,21 +261,22 @@ where
 	}
 }
 
-impl<ChannelSigner: EcdsaChannelSigner + Send, K: KVStore + ?Sized + Sync>
-	Persist<ChannelSigner> for K
+impl<ChannelSigner: EcdsaChannelSigner + Send, K: KVStore + ?Sized + Sync + Send + 'static>
+	Persist<ChannelSigner> for Arc<K>
 {
 	// TODO: We really need a way for the persister to inform the user that its time to crash/shut
 	// down once these start returning failure.
 	// Then we should return InProgress rather than UnrecoverableError, implying we should probably
 	// just shut down the node since we're not retrying persistence!
 
-	fn persist_new_channel<'a>(
-		&'a self, monitor_name: MonitorName, monitor: &ChannelMonitor<ChannelSigner>,
-	) -> AsyncResult<'a, ()> {
+	fn persist_new_channel(
+		&self, monitor_name: MonitorName, monitor: &ChannelMonitor<ChannelSigner>,
+	) -> AsyncResult<'static, ()> {
 		let encoded = monitor.encode();
+		let kv_store = self.clone();
 
 		Box::pin(async move {
-			self.write_async(
+			kv_store.write_async(
 				CHANNEL_MONITOR_PERSISTENCE_PRIMARY_NAMESPACE,
 				CHANNEL_MONITOR_PERSISTENCE_SECONDARY_NAMESPACE,
 				&monitor_name.to_string(),
@@ -699,7 +700,7 @@ where
 
 impl<
 		ChannelSigner: EcdsaChannelSigner + Send + Sync,
-		K: Deref + Send + Sync,
+		K: Deref + Send + Sync + 'static,
 		L: Deref,
 		ES: Deref,
 		SP: Deref,
@@ -716,9 +717,9 @@ where
 {
 	/// Persists a new channel. This means writing the entire monitor to the
 	/// parametrized [`KVStore`].
-	fn persist_new_channel<'a>(
-		&'a self, monitor_name: MonitorName, monitor: &ChannelMonitor<ChannelSigner>,
-	) -> AsyncResult<'a, ()> {
+	fn persist_new_channel(
+		&self, monitor_name: MonitorName, monitor: &ChannelMonitor<ChannelSigner>,
+	) -> AsyncResult<'static, ()> {
 		let kv_store = self.kv_store.clone();
 
 		// Determine the proper key for this monitor
