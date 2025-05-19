@@ -103,7 +103,7 @@ pub trait FutureSpawner: Send + Sync + 'static {
 	fn spawn<T: Future<Output = ()> + Send + 'static>(&self, future: T);
 }
 
-pub fn poll_or_spawn<F, C, S>(mut fut: Pin<Box<F>>, callback: C, future_spawner: S) -> Result<bool, ()>
+pub fn poll_or_spawn<F, C, S>(mut fut: Pin<Box<F>>, callback: C, future_spawner: &S) -> Result<bool, ()>
 where
     F: Future<Output = Result<(), ()>> + Send + 'static + ?Sized,
     C: FnOnce() + Send + 'static,

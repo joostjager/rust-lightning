@@ -535,9 +535,9 @@ where C::Target: chain::Filter,
 	}
 
 	pub fn channel_monitor_updated_internal(
-		monitors: RwLock<HashMap<ChannelId, MonitorHolder<ChannelSigner>>>,
-		pending_monitor_events: Mutex<Vec<(OutPoint, ChannelId, Vec<MonitorEvent>, PublicKey)>>,
-		event_notifier: Notifier,
+		monitors: &RwLock<HashMap<ChannelId, MonitorHolder<ChannelSigner>>>,
+		pending_monitor_events: &Mutex<Vec<(OutPoint, ChannelId, Vec<MonitorEvent>, PublicKey)>>,
+		event_notifier: &Notifier,
 		channel_id: ChannelId, completed_update_id: u64) -> Result<(), APIError> {
 		let monitors = monitors.read().unwrap();
 		let monitor_data = if let Some(mon) = monitors.get(&channel_id) { mon } else {
@@ -706,7 +706,7 @@ where C::Target: chain::Filter,
 	}
 }
 
-impl<ChannelSigner: EcdsaChannelSigner, C: Deref, T: Deref, F: Deref, L: Deref, P: Deref, FS: FutureSpawner>
+impl<ChannelSigner: EcdsaChannelSigner + Send, C: Deref, T: Deref, F: Deref, L: Deref, P: Deref, FS: FutureSpawner>
 chain::Listen for ChainMonitor<ChannelSigner, C, T, F, L, P, FS>
 where
 	C::Target: chain::Filter,
@@ -735,7 +735,7 @@ where
 	}
 }
 
-impl<ChannelSigner: EcdsaChannelSigner, C: Deref, T: Deref, F: Deref, L: Deref, P: Deref, FS: FutureSpawner>
+impl<ChannelSigner: EcdsaChannelSigner + Send, C: Deref, T: Deref, F: Deref, L: Deref, P: Deref, FS: FutureSpawner>
 chain::Confirm for ChainMonitor<ChannelSigner, C, T, F, L, P, FS>
 where
 	C::Target: chain::Filter,
@@ -818,10 +818,10 @@ where C::Target: chain::Filter,
 		let event_notifier = self.event_notifier.clone();
 		let future_spawner = self.future_spawner.clone();
 
-		match poll_or_spawn(persist_res, || {
-			ChainMonitor::<ChannelSigner, C, T, F, L, P, FS>::channel_monitor_updated_internal(*monitors, *pending_monitor_updates_cb, *event_notifier,
+		match poll_or_spawn(persist_res, move || {
+			ChainMonitor::<ChannelSigner, C, T, F, L, P, FS>::channel_monitor_updated_internal(&monitors, &pending_monitor_updates_cb, &event_notifier,
 				channel_id, update_id);
-		}, *future_spawner) {
+		}, future_spawner.deref()) {
 			Ok(true) => {
 				log_info!(logger, "Persistence of new ChannelMonitor for channel {} completed", log_funding_info!(monitor));
 				update_status = ChannelMonitorUpdateStatus::Completed;
