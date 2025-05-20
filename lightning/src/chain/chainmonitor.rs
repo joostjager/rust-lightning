@@ -819,7 +819,8 @@ where C::Target: chain::Filter,
 		let future_spawner = self.future_spawner.clone();
 
 		match poll_or_spawn(persist_res, move || {
-			ChainMonitor::<ChannelSigner, C, T, F, L, P, FS>::channel_monitor_updated_internal(&monitors, &pending_monitor_updates_cb, &event_notifier,
+			// TODO: Log error if the monitor is not persisted.
+			let _ = ChainMonitor::<ChannelSigner, C, T, F, L, P, FS>::channel_monitor_updated_internal(&monitors, &pending_monitor_updates_cb, &event_notifier,
 				channel_id, update_id);
 		}, future_spawner.deref()) {
 			Ok(true) => {
