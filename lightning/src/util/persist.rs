@@ -290,16 +290,19 @@ impl<ChannelSigner: EcdsaChannelSigner + Send, K: KVStore + ?Sized + Sync + Send
 	fn update_persisted_channel(
 		&self, monitor_name: MonitorName, _update: Option<&ChannelMonitorUpdate>,
 		monitor: &ChannelMonitor<ChannelSigner>,
-	) -> chain::ChannelMonitorUpdateStatus {
-		match self.write(
-			CHANNEL_MONITOR_PERSISTENCE_PRIMARY_NAMESPACE,
-			CHANNEL_MONITOR_PERSISTENCE_SECONDARY_NAMESPACE,
-			&monitor_name.to_string(),
-			&monitor.encode(),
-		) {
-			Ok(()) => chain::ChannelMonitorUpdateStatus::Completed,
-			Err(_) => chain::ChannelMonitorUpdateStatus::UnrecoverableError,
-		}
+	) -> AsyncResult<'static, ()> {
+		let encoded = monitor.encode();
+		let kv_store = self.clone();
+
+		Box::pin(async move {
+			kv_store.write_async(
+				CHANNEL_MONITOR_PERSISTENCE_PRIMARY_NAMESPACE,
+				CHANNEL_MONITOR_PERSISTENCE_SECONDARY_NAMESPACE,
+				&monitor_name.to_string(),
+				&encoded,
+			)
+			.await
+		})
 	}
 
 	fn archive_persisted_channel(&self, monitor_name: MonitorName) {
@@ -725,7 +728,7 @@ where
 	K::Target: KVStore + Sync,
 	L::Target: Logger,
 	ES::Target: EntropySource + Sized,
-	SP::Target: SignerProvider + Sized,
+	SP::Target: SignerProvider + Send + Sync + Sized,
 	BI::Target: BroadcasterInterface,
 	FE::Target: FeeEstimator,
 {
@@ -736,7 +739,11 @@ where
 	) -> AsyncResult<'static, ()> {
 		let state = self.state.clone();
 
-		state.persist_new_channel(monitor_name, monitor)
+		let encoded_monitor = Self::encode_monitor(monitor);
+
+		Box::pin(async move {
+			state.persist_new_channel(monitor_name, &encoded_monitor).await
+		})
 	}
 
 	/// Persists a channel update, writing only the update to the parameterized [`KVStore`] if possible.
@@ -754,7 +761,13 @@ where
 	) -> AsyncResult<'static, ()> {
 		let state = self.state.clone();
 
-		state.update_persisted_channel(monitor_name, update, monitor)
+		let encoded_monitor = Self::encode_monitor(monitor);
+		let encoded_update = update.map(|update| (update.update_id, update.encode()));
+		let monitor_latest_update_id = monitor.get_latest_update_id();
+
+		Box::pin(async move {
+			state.update_persisted_channel(monitor_name, encoded_update, &encoded_monitor, monitor_latest_update_id).await
+		})
 	}
 
 	fn archive_persisted_channel(&self, monitor_name: MonitorName) {
@@ -770,37 +783,60 @@ impl<
 		SP: Deref + Send + Sync + 'static,
 		BI: Deref + Send + Sync + 'static,
 		FE: Deref + Send + Sync + 'static,
+	> MonitorUpdatingPersister<K, L, ES, SP, BI, FE>
+where
+	K::Target: KVStore + Sync,
+	L::Target: Logger,
+	ES::Target: EntropySource + Sized,
+	SP::Target: SignerProvider + Sync + Sized,
+	BI::Target: BroadcasterInterface,
+	FE::Target: FeeEstimator,
+{
+	fn encode_monitor<ChannelSigner: EcdsaChannelSigner + Send + Sync>(
+			monitor: &ChannelMonitor<ChannelSigner>,
+		) -> Vec<u8> {
+			// Serialize and write the new monitor
+			let mut monitor_bytes = Vec::with_capacity(
+				MONITOR_UPDATING_PERSISTER_PREPEND_SENTINEL.len() + monitor.serialized_length(),
+			);
+			monitor_bytes.extend_from_slice(MONITOR_UPDATING_PERSISTER_PREPEND_SENTINEL);
+			monitor.write(&mut monitor_bytes).unwrap();
+
+			monitor_bytes
+		}
+	}
+
+impl<
+		K: Deref + Send + Sync + 'static,
+		L: Deref + Send + Sync + 'static,
+		ES: Deref + Send + Sync + 'static,
+		SP: Deref + Send + Sync + 'static,
+		BI: Deref + Send + Sync + 'static,
+		FE: Deref + Send + Sync + 'static,
 	> MonitorUpdatingPersisterState<K, L, ES, SP, BI, FE>
 where
 	K::Target: KVStore + Sync,
 	L::Target: Logger,
 	ES::Target: EntropySource + Sized,
-	SP::Target: SignerProvider + Sized,
+	SP::Target: SignerProvider + Sync + Sized,
 	BI::Target: BroadcasterInterface,
 	FE::Target: FeeEstimator,
 {
 	/// Persists a new channel. This means writing the entire monitor to the
 	/// parametrized [`KVStore`].
-	fn persist_new_channel<ChannelSigner: EcdsaChannelSigner + Send + Sync>(
-		self: Arc<Self>, monitor_name: MonitorName, monitor: &ChannelMonitor<ChannelSigner>,
-	) -> AsyncResult<'static, ()> {
+	async fn persist_new_channel(
+		self: Arc<Self>, monitor_name: MonitorName, monitor_bytes: &[u8],
+	) -> Result<(), ()> {
 		// Determine the proper key for this monitor
 		let monitor_key = monitor_name.to_string();
-		// Serialize and write the new monitor
-		let mut monitor_bytes = Vec::with_capacity(
-			MONITOR_UPDATING_PERSISTER_PREPEND_SENTINEL.len() + monitor.serialized_length(),
-		);
-		monitor_bytes.extend_from_slice(MONITOR_UPDATING_PERSISTER_PREPEND_SENTINEL);
-		monitor.write(&mut monitor_bytes).unwrap();
 
-		Box::pin(async move {
-			self.kv_store.write_async(
-				CHANNEL_MONITOR_PERSISTENCE_PRIMARY_NAMESPACE,
-				CHANNEL_MONITOR_PERSISTENCE_SECONDARY_NAMESPACE,
-				monitor_key.as_str(),
-				&monitor_bytes,
-			).await
-		})
+		// Serialize and write the new monitor
+		self.kv_store.write_async(
+			CHANNEL_MONITOR_PERSISTENCE_PRIMARY_NAMESPACE,
+			CHANNEL_MONITOR_PERSISTENCE_SECONDARY_NAMESPACE,
+			monitor_key.as_str(),
+			&monitor_bytes,
+		).await
 	}
 
 	/// Persists a channel update, writing only the update to the parameterized [`KVStore`] if possible.
@@ -812,70 +848,68 @@ where
 	///   - LDK commands re-persisting the entire monitor through this function, specifically when
 	///	    `update` is `None`.
 	///   - The update is at [`u64::MAX`], indicating an update generated by pre-0.1 LDK.
-	fn update_persisted_channel<ChannelSigner: EcdsaChannelSigner + Send + Sync>(
-		self: Arc<Self>, monitor_name: MonitorName, update: Option<&ChannelMonitorUpdate>,
-		monitor: &ChannelMonitor<ChannelSigner>,
-	) -> AsyncResult<'static, ()> {
-		Box::pin(async move {
-			const LEGACY_CLOSED_CHANNEL_UPDATE_ID: u64 = u64::MAX;
-			if let Some(update) = update {
-				let persist_update = update.update_id != LEGACY_CLOSED_CHANNEL_UPDATE_ID
-					&& update.update_id % self.maximum_pending_updates != 0;
-				if persist_update {
-					let monitor_key = monitor_name.to_string();
-					let update_name = UpdateName::from(update.update_id);
-					self.kv_store.write_async(
-						CHANNEL_MONITOR_UPDATE_PERSISTENCE_PRIMARY_NAMESPACE,
-						monitor_key.as_str(),
-						update_name.as_str(),
-						&update.encode(),
-					).await
-				} else {
-					// In case of channel-close monitor update, we need to read old monitor before persisting
-					// the new one in order to determine the cleanup range.
-					let maybe_old_monitor = match monitor.get_latest_update_id() {
-						LEGACY_CLOSED_CHANNEL_UPDATE_ID => {
-							let monitor_key = monitor_name.to_string();
-							self.read_monitor(&monitor_name, &monitor_key).ok()
-						},
-						_ => None,
+	async fn update_persisted_channel(
+		self: Arc<Self>, monitor_name: MonitorName, update: Option<(u64, Vec<u8>)>,
+		monitor: &[u8], monitor_latest_update_id: u64,
+	) -> Result<(), ()> {
+		const LEGACY_CLOSED_CHANNEL_UPDATE_ID: u64 = u64::MAX;
+		if let Some((update_id, update)) = update {
+			let persist_update = update_id != LEGACY_CLOSED_CHANNEL_UPDATE_ID
+				&& update_id % self.maximum_pending_updates != 0;
+			if persist_update {
+				let monitor_key = monitor_name.to_string();
+				let update_name = UpdateName::from(update_id);
+				self.kv_store.write_async(
+					CHANNEL_MONITOR_UPDATE_PERSISTENCE_PRIMARY_NAMESPACE,
+					monitor_key.as_str(),
+					update_name.as_str(),
+					&update,
+				).await
+			} else {
+				// In case of channel-close monitor update, we need to read old monitor before persisting
+				// the new one in order to determine the cleanup range.
+				let maybe_old_monitor = match monitor_latest_update_id {
+					LEGACY_CLOSED_CHANNEL_UPDATE_ID => {
+						let monitor_key = monitor_name.to_string();
+						self.read_monitor(&monitor_name, &monitor_key).ok()
+					},
+					_ => None,
+				};
+
+				// We could write this update, but it meets criteria of our design that calls for a full monitor write.
+				let monitor_update_status = self.clone().persist_new_channel(monitor_name, &monitor).await;
+
+				if monitor_update_status.is_ok() {
+					let channel_closed_legacy =
+						monitor_latest_update_id == LEGACY_CLOSED_CHANNEL_UPDATE_ID;
+					let cleanup_range = if channel_closed_legacy {
+						// If there is an error while reading old monitor, we skip clean up.
+						maybe_old_monitor.map(|(_, ref old_monitor)| {
+							let start = old_monitor.get_latest_update_id();
+							// We never persist an update with the legacy closed update_id
+							let end = cmp::min(
+								start.saturating_add(self.maximum_pending_updates),
+								LEGACY_CLOSED_CHANNEL_UPDATE_ID - 1,
+							);
+							(start, end)
+						})
+					} else {
+						let end = monitor_latest_update_id;
+						let start = end.saturating_sub(self.maximum_pending_updates);
+						Some((start, end))
 					};
 
-					// We could write this update, but it meets criteria of our design that calls for a full monitor write.
-					let monitor_update_status = self.persist_new_channel(monitor_name, monitor).await;
-
-					if monitor_update_status.is_ok() {
-						let channel_closed_legacy =
-							monitor.get_latest_update_id() == LEGACY_CLOSED_CHANNEL_UPDATE_ID;
-						let cleanup_range = if channel_closed_legacy {
-							// If there is an error while reading old monitor, we skip clean up.
-							maybe_old_monitor.map(|(_, ref old_monitor)| {
-								let start = old_monitor.get_latest_update_id();
-								// We never persist an update with the legacy closed update_id
-								let end = cmp::min(
-									start.saturating_add(self.maximum_pending_updates),
-									LEGACY_CLOSED_CHANNEL_UPDATE_ID - 1,
-								);
-								(start, end)
-							})
-						} else {
-							let end = monitor.get_latest_update_id();
-							let start = end.saturating_sub(self.maximum_pending_updates);
-							Some((start, end))
-						};
-
-						if let Some((start, end)) = cleanup_range {
-							self.cleanup_in_range(monitor_name, start, end);
-						}
+					if let Some((start, end)) = cleanup_range {
+						self.cleanup_in_range(monitor_name, start, end);
 					}
-
-					monitor_update_status
 				}
-			} else {
-				// There is no update given, so we must persist a new monitor.
-				self.persist_new_channel(monitor_name, monitor).await
+
+				monitor_update_status
 			}
-		})
+		} else {
+			// There is no update given, so we must persist a new monitor.
+			self.persist_new_channel(monitor_name, &monitor).await
+		}
 	}
 
 	fn archive_persisted_channel(&self, monitor_name: MonitorName) {
