@@ -890,27 +890,40 @@ where C::Target: chain::Filter,
 				} else {
 					self.persister.update_persisted_channel(monitor.persistence_key(), Some(update), monitor)
 				};
-				match persist_res {
-					ChannelMonitorUpdateStatus::InProgress => {
-						pending_monitor_updates.push(update_id);
-						log_debug!(logger,
-							"Persistence of ChannelMonitorUpdate id {:?} for channel {} in progress",
-							update_id,
-							log_funding_info!(monitor)
-						);
-					},
-					ChannelMonitorUpdateStatus::Completed => {
+
+				let monitors = self.monitors.clone();
+				let pending_monitor_updates_cb = self.pending_monitor_events.clone();
+				let event_notifier = self.event_notifier.clone();
+				let future_spawner = self.future_spawner.clone();
+
+				let update_status;
+				match poll_or_spawn(persist_res, move || {
+					// TODO: Log error if the monitor is not persisted.
+					let _ = ChainMonitor::<ChannelSigner, C, T, F, L, P, FS>::channel_monitor_updated_internal(&monitors, &pending_monitor_updates_cb, &event_notifier,
+						channel_id, update_id);
+				}, future_spawner.deref()) {
+					Ok(true) => {
 						log_debug!(logger,
 							"Persistence of ChannelMonitorUpdate id {:?} for channel {} completed",
 							update_id,
 							log_funding_info!(monitor)
 						);
+						update_status = ChannelMonitorUpdateStatus::Completed;
 					},
-					ChannelMonitorUpdateStatus::UnrecoverableError => {
+					Ok(false) => {
+						log_debug!(logger,
+							"Persistence of ChannelMonitorUpdate id {:?} for channel {} in progress",
+							update_id,
+							log_funding_info!(monitor)
+						);
+						pending_monitor_updates.push(update_id);
+						update_status = ChannelMonitorUpdateStatus::InProgress;
+					}
+					Err(_) => {
 						// Take the monitors lock for writing so that we poison it and any future
 						// operations going forward fail immediately.
 						core::mem::drop(pending_monitor_updates);
-						core::mem::drop(monitors);
+						// core::mem::drop(monitors);
 						let _poison = self.monitors.write().unwrap();
 						let err_str = "ChannelMonitor[Update] persistence failed unrecoverably. This indicates we cannot continue normal operation and must shut down.";
 						log_error!(logger, "{}", err_str);
@@ -920,7 +933,7 @@ where C::Target: chain::Filter,
 				if update_res.is_err() {
 					ChannelMonitorUpdateStatus::InProgress
 				} else {
-					persist_res
+					update_status
 				}
 			}
 		}
