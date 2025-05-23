@@ -259,7 +259,7 @@ pub struct ChainMonitor<ChannelSigner: EcdsaChannelSigner, C: Deref, T: Deref, F
 	future_spawner: Arc<FS>,
 }
 
-impl<ChannelSigner: EcdsaChannelSigner + Send, C: Deref, T: Deref, F: Deref, L: Deref, P: Deref, FS: FutureSpawner> ChainMonitor<ChannelSigner, C, T, F, L, P, FS>
+impl<ChannelSigner: EcdsaChannelSigner + Sync + Send + 'static, C: Deref, T: Deref, F: Deref, L: Deref, P: Deref, FS: FutureSpawner> ChainMonitor<ChannelSigner, C, T, F, L, P, FS>
 where C::Target: chain::Filter,
 	    T::Target: BroadcasterInterface,
 	    F::Target: FeeEstimator,
@@ -349,18 +349,31 @@ where C::Target: chain::Filter,
 			// `ChannelMonitorUpdate` after a channel persist for a channel with the same
 			// `latest_update_id`.
 			let _pending_monitor_updates = monitor_state.pending_monitor_updates.lock().unwrap();
-			match self.persister.update_persisted_channel(monitor.persistence_key(), None, monitor) {
-				ChannelMonitorUpdateStatus::Completed =>
-					log_trace!(logger, "Finished syncing Channel Monitor for channel {} for block-data",
-						log_funding_info!(monitor)
-					),
-				ChannelMonitorUpdateStatus::InProgress => {
-					log_trace!(logger, "Channel Monitor sync for channel {} in progress.", log_funding_info!(monitor));
+			let max_update_id = _pending_monitor_updates.iter().copied().max().unwrap_or(0);
+
+			let persist_res = self.persister.update_persisted_channel(monitor.persistence_key(), None, monitor);
+
+			let monitors = self.monitors.clone();
+			let pending_monitor_updates_cb = self.pending_monitor_events.clone();
+			let event_notifier = self.event_notifier.clone();
+			let future_spawner = self.future_spawner.clone();
+			let channel_id = *channel_id;
+
+			match poll_or_spawn(persist_res, move || {
+					// TODO: Log error if the monitor is not persisted.
+					let _ = ChainMonitor::<ChannelSigner, C, T, F, L, P, FS>::channel_monitor_updated_internal(&monitors, &pending_monitor_updates_cb, &event_notifier,
+						channel_id, max_update_id);
+				}, future_spawner.deref()) {
+					Ok(true) => {
+						// log
+					},
+					Ok(false) => {
+						// log
+					}
+					Err(_) => {
+						return Err(());
+					},
 				}
-				ChannelMonitorUpdateStatus::UnrecoverableError => {
-					return Err(());
-				}
-			}
 		}
 
 		// Register any new outputs with the chain source for filtering, storing any dependent
