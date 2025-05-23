@@ -272,7 +272,7 @@ pub fn get_supportable_anchor_channels(
 /// [Event::OpenChannelRequest]: crate::events::Event::OpenChannelRequest
 pub fn can_support_additional_anchor_channel<
 	AChannelManagerRef: Deref,
-	ChannelSigner: EcdsaChannelSigner + Send,
+	ChannelSigner: EcdsaChannelSigner + Send + Sync + 'static,
 	FilterRef: Deref,
 	BroadcasterRef: Deref,
 	EstimatorRef: Deref,
