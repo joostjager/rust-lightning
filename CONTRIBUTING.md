@@ -124,7 +124,7 @@ display fine at any tab-length display setting. We use `rustfmt` to establish
 uniform coding standards throughout the codebase. Please run
 
 ```bash
-./contrib/run-rustfmt.sh
+cargo fmt
 ```
 
 before committing and pushing any changes, as compliance will also be checked
