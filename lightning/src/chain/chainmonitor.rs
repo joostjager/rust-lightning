@@ -259,7 +259,7 @@ pub struct ChainMonitor<ChannelSigner: EcdsaChannelSigner, C: Deref, T: Deref, F
 	future_spawner: Arc<FS>,
 }
 
-impl<ChannelSigner: EcdsaChannelSigner + Sync + Send + 'static, C: Deref, T: Deref, F: Deref, L: Deref, P: Deref, FS: FutureSpawner> ChainMonitor<ChannelSigner, C, T, F, L, P, FS>
+impl<ChannelSigner: EcdsaChannelSigner + 'static, C: Deref, T: Deref, F: Deref, L: Deref, P: Deref, FS: FutureSpawner> ChainMonitor<ChannelSigner, C, T, F, L, P, FS>
 where C::Target: chain::Filter,
 	    T::Target: BroadcasterInterface,
 	    F::Target: FeeEstimator,
