@@ -353,6 +353,7 @@ where
 {
 	sweeper_state: Mutex<SweeperState>,
 	pending_sweep: AtomicBool,
+	dirty_state: AtomicBool,
 	broadcaster: B,
 	fee_estimator: E,
 	chain_data_source: Option<F>,
@@ -386,6 +387,7 @@ where
 		Self {
 			sweeper_state,
 			pending_sweep: AtomicBool::new(false),
+			dirty_state: AtomicBool::new(false),
 			broadcaster,
 			fee_estimator,
 			chain_data_source,
@@ -472,7 +474,26 @@ where
 			return Ok(());
 		}
 
-		let result = self.regenerate_and_broadcast_spend_if_necessary_internal().await;
+		let result = {
+			self.regenerate_and_broadcast_spend_if_necessary_internal().await?;
+
+			// Reset dirty flag.
+			if self
+				.dirty_state
+				.compare_exchange(true, false, Ordering::Acquire, Ordering::Relaxed)
+				.is_err()
+			{
+				return Ok(());
+			}
+
+			// If there is still dirty state, we need to persist it.
+			let mut sweeper_state = self.sweeper_state.lock().unwrap();
+			self.persist_state(&mut *sweeper_state).map_err(|e| {
+				log_error!(self.logger, "Error persisting OutputSweeper: {:?}", e);
+
+				// Set the dirty flag again?
+			})
+		};
 
 		// Release the pending sweep flag again, regardless of result.
 		self.pending_sweep.store(false, Ordering::Release);
@@ -674,9 +695,8 @@ where
 		self.transactions_confirmed_internal(&mut *state_lock, header, txdata, height);
 		self.best_block_updated_internal(&mut *state_lock, header, height);
 
-		let _ = self.persist_state(&*state_lock).map_err(|e| {
-			log_error!(self.logger, "Error persisting OutputSweeper: {:?}", e);
-		});
+		// Do this inside the lock, or outside?
+		self.dirty_state.store(true, Ordering::Release);
 	}
 
 	fn block_disconnected(&self, header: &Header, height: u32) {
@@ -698,9 +718,7 @@ where
 			}
 		}
 
-		self.persist_state(&*state_lock).unwrap_or_else(|e| {
-			log_error!(self.logger, "Error persisting OutputSweeper: {:?}", e);
-		});
+		self.dirty_state.store(true, Ordering::Release);
 	}
 }
 
@@ -720,9 +738,7 @@ where
 	) {
 		let mut state_lock = self.sweeper_state.lock().unwrap();
 		self.transactions_confirmed_internal(&mut *state_lock, header, txdata, height);
-		self.persist_state(&*state_lock).unwrap_or_else(|e| {
-			log_error!(self.logger, "Error persisting OutputSweeper: {:?}", e);
-		});
+		self.dirty_state.store(true, Ordering::Release);
 	}
 
 	fn transaction_unconfirmed(&self, txid: &Txid) {
@@ -743,18 +759,14 @@ where
 				.filter(|o| o.status.confirmation_height() >= Some(unconf_height))
 				.for_each(|o| o.status.unconfirmed());
 
-			self.persist_state(&*state_lock).unwrap_or_else(|e| {
-				log_error!(self.logger, "Error persisting OutputSweeper: {:?}", e);
-			});
+			self.dirty_state.store(true, Ordering::Release);
 		}
 	}
 
 	fn best_block_updated(&self, header: &Header, height: u32) {
 		let mut state_lock = self.sweeper_state.lock().unwrap();
 		self.best_block_updated_internal(&mut *state_lock, header, height);
-		let _ = self.persist_state(&*state_lock).map_err(|e| {
-			log_error!(self.logger, "Error persisting OutputSweeper: {:?}", e);
-		});
+		self.dirty_state.store(true, Ordering::Release);
 	}
 
 	fn get_relevant_txids(&self) -> Vec<(Txid, u32, Option<BlockHash>)> {
@@ -845,6 +857,7 @@ where
 		Ok(Self {
 			sweeper_state,
 			pending_sweep: AtomicBool::new(false),
+			dirty_state: AtomicBool::new(false),
 			broadcaster,
 			fee_estimator,
 			chain_data_source,
@@ -896,6 +909,7 @@ where
 			OutputSweeper {
 				sweeper_state,
 				pending_sweep: AtomicBool::new(false),
+				dirty_state: AtomicBool::new(false),
 				broadcaster,
 				fee_estimator,
 				chain_data_source,
