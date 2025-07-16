@@ -17,6 +17,7 @@ extern crate alloc;
 extern crate lightning;
 extern crate lightning_rapid_gossip_sync;
 
+use crate::lightning::util::ser::Writeable;
 use lightning::chain;
 use lightning::chain::chaininterface::{BroadcasterInterface, FeeEstimator};
 use lightning::chain::chainmonitor::{ChainMonitor, Persist};
@@ -40,7 +41,13 @@ use lightning::sign::ChangeDestinationSourceSync;
 use lightning::sign::EntropySource;
 use lightning::sign::OutputSpender;
 use lightning::util::logger::Logger;
-use lightning::util::persist::{KVStore, Persister};
+use lightning::util::persist::{
+	KVStore, CHANNEL_MANAGER_PERSISTENCE_KEY, CHANNEL_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE,
+	CHANNEL_MANAGER_PERSISTENCE_SECONDARY_NAMESPACE, NETWORK_GRAPH_PERSISTENCE_KEY,
+	NETWORK_GRAPH_PERSISTENCE_PRIMARY_NAMESPACE, NETWORK_GRAPH_PERSISTENCE_SECONDARY_NAMESPACE,
+	SCORER_PERSISTENCE_KEY, SCORER_PERSISTENCE_PRIMARY_NAMESPACE,
+	SCORER_PERSISTENCE_SECONDARY_NAMESPACE,
+};
 use lightning::util::sweep::OutputSweeper;
 #[cfg(feature = "std")]
 use lightning::util::sweep::OutputSweeperSync;
@@ -313,7 +320,8 @@ fn update_scorer<'a, S: 'static + Deref<Target = SC> + Send + Sync, SC: 'a + Wri
 
 macro_rules! define_run_body {
 	(
-		$persister: ident, $chain_monitor: ident, $process_chain_monitor_events: expr,
+		$kv_store: ident,
+		$chain_monitor: ident, $process_chain_monitor_events: expr,
 		$channel_manager: ident, $process_channel_manager_events: expr,
 		$onion_messenger: ident, $process_onion_message_handler_events: expr,
 		$peer_manager: ident, $gossip_sync: ident,
@@ -375,7 +383,12 @@ macro_rules! define_run_body {
 
 			if $channel_manager.get_cm().get_and_clear_needs_persistence() {
 				log_trace!($logger, "Persisting ChannelManager...");
-				$persister.persist_manager(&$channel_manager)?;
+				$kv_store.write(
+					CHANNEL_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE,
+					CHANNEL_MANAGER_PERSISTENCE_SECONDARY_NAMESPACE,
+					CHANNEL_MANAGER_PERSISTENCE_KEY,
+					&$channel_manager.get_cm().encode(),
+				)?;
 				log_trace!($logger, "Done persisting ChannelManager.");
 			}
 			if $timer_elapsed(&mut last_freshness_call, FRESHNESS_TIMER) {
@@ -436,7 +449,12 @@ macro_rules! define_run_body {
 						log_trace!($logger, "Persisting network graph.");
 					}
 
-					if let Err(e) = $persister.persist_graph(network_graph) {
+					if let Err(e) = $kv_store.write(
+						NETWORK_GRAPH_PERSISTENCE_PRIMARY_NAMESPACE,
+						NETWORK_GRAPH_PERSISTENCE_SECONDARY_NAMESPACE,
+						NETWORK_GRAPH_PERSISTENCE_KEY,
+						&network_graph.encode(),
+					) {
 						log_error!($logger, "Error: Failed to persist network graph, check your disk and permissions {}", e)
 					}
 
@@ -464,7 +482,12 @@ macro_rules! define_run_body {
 					} else {
 						log_trace!($logger, "Persisting scorer");
 					}
-					if let Err(e) = $persister.persist_scorer(&scorer) {
+					if let Err(e) = $kv_store.write(
+						SCORER_PERSISTENCE_PRIMARY_NAMESPACE,
+						SCORER_PERSISTENCE_SECONDARY_NAMESPACE,
+						SCORER_PERSISTENCE_KEY,
+						&scorer.encode(),
+					) {
 						log_error!($logger, "Error: Failed to persist scorer, check your disk and permissions {}", e)
 					}
 				}
@@ -487,16 +510,31 @@ macro_rules! define_run_body {
 		// After we exit, ensure we persist the ChannelManager one final time - this avoids
 		// some races where users quit while channel updates were in-flight, with
 		// ChannelMonitor update(s) persisted without a corresponding ChannelManager update.
-		$persister.persist_manager(&$channel_manager)?;
+		$kv_store.write(
+			CHANNEL_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE,
+			CHANNEL_MANAGER_PERSISTENCE_SECONDARY_NAMESPACE,
+			CHANNEL_MANAGER_PERSISTENCE_KEY,
+			&$channel_manager.get_cm().encode(),
+		)?;
 
 		// Persist Scorer on exit
 		if let Some(ref scorer) = $scorer {
-			$persister.persist_scorer(&scorer)?;
+			$kv_store.write(
+				SCORER_PERSISTENCE_PRIMARY_NAMESPACE,
+				SCORER_PERSISTENCE_SECONDARY_NAMESPACE,
+				SCORER_PERSISTENCE_KEY,
+				&scorer.encode(),
+			)?;
 		}
 
 		// Persist NetworkGraph on exit
 		if let Some(network_graph) = $gossip_sync.network_graph() {
-			$persister.persist_graph(network_graph)?;
+			$kv_store.write(
+				NETWORK_GRAPH_PERSISTENCE_PRIMARY_NAMESPACE,
+				NETWORK_GRAPH_PERSISTENCE_SECONDARY_NAMESPACE,
+				NETWORK_GRAPH_PERSISTENCE_KEY,
+				&network_graph.encode(),
+			)?;
 		}
 
 		Ok(())
@@ -684,7 +722,6 @@ use futures_util::{dummy_waker, OptionalSelector, Selector, SelectorOutput};
 /// #     FE: lightning::chain::chaininterface::FeeEstimator + Send + Sync + 'static,
 /// #     UL: lightning::routing::utxo::UtxoLookup + Send + Sync + 'static,
 /// #     D: lightning::sign::ChangeDestinationSource + Send + Sync + 'static,
-/// #     K: lightning::util::persist::KVStore + Send + Sync + 'static,
 /// #     O: lightning::sign::OutputSpender + Send + Sync + 'static,
 /// # > {
 /// #     peer_manager: Arc<PeerManager<B, F, FE, UL>>,
@@ -697,7 +734,7 @@ use futures_util::{dummy_waker, OptionalSelector, Selector, SelectorOutput};
 /// #     persister: Arc<Store>,
 /// #     logger: Arc<Logger>,
 /// #     scorer: Arc<Scorer>,
-/// #     sweeper: Arc<OutputSweeper<Arc<B>, Arc<D>, Arc<FE>, Arc<F>, Arc<K>, Arc<Logger>, Arc<O>>>,
+/// #     sweeper: Arc<OutputSweeper<Arc<B>, Arc<D>, Arc<FE>, Arc<F>, Arc<Store>, Arc<Logger>, Arc<O>>>,
 /// # }
 /// #
 /// # async fn setup_background_processing<
@@ -706,9 +743,8 @@ use futures_util::{dummy_waker, OptionalSelector, Selector, SelectorOutput};
 /// #     FE: lightning::chain::chaininterface::FeeEstimator + Send + Sync + 'static,
 /// #     UL: lightning::routing::utxo::UtxoLookup + Send + Sync + 'static,
 /// #     D: lightning::sign::ChangeDestinationSource + Send + Sync + 'static,
-/// #     K: lightning::util::persist::KVStore + Send + Sync + 'static,
 /// #     O: lightning::sign::OutputSpender + Send + Sync + 'static,
-/// # >(node: Node<B, F, FE, UL, D, K, O>) {
+/// # >(node: Node<B, F, FE, UL, D, O>) {
 ///	let background_persister = Arc::clone(&node.persister);
 ///	let background_event_handler = Arc::clone(&node.event_handler);
 ///	let background_chain_mon = Arc::clone(&node.chain_monitor);
@@ -780,7 +816,6 @@ pub async fn process_events_async<
 	P: 'static + Deref,
 	EventHandlerFuture: core::future::Future<Output = Result<(), ReplayEvent>>,
 	EventHandler: Fn(Event) -> EventHandlerFuture,
-	PS: 'static + Deref + Send,
 	ES: 'static + Deref + Send,
 	M: 'static
 		+ Deref<Target = ChainMonitor<<CM::Target as AChannelManager>::Signer, CF, T, F, L, P, ES>>
@@ -802,7 +837,7 @@ pub async fn process_events_async<
 	Sleeper: Fn(Duration) -> SleepFuture,
 	FetchTime: Fn() -> Option<Duration>,
 >(
-	persister: PS, event_handler: EventHandler, chain_monitor: M, channel_manager: CM,
+	kv_store: K, event_handler: EventHandler, chain_monitor: M, channel_manager: CM,
 	onion_messenger: Option<OM>, gossip_sync: GossipSync<PGS, RGS, G, UL, L>, peer_manager: PM,
 	liquidity_manager: Option<LM>, sweeper: Option<OS>, logger: L, scorer: Option<S>,
 	sleeper: Sleeper, mobile_interruptable_platform: bool, fetch_time: FetchTime,
@@ -814,7 +849,6 @@ where
 	F::Target: 'static + FeeEstimator,
 	L::Target: 'static + Logger,
 	P::Target: 'static + Persist<<CM::Target as AChannelManager>::Signer>,
-	PS::Target: 'static + Persister<'a, CM, L, S>,
 	ES::Target: 'static + EntropySource,
 	CM::Target: AChannelManager,
 	OM::Target: AOnionMessenger,
@@ -830,7 +864,7 @@ where
 		let event_handler = &event_handler;
 		let scorer = &scorer;
 		let logger = &logger;
-		let persister = &persister;
+		let kv_store = &kv_store;
 		let fetch_time = &fetch_time;
 		// We should be able to drop the Box once our MSRV is 1.68
 		Box::pin(async move {
@@ -841,7 +875,12 @@ where
 				if let Some(duration_since_epoch) = fetch_time() {
 					if update_scorer(scorer, &event, duration_since_epoch) {
 						log_trace!(logger, "Persisting scorer after update");
-						if let Err(e) = persister.persist_scorer(&*scorer) {
+						if let Err(e) = kv_store.write(
+							SCORER_PERSISTENCE_PRIMARY_NAMESPACE,
+							SCORER_PERSISTENCE_SECONDARY_NAMESPACE,
+							SCORER_PERSISTENCE_KEY,
+							&scorer.encode(),
+						) {
 							log_error!(logger, "Error: Failed to persist scorer, check your disk and permissions {}", e);
 							// We opt not to abort early on persistence failure here as persisting
 							// the scorer is non-critical and we still hope that it will have
@@ -855,7 +894,7 @@ where
 		})
 	};
 	define_run_body!(
-		persister,
+		kv_store,
 		chain_monitor,
 		chain_monitor.process_pending_events_async(async_event_handler).await,
 		channel_manager,
@@ -978,7 +1017,6 @@ impl BackgroundProcessor {
 		L: 'static + Deref + Send,
 		P: 'static + Deref,
 		EH: 'static + EventHandler + Send,
-		PS: 'static + Deref + Send,
 		ES: 'static + Deref + Send,
 		M: 'static
 			+ Deref<
@@ -996,10 +1034,10 @@ impl BackgroundProcessor {
 		SC: for<'b> WriteableScore<'b>,
 		D: 'static + Deref,
 		O: 'static + Deref,
-		K: 'static + Deref,
+		K: 'static + Deref + Send,
 		OS: 'static + Deref<Target = OutputSweeperSync<T, D, F, CF, K, L, O>> + Send,
 	>(
-		persister: PS, event_handler: EH, chain_monitor: M, channel_manager: CM,
+		kv_store: K, event_handler: EH, chain_monitor: M, channel_manager: CM,
 		onion_messenger: Option<OM>, gossip_sync: GossipSync<PGS, RGS, G, UL, L>, peer_manager: PM,
 		liquidity_manager: Option<LM>, sweeper: Option<OS>, logger: L, scorer: Option<S>,
 	) -> Self
@@ -1010,7 +1048,6 @@ impl BackgroundProcessor {
 		F::Target: 'static + FeeEstimator,
 		L::Target: 'static + Logger,
 		P::Target: 'static + Persist<<CM::Target as AChannelManager>::Signer>,
-		PS::Target: 'static + Persister<'a, CM, L, S>,
 		ES::Target: 'static + EntropySource,
 		CM::Target: AChannelManager,
 		OM::Target: AOnionMessenger,
@@ -1035,7 +1072,12 @@ impl BackgroundProcessor {
 						.expect("Time should be sometime after 1970");
 					if update_scorer(scorer, &event, duration_since_epoch) {
 						log_trace!(logger, "Persisting scorer after update");
-						if let Err(e) = persister.persist_scorer(&scorer) {
+						if let Err(e) = kv_store.write(
+							SCORER_PERSISTENCE_PRIMARY_NAMESPACE,
+							SCORER_PERSISTENCE_SECONDARY_NAMESPACE,
+							SCORER_PERSISTENCE_KEY,
+							&scorer.encode(),
+						) {
 							log_error!(logger, "Error: Failed to persist scorer, check your disk and permissions {}", e)
 						}
 					}
@@ -1043,7 +1085,7 @@ impl BackgroundProcessor {
 				event_handler.handle_event(event)
 			};
 			define_run_body!(
-				persister,
+				kv_store,
 				chain_monitor,
 				chain_monitor.process_pending_events(&event_handler),
 				channel_manager,
@@ -1256,7 +1298,7 @@ mod tests {
 		Arc<test_utils::TestBroadcaster>,
 		Arc<test_utils::TestFeeEstimator>,
 		Arc<test_utils::TestLogger>,
-		Arc<FilesystemStore>,
+		Arc<Persister>,
 		Arc<KeysManager>,
 	>;
 
@@ -1314,7 +1356,7 @@ mod tests {
 		>,
 		liquidity_manager: Arc<LM>,
 		chain_monitor: Arc<ChainMonitor>,
-		kv_store: Arc<FilesystemStore>,
+		kv_store: Arc<Persister>,
 		tx_broadcaster: Arc<test_utils::TestBroadcaster>,
 		network_graph: Arc<NetworkGraph<Arc<test_utils::TestLogger>>>,
 		logger: Arc<test_utils::TestLogger>,
@@ -1326,7 +1368,7 @@ mod tests {
 				Arc<TestWallet>,
 				Arc<test_utils::TestFeeEstimator>,
 				Arc<test_utils::TestChainSource>,
-				Arc<FilesystemStore>,
+				Arc<Persister>,
 				Arc<test_utils::TestLogger>,
 				Arc<KeysManager>,
 			>,
@@ -1417,6 +1459,10 @@ mod tests {
 
 		fn with_scorer_error(self, error: std::io::ErrorKind, message: &'static str) -> Self {
 			Self { scorer_error: Some((error, message)), ..self }
+		}
+
+		pub fn get_data_dir(&self) -> PathBuf {
+			self.kv_store.get_data_dir()
 		}
 	}
 
@@ -1662,7 +1708,7 @@ mod tests {
 			));
 			let chain_source = Arc::new(test_utils::TestChainSource::new(Network::Bitcoin));
 			let kv_store =
-				Arc::new(FilesystemStore::new(format!("{}_persister_{}", &persist_dir, i).into()));
+				Arc::new(Persister::new(format!("{}_persister_{}", &persist_dir, i).into()));
 			let now = Duration::from_secs(genesis_block.header.time as u64);
 			let keys_manager = Arc::new(KeysManager::new(&seed, now.as_secs(), now.subsec_nanos()));
 			let chain_monitor = Arc::new(chainmonitor::ChainMonitor::new(
