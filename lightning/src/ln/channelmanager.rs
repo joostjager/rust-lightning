@@ -2527,9 +2527,9 @@ pub struct ChannelManager<
 	router: R,
 
 	#[cfg(test)]
-	pub(super) flow: OffersMessageFlow<MR>,
+	pub(super) flow: OffersMessageFlow<MR, L>,
 	#[cfg(not(test))]
-	flow: OffersMessageFlow<MR>,
+	flow: OffersMessageFlow<MR, L>,
 
 	/// See `ChannelManager` struct-level documentation for lock order requirements.
 	#[cfg(any(test, feature = "_test_utils"))]
@@ -3738,7 +3738,7 @@ where
 		let flow = OffersMessageFlow::new(
 			ChainHash::using_genesis_block(params.network), params.best_block,
 			our_network_pubkey, current_timestamp, expanded_inbound_key,
-			node_signer.get_receive_auth_key(), secp_ctx.clone(), message_router
+			node_signer.get_receive_auth_key(), secp_ctx.clone(), message_router, logger.clone(),
 		);
 
 		ChannelManager {
@@ -16965,6 +16965,7 @@ where
 			args.node_signer.get_receive_auth_key(),
 			secp_ctx.clone(),
 			args.message_router,
+			args.logger.clone(),
 		)
 		.with_async_payments_offers_cache(async_receive_offer_cache);
 

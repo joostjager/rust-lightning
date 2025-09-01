@@ -62,6 +62,7 @@ use crate::sign::{EntropySource, NodeSigner, ReceiveAuthKey};
 use crate::offers::static_invoice::{StaticInvoice, StaticInvoiceBuilder};
 use crate::sync::{Mutex, RwLock};
 use crate::types::payment::{PaymentHash, PaymentSecret};
+use crate::util::logger::Logger;
 use crate::util::ser::Writeable;
 
 #[cfg(feature = "dnssec")]
@@ -75,9 +76,10 @@ use {
 ///
 /// [`OffersMessageFlow`] is parameterized by a [`MessageRouter`], which is responsible
 /// for finding message paths when initiating and retrying onion messages.
-pub struct OffersMessageFlow<MR: Deref>
+pub struct OffersMessageFlow<MR: Deref, L: Deref>
 where
 	MR::Target: MessageRouter,
+	L::Target: Logger,
 {
 	chain_hash: ChainHash,
 	best_block: RwLock<BestBlock>,
@@ -103,17 +105,21 @@ where
 	pub(crate) hrn_resolver: OMNameResolver,
 	#[cfg(feature = "dnssec")]
 	pending_dns_onion_messages: Mutex<Vec<(DNSResolverMessage, MessageSendInstructions)>>,
+
+	logger: L,
 }
 
-impl<MR: Deref> OffersMessageFlow<MR>
+impl<MR: Deref, L: Deref> OffersMessageFlow<MR, L>
 where
 	MR::Target: MessageRouter,
+	L::Target: Logger,
 {
 	/// Creates a new [`OffersMessageFlow`]
 	pub fn new(
 		chain_hash: ChainHash, best_block: BestBlock, our_network_pubkey: PublicKey,
 		current_timestamp: u32, inbound_payment_key: inbound_payment::ExpandedKey,
 		receive_auth_key: ReceiveAuthKey, secp_ctx: Secp256k1<secp256k1::All>, message_router: MR,
+		logger: L,
 	) -> Self {
 		Self {
 			chain_hash,
@@ -137,6 +143,8 @@ where
 			pending_dns_onion_messages: Mutex::new(Vec::new()),
 
 			async_receive_offer_cache: Mutex::new(AsyncReceiveOfferCache::new()),
+
+			logger,
 		}
 	}
 
@@ -260,9 +268,10 @@ const DEFAULT_ASYNC_RECEIVE_OFFER_EXPIRY: Duration = Duration::from_secs(365 * 2
 pub(crate) const TEST_DEFAULT_ASYNC_RECEIVE_OFFER_EXPIRY: Duration =
 	DEFAULT_ASYNC_RECEIVE_OFFER_EXPIRY;
 
-impl<MR: Deref> OffersMessageFlow<MR>
+impl<MR: Deref, L: Deref> OffersMessageFlow<MR, L>
 where
 	MR::Target: MessageRouter,
+	L::Target: Logger,
 {
 	/// [`BlindedMessagePath`]s for an async recipient to communicate with this node and interactively
 	/// build [`Offer`]s and [`StaticInvoice`]s for receiving async payments.
@@ -409,9 +418,10 @@ pub enum InvreqResponseInstructions {
 	},
 }
 
-impl<MR: Deref> OffersMessageFlow<MR>
+impl<MR: Deref, L: Deref> OffersMessageFlow<MR, L>
 where
 	MR::Target: MessageRouter,
+	L::Target: Logger,
 {
 	/// Verifies an [`InvoiceRequest`] using the provided [`OffersContext`] or the [`InvoiceRequest::metadata`].
 	///
