@@ -1408,7 +1408,14 @@ where
 			});
 
 			match self.create_blinded_paths(peers, context) {
-				Ok(paths) => (paths, path_absolute_expiry),
+				Ok(paths) => {
+					log_trace!(
+						self.logger,
+						"Created blinded paths for async receive offer: {:?}",
+						paths
+					);
+					(paths, path_absolute_expiry)
+				},
 				Err(()) => return None,
 			}
 		};

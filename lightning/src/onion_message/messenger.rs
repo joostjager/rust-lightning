@@ -647,8 +647,13 @@ where
 
 		let first_node = match destination.first_node() {
 			Some(first_node) => first_node,
-			None => return Err(()),
+			None => {
+				println!("DEBUG: Failed to find destination");
+				return Err(());
+			},
 		};
+
+		println!("Trying to reach: {}", first_node);
 
 		if peers.contains(&first_node) || sender == first_node {
 			Ok(OnionMessagePath {
@@ -675,7 +680,10 @@ where
 						first_node_addresses,
 					})
 				},
-				_ => Err(()),
+				_ => {
+					println!("DEBUG: Failed to find path");
+					Err(())
+				},
 			}
 		}
 	}
@@ -1460,7 +1468,7 @@ where
 		};
 
 		let mut logger = WithContext::from(&self.logger, None, None, None);
-		let result = self.find_path(destination).and_then(|path| {
+		let result = self.find_path(destination.clone()).and_then(|path| {
 			let first_hop = path.intermediate_nodes.get(0).map(|p| *p);
 			logger = WithContext::from(&self.logger, first_hop, None, None);
 			self.enqueue_onion_message(path, contents, reply_path, log_suffix)
@@ -1471,7 +1479,7 @@ where
 				log_warn!(logger, "Unable to retrieve node id {}", log_suffix);
 			},
 			Err(SendError::PathNotFound) => {
-				log_trace!(logger, "Failed to find path {}", log_suffix);
+				log_trace!(logger, "Failed to find path to {:?} {}", destination, log_suffix);
 			},
 			Err(e) => {
 				log_trace!(logger, "Failed sending onion message {}: {:?}", log_suffix, e);

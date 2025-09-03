@@ -12273,6 +12273,7 @@ where
 		let invoice_request = builder.build_and_sign()?;
 		let _persistence_guard = PersistenceNotifierGuard::notify_on_drop(self);
 
+		log_debug!(self.logger, "Enqueuing invoice request for offer (pay_for_offer_intern)");
 		self.flow.enqueue_invoice_request(
 			invoice_request.clone(), payment_id, nonce,
 			self.get_peers_for_blinded_path()
@@ -14306,6 +14307,7 @@ where
 			let RetryableInvoiceRequest { invoice_request, nonce, .. } = retryable_invoice_request;
 
 			let peers = self.get_peers_for_blinded_path();
+			log_debug!(self.logger, "Enqueuing invoice request for offer (message_received)");
 			let enqueue_invreq_res =
 				self.flow.enqueue_invoice_request(invoice_request, payment_id, nonce, peers);
 			if enqueue_invreq_res.is_err() {

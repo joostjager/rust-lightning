@@ -188,7 +188,7 @@ where
 	secp_ctx: Secp256k1<secp256k1::VerifyOnly>,
 	last_rapid_gossip_sync_timestamp: Mutex<Option<u32>>,
 	chain_hash: ChainHash,
-	logger: L,
+	pub(crate) logger: L,
 	// Lock order: channels -> nodes
 	channels: RwLock<IndexedMap<u64, ChannelInfo>>,
 	nodes: RwLock<IndexedMap<NodeId, NodeInfo>>,
