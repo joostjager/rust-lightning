@@ -189,7 +189,7 @@ impl AsyncReceiveOfferCache {
 // The target number of offers we want to have cached at any given time, to mitigate too much
 // reuse of the same offer while also limiting the amount of space our offers take up on the
 // server's end.
-const MAX_CACHED_OFFERS_TARGET: usize = 10;
+const MAX_CACHED_OFFERS_TARGET: usize = 1;
 
 // The max number of times we'll attempt to request offer paths per timer tick.
 const MAX_UPDATE_ATTEMPTS: u8 = 3;
