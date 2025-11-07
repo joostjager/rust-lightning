@@ -1006,6 +1006,20 @@ where
 	}
 }
 
+pub fn span_from_context<S: Deref>(
+	context: &ChannelContext<S>, payment_hash: Option<PaymentHash>,
+) -> tracing::Span
+where
+	S::Target: SignerProvider,
+{
+	tracing::info_span!(
+		"channel",
+		peer_id = %context.counterparty_node_id,
+		channel_id = %context.channel_id,
+		payment_hash = %payment_hash
+	)
+}
+
 macro_rules! secp_check {
 	($res: expr, $err: expr) => {
 		match $res {
