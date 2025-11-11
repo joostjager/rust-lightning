@@ -2423,6 +2423,7 @@ impl FundingScope {
 		self.channel_transaction_parameters.channel_value_satoshis
 	}
 
+	#[cfg(not(feature = "safe_channels"))]
 	pub(crate) fn get_value_to_self_msat(&self) -> u64 {
 		self.value_to_self_msat
 	}
@@ -10853,10 +10854,12 @@ where
 			.try_for_each(|funding| self.context.can_accept_incoming_htlc(funding, dust_exposure_limiting_feerate, &logger))
 	}
 
+	#[cfg(not(feature = "safe_channels"))]
 	pub fn get_cur_holder_commitment_transaction_number(&self) -> u64 {
 		self.holder_commitment_point.current_transaction_number()
 	}
 
+	#[cfg(not(feature = "safe_channels"))]
 	pub fn get_cur_counterparty_commitment_transaction_number(&self) -> u64 {
 		self.context.counterparty_next_commitment_transaction_number + 1
 			- if self.context.channel_state.is_awaiting_remote_revoke() { 1 } else { 0 }
@@ -10970,6 +10973,7 @@ where
 	/// transaction. If the channel is inbound, this implies simply that the channel has not
 	/// advanced state.
 	#[rustfmt::skip]
+	#[cfg(not(feature = "safe_channels"))]
 	pub fn is_awaiting_initial_mon_persist(&self) -> bool {
 		if !self.is_awaiting_monitor_update() { return false; }
 		if matches!(

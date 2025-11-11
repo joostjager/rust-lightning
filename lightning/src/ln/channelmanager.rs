@@ -16769,6 +16769,8 @@ where
 		let mut short_to_chan_info = hash_map_with_capacity(cmp::min(channel_count as usize, 128));
 		let mut channel_closures = VecDeque::new();
 		let mut close_background_events = Vec::new();
+
+		#[cfg(not(feature = "safe_channels"))]
 		for _ in 0..channel_count {
 			let mut channel: FundedChannel<SP> = FundedChannel::read(
 				reader,
@@ -16966,6 +16968,74 @@ where
 				log_error!(logger, " Please ensure the chain::Watch API requirements are met and file a bug report at https://github.com/lightningdevkit/rust-lightning");
 				return Err(DecodeError::InvalidValue);
 			}
+		}
+
+		// Suppress unused mutable variable warning when safe_channels is enabled.
+		#[cfg(feature = "safe_channels")]
+		let _ = &mut args;
+
+		// Discard channel manager versions of channels.
+		#[cfg(feature = "safe_channels")]
+		for _ in 0..channel_count {
+			_ = FundedChannel::read(
+				reader,
+				(
+					&args.entropy_source,
+					&args.signer_provider,
+					&provided_channel_type_features(&args.config),
+				),
+			)?;
+		}
+
+		// Decode channels from monitors.
+		#[cfg(feature = "safe_channels")]
+		for (_, monitor) in args.channel_monitors.iter() {
+			let opt_encoded_channel = monitor.get_encoded_channel();
+			if opt_encoded_channel.is_none() {
+				// Monitor still exists, but there is no more channel state. This can happen after channel shut down.
+				continue;
+			}
+			let encoded_channel = opt_encoded_channel.unwrap();
+			let encoded_channel_reader = &mut &encoded_channel[..];
+			let mut channel: FundedChannel<SP> = FundedChannel::read(
+				encoded_channel_reader,
+				(
+					&args.entropy_source,
+					&args.signer_provider,
+					&provided_channel_type_features(&args.config),
+				),
+			)?;
+			let logger = WithChannelContext::from(&args.logger, &channel.context, None);
+			let channel_id = channel.context.channel_id();
+			channel_id_set.insert(channel_id);
+
+			channel.on_startup_drop_completed_blocked_mon_updates_through(
+				&logger,
+				monitor.get_latest_update_id(),
+			);
+			log_info!(logger, "Successfully loaded at update_id {} against monitor at update id {} with {} blocked updates",
+						channel.context.get_latest_monitor_update_id(),
+						monitor.get_latest_update_id(), channel.blocked_monitor_updates_pending());
+			if let Some(short_channel_id) = channel.funding.get_short_channel_id() {
+				short_to_chan_info.insert(
+					short_channel_id,
+					(channel.context.get_counterparty_node_id(), channel.context.channel_id()),
+				);
+			}
+
+			for short_channel_id in channel.context.historical_scids() {
+				let cp_id = channel.context.get_counterparty_node_id();
+				let chan_id = channel.context.channel_id();
+				short_to_chan_info.insert(*short_channel_id, (cp_id, chan_id));
+			}
+
+			per_peer_state
+				.entry(channel.context.get_counterparty_node_id())
+				.or_insert_with(|| Mutex::new(empty_peer_state()))
+				.get_mut()
+				.unwrap()
+				.channel_by_id
+				.insert(channel.context.channel_id(), Channel::from(channel));
 		}
 
 		for (channel_id, monitor) in args.channel_monitors.iter() {
