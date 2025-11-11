@@ -9087,6 +9087,8 @@ This indicates a bug inside LDK. Please report this error at https://github.com/
 				payment_info,
 			}],
 			channel_id: Some(prev_hop.channel_id),
+			#[cfg(feature = "safe_channels")]
+			encoded_channel: None,
 		};
 
 		// We don't have any idea if this is a duplicate claim without interrogating the
@@ -10305,6 +10307,10 @@ This indicates a bug inside LDK. Please report this error at https://github.com/
 				fail_chan!("Already had channel with the new channel_id");
 			},
 			hash_map::Entry::Vacant(e) => {
+				#[cfg(feature = "safe_channels")]
+				{
+					monitor.update_encoded_channel(chan.encode());
+				}
 				let monitor_res = self.chain_monitor.watch_channel(monitor.channel_id(), monitor);
 				if let Ok(persist_state) = monitor_res {
 					// There's no problem signing a counterparty's funding transaction if our monitor
@@ -10469,6 +10475,10 @@ This indicates a bug inside LDK. Please report this error at https://github.com/
 				match chan
 					.funding_signed(&msg, best_block, &self.signer_provider, &self.logger)
 					.and_then(|(funded_chan, monitor)| {
+						#[cfg(feature = "safe_channels")]
+						{
+							monitor.update_encoded_channel(funded_chan.encode());
+						}
 						self.chain_monitor
 							.watch_channel(funded_chan.context.channel_id(), monitor)
 							.map_err(|()| {
@@ -11186,6 +11196,10 @@ This indicates a bug inside LDK. Please report this error at https://github.com/
 
 				if let Some(chan) = chan.as_funded_mut() {
 					if let Some(monitor) = monitor_opt {
+						#[cfg(feature = "safe_channels")]
+						{
+							monitor.update_encoded_channel(chan.encode());
+						}
 						let monitor_res = self.chain_monitor.watch_channel(monitor.channel_id(), monitor);
 						if let Ok(persist_state) = monitor_res {
 							handle_initial_monitor!(self, persist_state, peer_state_lock, peer_state,
@@ -13608,6 +13622,8 @@ where
 						updates: vec![ChannelMonitorUpdateStep::ReleasePaymentComplete {
 							htlc: htlc_id,
 						}],
+						#[cfg(feature = "safe_channels")]
+						encoded_channel: None,
 					};
 
 					let during_startup =
@@ -16994,6 +17010,8 @@ where
 						should_broadcast: true,
 					}],
 					channel_id: Some(monitor.channel_id()),
+					#[cfg(feature = "safe_channels")]
+					encoded_channel: Some(Vec::new()),
 				};
 				log_info!(
 					logger,
@@ -17630,6 +17648,8 @@ where
 												updates: vec![ChannelMonitorUpdateStep::ReleasePaymentComplete {
 													htlc: htlc_id,
 												}],
+												#[cfg(feature = "safe_channels")]
+												encoded_channel: None,
 											},
 										});
 									}
