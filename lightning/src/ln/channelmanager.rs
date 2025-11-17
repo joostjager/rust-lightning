@@ -16886,6 +16886,38 @@ where
 	}
 }
 
+// If the HTLC corresponding to `prev_hop_data` is present in `decode_update_add_htlcs`, remove it
+// from the map as it is already being stored and processed elsewhere.
+fn dedup_decode_update_add_htlcs<L: Deref>(
+	decode_update_add_htlcs: &mut HashMap<u64, Vec<msgs::UpdateAddHTLC>>,
+	prev_hop_data: &HTLCPreviousHopData, removal_reason: &'static str, logger: &L,
+) where
+	L::Target: Logger,
+{
+	decode_update_add_htlcs.retain(|src_outb_alias, update_add_htlcs| {
+		update_add_htlcs.retain(|update_add| {
+			let matches = *src_outb_alias == prev_hop_data.prev_outbound_scid_alias
+				&& update_add.htlc_id == prev_hop_data.htlc_id;
+			if matches {
+				let logger = WithContext::from(
+					logger,
+					prev_hop_data.counterparty_node_id,
+					Some(update_add.channel_id),
+					Some(update_add.payment_hash),
+				);
+				log_info!(
+					logger,
+					"Removing pending to-decode HTLC with id {}: {}",
+					update_add.htlc_id,
+					removal_reason
+				);
+			}
+			!matches
+		});
+		!update_add_htlcs.is_empty()
+	});
+}
+
 // Implement ReadableArgs for an Arc'd ChannelManager to make it a bit easier to work with the
 // SipmleArcChannelManager type:
 impl<
@@ -16948,7 +16980,7 @@ where
 	#[cfg(not(feature = "safe_channels"))]
 	fn read<Reader: io::Read>(
 		_reader: &mut Reader, mut _args: ChannelManagerReadArgs<'a, M, T, ES, NS, SP, F, R, MR, L>,
-	) -> Result<Self, DecodeError> 	{
+	) -> Result<Self, DecodeError> {
 		unimplemented!();
 	}
 
