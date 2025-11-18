@@ -16736,16 +16736,25 @@ where
 			is_connected: false,
 		};
 
+		// Failed htlcs, but in what context exactly?
 		let mut failed_htlcs = Vec::new();
+
 		let channel_count: u64 = Readable::read(reader)?;
 		let mut channel_id_set = hash_set_with_capacity(cmp::min(channel_count as usize, 128));
 		let mut per_peer_state = hash_map_with_capacity(cmp::min(
 			channel_count as usize,
 			MAX_ALLOC_SIZE / mem::size_of::<(PublicKey, Mutex<PeerState<SP>>)>(),
 		));
+
+		// What info specifically do we have per channel?
 		let mut short_to_chan_info = hash_map_with_capacity(cmp::min(channel_count as usize, 128));
+
+		// Are these new closures or already known before the restart?
 		let mut channel_closures = VecDeque::new();
+
+		// What is a close background event?
 		let mut close_background_events = Vec::new();
+
 		for _ in 0..channel_count {
 			let mut channel: FundedChannel<SP> = FundedChannel::read(
 				reader,
@@ -16759,6 +16768,7 @@ where
 			let channel_id = channel.context.channel_id();
 			channel_id_set.insert(channel_id);
 			if let Some(ref mut monitor) = args.channel_monitors.get_mut(&channel_id) {
+				// For all of these conditions, what causes the channel to be ahead of the monitor?
 				if channel.get_cur_holder_commitment_transaction_number()
 					> monitor.get_cur_holder_commitment_number()
 					|| channel.get_revoked_counterparty_commitment_transaction_number()
@@ -16830,6 +16840,7 @@ where
 							},
 						);
 					}
+					// Why do we need to push to failed_htlcs?
 					for (source, hash, cp_id, chan_id) in shutdown_result.dropped_outbound_htlcs {
 						let reason = LocalHTLCFailureReason::ChannelClosed;
 						failed_htlcs.push((source, hash, cp_id, chan_id, reason, None));
@@ -16846,6 +16857,8 @@ where
 						},
 						None,
 					));
+
+					// What is the purpose of the loop below?
 					for (channel_htlc_source, payment_hash) in channel.inflight_htlc_sources() {
 						let mut found_htlc = false;
 						for (monitor_htlc_source, _) in monitor.get_all_current_outbound_htlcs() {
@@ -16881,6 +16894,7 @@ where
 						}
 					}
 				} else {
+					// Can we just drop updates here?
 					channel.on_startup_drop_completed_blocked_mon_updates_through(
 						&logger,
 						monitor.get_latest_update_id(),
@@ -16898,6 +16912,7 @@ where
 						);
 					}
 
+					// Why do we need to add historical scids here?
 					for short_channel_id in channel.context.historical_scids() {
 						let cp_id = channel.context.get_counterparty_node_id();
 						let chan_id = channel.context.channel_id();
@@ -16945,17 +16960,19 @@ where
 			}
 		}
 
+		// Explain the purpose of this second loop over channels.
 		for (channel_id, monitor) in args.channel_monitors.iter() {
 			if !channel_id_set.contains(channel_id) {
+				// We have a monitor for a channel the ChannelManager doesn't know about? How can it happen?
 				let mut should_queue_fc_update = false;
 				let counterparty_node_id = monitor.get_counterparty_node_id();
 
 				// If the ChannelMonitor had any updates, we may need to update it further and
-				// thus track it in `closed_channel_monitor_update_ids`. If the channel never
+				// thus track it in `closed_channel_monitor_update_ids`. Why? If the channel never
 				// had any updates at all, there can't be any HTLCs pending which we need to
 				// claim.
 				// Note that a `ChannelMonitor` is created with `update_id` 0 and after we
-				// provide it with a closure update its `update_id` will be at 1.
+				// provide it with a closure update its `update_id` will be at 1. To which code does this comment refer?
 				if !monitor.no_further_updates_allowed() || monitor.get_latest_update_id() > 1 {
 					should_queue_fc_update = !monitor.no_further_updates_allowed();
 					let mut latest_update_id = monitor.get_latest_update_id();
@@ -16964,6 +16981,7 @@ where
 						// `u64::MAX`.
 						latest_update_id = latest_update_id.saturating_add(1);
 					}
+					// What is happening exactly below? It's a long expression.
 					per_peer_state
 						.entry(counterparty_node_id)
 						.or_insert_with(|| Mutex::new(empty_peer_state()))
@@ -16975,6 +16993,7 @@ where
 						.or_insert(latest_update_id);
 				}
 
+				// This loop is about force closing?
 				if !should_queue_fc_update {
 					continue;
 				}
@@ -16994,6 +17013,7 @@ where
 					channel_id: Some(monitor.channel_id()),
 				};
 				let funding_txo = monitor.get_funding_txo();
+				// What is the idea of generating a background event here?
 				let update = BackgroundEvent::MonitorUpdateRegeneratedOnStartup {
 					counterparty_node_id,
 					funding_txo,
@@ -17004,9 +17024,12 @@ where
 			}
 		}
 
+		// This isn't the actual max, but just the initial allocation?
 		const MAX_ALLOC_SIZE: usize = 1024 * 64;
 		let forward_htlcs_count: u64 = Readable::read(reader)?;
 		let mut forward_htlcs = hash_map_with_capacity(cmp::min(forward_htlcs_count as usize, 128));
+
+		// Read forward htlcs. What state are these in exactly?
 		for _ in 0..forward_htlcs_count {
 			let short_channel_id = Readable::read(reader)?;
 			let pending_forwards_count: u64 = Readable::read(reader)?;
@@ -17020,6 +17043,7 @@ where
 			forward_htlcs.insert(short_channel_id, pending_forwards);
 		}
 
+		// Read claimable htlc. Explain what they are.
 		let claimable_htlcs_count: u64 = Readable::read(reader)?;
 		let mut claimable_htlcs_list =
 			Vec::with_capacity(cmp::min(claimable_htlcs_count as usize, 128));
@@ -17036,6 +17060,7 @@ where
 			claimable_htlcs_list.push((payment_hash, previous_hops));
 		}
 
+		// Read peer latest features. Aren't those available from the graph?
 		let peer_count: u64 = Readable::read(reader)?;
 		for _ in 0..peer_count {
 			let peer_pubkey: PublicKey = Readable::read(reader)?;
@@ -17045,6 +17070,7 @@ where
 			}
 		}
 
+		// Read pending events.
 		let event_count: u64 = Readable::read(reader)?;
 		let mut pending_events_read: VecDeque<(events::Event, Option<EventCompletionAction>)> =
 			VecDeque::with_capacity(cmp::min(
@@ -17058,6 +17084,7 @@ where
 			}
 		}
 
+		// Discard background events.
 		let background_event_count: u64 = Readable::read(reader)?;
 		for _ in 0..background_event_count {
 			match <u8 as Readable>::read(reader)? {
@@ -17075,6 +17102,7 @@ where
 		let _last_node_announcement_serial: u32 = Readable::read(reader)?; // Only used < 0.0.111
 		let highest_seen_timestamp: u32 = Readable::read(reader)?;
 
+		// Discard pending inbound payments.
 		// The last version where a pending inbound payment may have been added was 0.0.116.
 		let pending_inbound_payment_count: u64 = Readable::read(reader)?;
 		for _ in 0..pending_inbound_payment_count {
@@ -17089,6 +17117,7 @@ where
 			);
 		}
 
+		// Read pending outbound (legacy?) payments.
 		let pending_outbound_payments_count_compat: u64 = Readable::read(reader)?;
 		let mut pending_outbound_payments_compat: HashMap<PaymentId, PendingOutboundPayment> =
 			hash_map_with_capacity(cmp::min(
@@ -17097,6 +17126,7 @@ where
 			));
 		for _ in 0..pending_outbound_payments_count_compat {
 			let session_priv = Readable::read(reader)?;
+			// Explain why legacy?
 			let payment = PendingOutboundPayment::Legacy {
 				session_privs: hash_set_from_iter([session_priv]),
 			};
@@ -17153,6 +17183,8 @@ where
 		});
 		let mut decode_update_add_htlcs = decode_update_add_htlcs.unwrap_or_else(|| new_hash_map());
 		let peer_storage_dir: Vec<(PublicKey, Vec<u8>)> = peer_storage_dir.unwrap_or_else(Vec::new);
+
+		// Why do we need to init random bytes here? Is it safe to lose chan mgr data and regenerate here?
 		if fake_scid_rand_bytes.is_none() {
 			fake_scid_rand_bytes = Some(args.entropy_source.get_secure_random_bytes());
 		}
@@ -17165,14 +17197,17 @@ where
 			inbound_payment_id_secret = Some(args.entropy_source.get_secure_random_bytes());
 		}
 
+		// Why do we need to override events here? What events are these?
 		if let Some(events) = events_override {
 			pending_events_read = events;
 		}
 
+		// Moving everything to a single list?
 		if !channel_closures.is_empty() {
 			pending_events_read.append(&mut channel_closures);
 		}
 
+		// What is happening below?
 		if pending_outbound_payments.is_none() && pending_outbound_payments_no_retry.is_none() {
 			pending_outbound_payments = Some(pending_outbound_payments_compat);
 		} else if pending_outbound_payments.is_none() {
@@ -17185,13 +17220,14 @@ where
 		let pending_outbounds =
 			OutboundPayments::new(pending_outbound_payments.unwrap(), args.logger.clone());
 
+		// Copy storage location to peer state?
 		for (peer_pubkey, peer_storage) in peer_storage_dir {
 			if let Some(peer_state) = per_peer_state.get_mut(&peer_pubkey) {
 				peer_state.get_mut().unwrap().peer_storage = peer_storage;
 			}
 		}
 
-		// Handle transitioning from the legacy TLV to the new one on upgrades.
+		// Handle transitioning from the legacy TLV to the new one on upgrades. Which legacy TLV?
 		if let Some(legacy_in_flight_upds) = legacy_in_flight_monitor_updates {
 			// We should never serialize an empty map.
 			if legacy_in_flight_upds.is_empty() {
@@ -17231,6 +17267,7 @@ where
 			) => { {
 				let mut max_in_flight_update_id = 0;
 				let starting_len =  $chan_in_flight_upds.len();
+				// Filter out already completed updates.
 				$chan_in_flight_upds.retain(|upd| upd.update_id > $monitor.get_latest_update_id());
 				if $chan_in_flight_upds.len() < starting_len {
 					log_debug!(
@@ -17244,6 +17281,7 @@ where
 					log_debug!($logger, "Replaying ChannelMonitorUpdate {} for {}channel {}",
 						update.update_id, $channel_info_log, &$monitor.channel_id());
 					max_in_flight_update_id = cmp::max(max_in_flight_update_id, update.update_id);
+					// Does replay mean that we push background events?
 					pending_background_events.push(
 						BackgroundEvent::MonitorUpdateRegeneratedOnStartup {
 							counterparty_node_id: $counterparty_node_id,
@@ -17262,11 +17300,13 @@ where
 							channel_id: $monitor.channel_id(),
 						});
 				} else {
+					// Are we dealing with a closed channel here?
 					$peer_state.closed_channel_monitor_update_ids.entry($monitor.channel_id())
 						.and_modify(|v| *v = cmp::max(max_in_flight_update_id, *v))
 						.or_insert(max_in_flight_update_id);
 				}
 				if $peer_state.in_flight_monitor_updates.insert($monitor.channel_id(), (funding_txo, $chan_in_flight_upds)).is_some() {
+					// How can this happen?
 					log_error!($logger, "Duplicate in-flight monitor update set for the same channel!");
 					return Err(DecodeError::InvalidValue);
 				}
@@ -17274,6 +17314,7 @@ where
 			} }
 		}
 
+		// Describe loop below.
 		for (counterparty_id, peer_state_mtx) in per_peer_state.iter_mut() {
 			let mut peer_state_lock = peer_state_mtx.lock().unwrap();
 			let peer_state = &mut *peer_state_lock;
@@ -17305,6 +17346,8 @@ where
 							);
 						}
 					}
+
+					// Another stale check. Maybe it can be merged with the check at the very top of the read method?
 					if funded_chan.get_latest_unblocked_monitor_update_id()
 						> max_in_flight_update_id
 					{
@@ -17340,6 +17383,7 @@ where
 					// Now that we've removed all the in-flight monitor updates for channels that are
 					// still open, we need to replay any monitor updates that are for closed channels,
 					// creating the neccessary peer_state entries as we go.
+					// Is this ordering of first the open channels and then the closed channels important?
 					let peer_state_mutex = per_peer_state
 						.entry(counterparty_id)
 						.or_insert_with(|| Mutex::new(empty_peer_state()));
@@ -17374,7 +17418,7 @@ where
 		}
 
 		// The newly generated `close_background_events` have to be added after any updates that
-		// were already in-flight on shutdown, so we append them here.
+		// were already in-flight on shutdown, so we append them here. Why this order?
 		pending_background_events.reserve(close_background_events.len());
 		'each_bg_event: for mut new_event in close_background_events {
 			if let BackgroundEvent::MonitorUpdateRegeneratedOnStartup {
@@ -17398,6 +17442,7 @@ where
 						update: pending_update,
 					} = pending_event
 					{
+						// Below seems to be a form of reconciliation?
 						let for_same_channel = counterparty_node_id == pending_cp
 							&& funding_txo == pending_funding
 							&& channel_id == pending_chan_id;
@@ -17421,6 +17466,7 @@ where
 					.expect("If we have pending updates for a channel it must have an entry")
 					.lock()
 					.unwrap();
+				// Describe modification below.
 				if updated_id {
 					per_peer_state
 						.closed_channel_monitor_update_ids
@@ -17428,6 +17474,7 @@ where
 						.and_modify(|v| *v = cmp::max(update.update_id, *v))
 						.or_insert(update.update_id);
 				}
+				// Append in flight update.
 				let in_flight_updates = &mut per_peer_state
 					.in_flight_monitor_updates
 					.entry(*channel_id)
@@ -17494,6 +17541,7 @@ where
 					}
 				}
 			}
+			// Re-claim and re-fail pending payments.
 			for (channel_id, monitor) in args.channel_monitors.iter() {
 				let mut is_channel_closed = true;
 				let counterparty_node_id = monitor.get_counterparty_node_id();
@@ -17524,6 +17572,7 @@ where
 								// still have an entry for this HTLC in `forward_htlcs` or
 								// `pending_intercepted_htlcs`, we were apparently not persisted after
 								// the monitor was when forwarding the payment.
+								// Can those htlcs simply be filtered out if the channel is closed?
 								decode_update_add_htlcs.retain(|src_outb_alias, update_add_htlcs| {
 									update_add_htlcs.retain(|update_add_htlc| {
 										let matches = *src_outb_alias == prev_hop_data.prev_outbound_scid_alias &&
@@ -17568,6 +17617,7 @@ where
 								bolt12_invoice,
 								..
 							} => {
+								// Describe what we do here.
 								if let Some(preimage) = preimage_opt {
 									let pending_events = Mutex::new(pending_events_read);
 									let update = PaymentCompleteUpdate {
@@ -17771,7 +17821,7 @@ where
 		}
 
 		let expanded_inbound_key = args.node_signer.get_expanded_key();
-
+		// Describe next section.
 		let mut claimable_payments = hash_map_with_capacity(claimable_htlcs_list.len());
 		if let Some(purposes) = claimable_htlc_purposes {
 			if purposes.len() != claimable_htlcs_list.len() {
@@ -17882,6 +17932,7 @@ where
 			}
 		}
 
+		// Describe this section.
 		let mut outbound_scid_aliases = new_hash_set();
 		for (_peer_node_id, peer_state_mutex) in per_peer_state.iter_mut() {
 			let mut peer_state_lock = peer_state_mutex.lock().unwrap();
@@ -17891,6 +17942,7 @@ where
 					let logger = WithChannelContext::from(&args.logger, &funded_chan.context, None);
 					if funded_chan.context.outbound_scid_alias() == 0 {
 						let mut outbound_scid_alias;
+						// Describe loop below.
 						loop {
 							outbound_scid_alias = fake_scid::Namespace::OutboundAlias
 								.get_fake_scid(
@@ -17941,6 +17993,7 @@ where
 
 		let bounded_fee_estimator = LowerBoundedFeeEstimator::new(args.fee_estimator);
 
+		// Describe section below.
 		for (node_id, monitor_update_blocked_actions) in
 			monitor_update_blocked_actions_per_peer.unwrap()
 		{
@@ -18098,6 +18151,7 @@ where
 			testing_dnssec_proof_offer_resolution_override: Mutex::new(new_hash_map()),
 		};
 
+		// Describe section below.
 		let mut processed_claims: HashSet<Vec<MPPClaimHTLCSource>> = new_hash_set();
 		for (_, monitor) in args.channel_monitors.iter() {
 			for (payment_hash, (payment_preimage, payment_claims)) in monitor.get_stored_preimages()
@@ -18186,6 +18240,7 @@ where
 							}
 						}
 
+						// Claim mpp parts.
 						for part in payment_claim.mpp_parts.iter() {
 							let pending_mpp_claim = pending_claim_ptr_opt.as_ref().map(|ptr| {
 								(
@@ -18334,6 +18389,7 @@ where
 			}
 		}
 
+		// Describe section below.
 		for htlc_source in failed_htlcs {
 			let (source, hash, counterparty_id, channel_id, failure_reason, ev_action) =
 				htlc_source;
