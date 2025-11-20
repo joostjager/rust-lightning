@@ -265,7 +265,6 @@ pub struct AsyncPersister<
 	FE: Deref + MaybeSend + MaybeSync + 'static,
 > where
 	K::Target: KVStore + MaybeSync,
-	L::Target: Logger,
 	ES::Target: EntropySource + Sized,
 	SP::Target: SignerProvider + Sized,
 	BI::Target: BroadcasterInterface,
@@ -286,7 +285,6 @@ impl<
 	> Deref for AsyncPersister<K, S, L, ES, SP, BI, FE>
 where
 	K::Target: KVStore + MaybeSync,
-	L::Target: Logger,
 	ES::Target: EntropySource + Sized,
 	SP::Target: SignerProvider + Sized,
 	BI::Target: BroadcasterInterface,
@@ -309,7 +307,6 @@ impl<
 	> Persist<<SP::Target as SignerProvider>::EcdsaSigner> for AsyncPersister<K, S, L, ES, SP, BI, FE>
 where
 	K::Target: KVStore + MaybeSync,
-	L::Target: Logger,
 	ES::Target: EntropySource + Sized,
 	SP::Target: SignerProvider + Sized,
 	BI::Target: BroadcasterInterface,
@@ -371,7 +368,6 @@ pub struct ChainMonitor<
 	C::Target: chain::Filter,
 	T::Target: BroadcasterInterface,
 	F::Target: FeeEstimator,
-	L::Target: Logger,
 	P::Target: Persist<ChannelSigner>,
 	ES::Target: EntropySource,
 {
@@ -423,7 +419,6 @@ impl<
 	C::Target: chain::Filter,
 	T::Target: BroadcasterInterface,
 	F::Target: FeeEstimator,
-	L::Target: Logger,
 	ES::Target: EntropySource + Sized,
 	<SP::Target as SignerProvider>::EcdsaSigner: MaybeSend + 'static,
 {
@@ -472,7 +467,6 @@ where
 	C::Target: chain::Filter,
 	T::Target: BroadcasterInterface,
 	F::Target: FeeEstimator,
-	L::Target: Logger,
 	P::Target: Persist<ChannelSigner>,
 	ES::Target: EntropySource,
 {
@@ -1119,7 +1113,6 @@ where
 	C::Target: chain::Filter,
 	T::Target: BroadcasterInterface,
 	F::Target: FeeEstimator,
-	L::Target: Logger,
 	P::Target: Persist<ChannelSigner>,
 	ES::Target: EntropySource,
 {
@@ -1158,7 +1151,6 @@ where
 	C::Target: chain::Filter,
 	T::Target: BroadcasterInterface,
 	F::Target: FeeEstimator,
-	L::Target: Logger,
 	P::Target: Persist<ChannelSigner>,
 	ES::Target: EntropySource,
 {
@@ -1177,7 +1169,6 @@ where
 	C::Target: chain::Filter,
 	T::Target: BroadcasterInterface,
 	F::Target: FeeEstimator,
-	L::Target: Logger,
 	P::Target: Persist<ChannelSigner>,
 	ES::Target: EntropySource,
 {
@@ -1241,7 +1232,6 @@ where
 	C::Target: chain::Filter,
 	T::Target: BroadcasterInterface,
 	F::Target: FeeEstimator,
-	L::Target: Logger,
 	P::Target: Persist<ChannelSigner>,
 	ES::Target: EntropySource,
 {
@@ -1336,7 +1326,6 @@ where
 	C::Target: chain::Filter,
 	T::Target: BroadcasterInterface,
 	F::Target: FeeEstimator,
-	L::Target: Logger,
 	P::Target: Persist<ChannelSigner>,
 	ES::Target: EntropySource,
 {
@@ -1532,7 +1521,6 @@ where
 	C::Target: chain::Filter,
 	T::Target: BroadcasterInterface,
 	F::Target: FeeEstimator,
-	L::Target: Logger,
 	P::Target: Persist<ChannelSigner>,
 	ES::Target: EntropySource,
 {

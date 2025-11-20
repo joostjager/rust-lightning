@@ -349,9 +349,7 @@ pub(super) fn verify<L: Deref>(
 	payment_hash: PaymentHash, payment_data: &msgs::FinalOnionHopData, highest_seen_timestamp: u64,
 	keys: &ExpandedKey, logger: &L,
 ) -> Result<(Option<PaymentPreimage>, Option<u16>), ()>
-where
-	L::Target: Logger,
-{
+where {
 	let (iv_bytes, metadata_bytes) = decrypt_metadata(payment_data.payment_secret, keys);
 
 	let payment_type_res =

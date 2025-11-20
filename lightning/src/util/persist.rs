@@ -589,7 +589,6 @@ pub struct MonitorUpdatingPersister<K: Deref, L: Deref, ES: Deref, SP: Deref, BI
 )
 where
 	K::Target: KVStoreSync,
-	L::Target: Logger,
 	ES::Target: EntropySource + Sized,
 	SP::Target: SignerProvider + Sized,
 	BI::Target: BroadcasterInterface,
@@ -599,7 +598,6 @@ impl<K: Deref, L: Deref, ES: Deref, SP: Deref, BI: Deref, FE: Deref>
 	MonitorUpdatingPersister<K, L, ES, SP, BI, FE>
 where
 	K::Target: KVStoreSync,
-	L::Target: Logger,
 	ES::Target: EntropySource + Sized,
 	SP::Target: SignerProvider + Sized,
 	BI::Target: BroadcasterInterface,
@@ -706,7 +704,6 @@ impl<
 	> Persist<ChannelSigner> for MonitorUpdatingPersister<K, L, ES, SP, BI, FE>
 where
 	K::Target: KVStoreSync,
-	L::Target: Logger,
 	ES::Target: EntropySource + Sized,
 	SP::Target: SignerProvider + Sized,
 	BI::Target: BroadcasterInterface,
@@ -792,7 +789,6 @@ pub struct MonitorUpdatingPersisterAsync<
 >(Arc<MonitorUpdatingPersisterAsyncInner<K, S, L, ES, SP, BI, FE>>)
 where
 	K::Target: KVStore,
-	L::Target: Logger,
 	ES::Target: EntropySource + Sized,
 	SP::Target: SignerProvider + Sized,
 	BI::Target: BroadcasterInterface,
@@ -808,7 +804,6 @@ struct MonitorUpdatingPersisterAsyncInner<
 	FE: Deref,
 > where
 	K::Target: KVStore,
-	L::Target: Logger,
 	ES::Target: EntropySource + Sized,
 	SP::Target: SignerProvider + Sized,
 	BI::Target: BroadcasterInterface,
@@ -829,7 +824,6 @@ impl<K: Deref, S: FutureSpawner, L: Deref, ES: Deref, SP: Deref, BI: Deref, FE: 
 	MonitorUpdatingPersisterAsync<K, S, L, ES, SP, BI, FE>
 where
 	K::Target: KVStore,
-	L::Target: Logger,
 	ES::Target: EntropySource + Sized,
 	SP::Target: SignerProvider + Sized,
 	BI::Target: BroadcasterInterface,
@@ -928,7 +922,6 @@ impl<
 	> MonitorUpdatingPersisterAsync<K, S, L, ES, SP, BI, FE>
 where
 	K::Target: KVStore + MaybeSync,
-	L::Target: Logger,
 	ES::Target: EntropySource + Sized,
 	SP::Target: SignerProvider + Sized,
 	BI::Target: BroadcasterInterface,
@@ -1010,7 +1003,6 @@ impl<K: Deref, S: FutureSpawner, L: Deref, ES: Deref, SP: Deref, BI: Deref, FE: 
 	MonitorUpdatingPersisterAsyncInner<K, S, L, ES, SP, BI, FE>
 where
 	K::Target: KVStore,
-	L::Target: Logger,
 	ES::Target: EntropySource + Sized,
 	SP::Target: SignerProvider + Sized,
 	BI::Target: BroadcasterInterface,

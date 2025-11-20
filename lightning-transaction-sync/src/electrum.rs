@@ -39,8 +39,7 @@ use std::time::Instant;
 /// [`Filter`]: lightning::chain::Filter
 pub struct ElectrumSyncClient<L: Deref>
 where
-	L::Target: Logger,
-{
+	{
 	sync_state: Mutex<SyncState>,
 	queue: Mutex<FilterQueue>,
 	client: Arc<ElectrumClient>,
@@ -49,8 +48,7 @@ where
 
 impl<L: Deref> ElectrumSyncClient<L>
 where
-	L::Target: Logger,
-{
+	{
 	/// Returns a new [`ElectrumSyncClient`] object.
 	pub fn new(server_url: String, logger: L) -> Result<Self, TxSyncError> {
 		let client = Arc::new(ElectrumClient::new(&server_url).map_err(|e| {
@@ -496,8 +494,7 @@ where
 
 impl<L: Deref> Filter for ElectrumSyncClient<L>
 where
-	L::Target: Logger,
-{
+	{
 	fn register_tx(&self, txid: &Txid, _script_pubkey: &Script) {
 		let mut locked_queue = self.queue.lock().unwrap();
 		locked_queue.transactions.insert(*txid);

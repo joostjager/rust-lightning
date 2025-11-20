@@ -160,9 +160,7 @@ impl UtxoFuture {
 	/// [`PeerManager::process_events`]: crate::ln::peer_handler::PeerManager::process_events
 	pub fn resolve_without_forwarding<L: Deref>(
 		&self, graph: &NetworkGraph<L>, result: Result<TxOut, UtxoLookupError>,
-	) where
-		L::Target: Logger,
-	{
+	) {
 		self.do_resolve(graph, result);
 	}
 
@@ -185,7 +183,6 @@ impl UtxoFuture {
 	>(
 		&self, graph: &NetworkGraph<L>, gossip: GS, result: Result<TxOut, UtxoLookupError>,
 	) where
-		L::Target: Logger,
 		U::Target: UtxoLookup,
 	{
 		let mut res = self.do_resolve(graph, result);
@@ -198,7 +195,7 @@ impl UtxoFuture {
 
 	#[rustfmt::skip]
 	fn do_resolve<L: Deref>(&self, graph: &NetworkGraph<L>, result: Result<TxOut, UtxoLookupError>)
-	-> [Option<MessageSendEvent>; 5] where L::Target: Logger {
+	-> [Option<MessageSendEvent>; 5] where  {
 		let (announcement, node_a, node_b, update_a, update_b) = {
 			let mut pending_checks = graph.pending_checks.internal.lock().unwrap();
 			let mut async_messages = self.state.lock().unwrap();

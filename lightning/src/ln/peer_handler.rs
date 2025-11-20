@@ -1012,7 +1012,6 @@ where
 	CM::Target: ChannelMessageHandler,
 	RM::Target: RoutingMessageHandler,
 	OM::Target: OnionMessageHandler,
-	L::Target: Logger,
 	CMH::Target: CustomMessageHandler,
 	NS::Target: NodeSigner,
 	SM::Target: SendOnlyMessageHandler,
@@ -1069,7 +1068,6 @@ pub struct PeerManager<
 	CM::Target: ChannelMessageHandler,
 	RM::Target: RoutingMessageHandler,
 	OM::Target: OnionMessageHandler,
-	L::Target: Logger,
 	CMH::Target: CustomMessageHandler,
 	NS::Target: NodeSigner,
 	SM::Target: SendOnlyMessageHandler,
@@ -1155,7 +1153,6 @@ impl<Descriptor: SocketDescriptor, CM: Deref, OM: Deref, L: Deref, NS: Deref, SM
 where
 	CM::Target: ChannelMessageHandler,
 	OM::Target: OnionMessageHandler,
-	L::Target: Logger,
 	NS::Target: NodeSigner,
 	SM::Target: SendOnlyMessageHandler,
 {
@@ -1205,7 +1202,6 @@ impl<Descriptor: SocketDescriptor, RM: Deref, L: Deref, NS: Deref>
 		IgnoringMessageHandler,
 	> where
 	RM::Target: RoutingMessageHandler,
-	L::Target: Logger,
 	NS::Target: NodeSigner,
 {
 	/// Constructs a new `PeerManager` with the given `RoutingMessageHandler`. No channel message
@@ -1304,7 +1300,6 @@ where
 	CM::Target: ChannelMessageHandler,
 	RM::Target: RoutingMessageHandler,
 	OM::Target: OnionMessageHandler,
-	L::Target: Logger,
 	CMH::Target: CustomMessageHandler,
 	NS::Target: NodeSigner,
 	SM::Target: SendOnlyMessageHandler,

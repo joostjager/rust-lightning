@@ -837,20 +837,14 @@ pub(super) struct SendAlongPathArgs<'a> {
 	pub hold_htlc_at_next_hop: bool,
 }
 
-pub(super) struct OutboundPayments<L: Deref>
-where
-	L::Target: Logger,
-{
+pub(super) struct OutboundPayments<L: Deref> {
 	pub(super) pending_outbound_payments: Mutex<HashMap<PaymentId, PendingOutboundPayment>>,
 	awaiting_invoice: AtomicBool,
 	retry_lock: Mutex<()>,
 	logger: L,
 }
 
-impl<L: Deref> OutboundPayments<L>
-where
-	L::Target: Logger,
-{
+impl<L: Deref> OutboundPayments<L> {
 	pub(super) fn new(
 		pending_outbound_payments: HashMap<PaymentId, PendingOutboundPayment>, logger: L,
 	) -> Self {
@@ -1423,8 +1417,7 @@ where
 	where
 		R::Target: Router,
 		NS::Target: NodeSigner,
-		L::Target: Logger,
-		IH: Fn() -> InFlightHtlcs,
+				IH: Fn() -> InFlightHtlcs,
 	{
 		#[cfg(feature = "std")] {
 			if has_expired(&route_params) {
@@ -1480,8 +1473,7 @@ where
 		R::Target: Router,
 		ES::Target: EntropySource,
 		NS::Target: NodeSigner,
-		L::Target: Logger,
-		IH: Fn() -> InFlightHtlcs,
+				IH: Fn() -> InFlightHtlcs,
 		SP: Fn(SendAlongPathArgs) -> Result<(), APIError>,
 	{
 		let route = self.find_initial_route(
@@ -1524,8 +1516,7 @@ where
 		R::Target: Router,
 		ES::Target: EntropySource,
 		NS::Target: NodeSigner,
-		L::Target: Logger,
-		IH: Fn() -> InFlightHtlcs,
+				IH: Fn() -> InFlightHtlcs,
 		SP: Fn(SendAlongPathArgs) -> Result<(), APIError>,
 	{
 		#[cfg(feature = "std")] {

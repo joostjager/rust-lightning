@@ -183,10 +183,7 @@ impl FromStr for NodeId {
 }
 
 /// Represents the network as nodes and channels between them
-pub struct NetworkGraph<L: Deref>
-where
-	L::Target: Logger,
-{
+pub struct NetworkGraph<L: Deref> {
 	secp_ctx: Secp256k1<secp256k1::VerifyOnly>,
 	last_rapid_gossip_sync_timestamp: Mutex<Option<u32>>,
 	chain_hash: ChainHash,
@@ -324,7 +321,6 @@ impl MaybeReadable for NetworkUpdate {
 pub struct P2PGossipSync<G: Deref<Target = NetworkGraph<L>>, U: Deref, L: Deref>
 where
 	U::Target: UtxoLookup,
-	L::Target: Logger,
 {
 	network_graph: G,
 	utxo_lookup: RwLock<Option<U>>,
@@ -336,7 +332,6 @@ where
 impl<G: Deref<Target = NetworkGraph<L>>, U: Deref, L: Deref> P2PGossipSync<G, U, L>
 where
 	U::Target: UtxoLookup,
-	L::Target: Logger,
 {
 	/// Creates a new tracker of the actual state of the network of channels and nodes,
 	/// assuming an existing [`NetworkGraph`].
@@ -414,10 +409,7 @@ where
 	}
 }
 
-impl<L: Deref> NetworkGraph<L>
-where
-	L::Target: Logger,
-{
+impl<L: Deref> NetworkGraph<L> {
 	/// Handles any network updates originating from [`Event`]s.
 	///
 	/// [`Event`]: crate::events::Event
@@ -534,7 +526,6 @@ impl<G: Deref<Target = NetworkGraph<L>>, U: Deref, L: Deref> RoutingMessageHandl
 	for P2PGossipSync<G, U, L>
 where
 	U::Target: UtxoLookup,
-	L::Target: Logger,
 {
 	fn handle_node_announcement(
 		&self, _their_node_id: Option<PublicKey>, msg: &msgs::NodeAnnouncement,
@@ -763,7 +754,6 @@ impl<G: Deref<Target = NetworkGraph<L>>, U: Deref, L: Deref> BaseMessageHandler
 	for P2PGossipSync<G, U, L>
 where
 	U::Target: UtxoLookup,
-	L::Target: Logger,
 {
 	/// Initiates a stateless sync of routing gossip information with a peer
 	/// using [`gossip_queries`]. The default strategy used by this implementation
@@ -1632,10 +1622,7 @@ impl Readable for NodeInfo {
 const SERIALIZATION_VERSION: u8 = 1;
 const MIN_SERIALIZATION_VERSION: u8 = 1;
 
-impl<L: Deref> Writeable for NetworkGraph<L>
-where
-	L::Target: Logger,
-{
+impl<L: Deref> Writeable for NetworkGraph<L> {
 	fn write<W: Writer>(&self, writer: &mut W) -> Result<(), io::Error> {
 		self.test_node_counter_consistency();
 
@@ -1663,10 +1650,7 @@ where
 	}
 }
 
-impl<L: Deref> ReadableArgs<L> for NetworkGraph<L>
-where
-	L::Target: Logger,
-{
+impl<L: Deref> ReadableArgs<L> for NetworkGraph<L> {
 	fn read<R: io::Read>(reader: &mut R, logger: L) -> Result<NetworkGraph<L>, DecodeError> {
 		let _ver = read_ver_prefix!(reader, SERIALIZATION_VERSION);
 
@@ -1720,10 +1704,7 @@ where
 	}
 }
 
-impl<L: Deref> fmt::Display for NetworkGraph<L>
-where
-	L::Target: Logger,
-{
+impl<L: Deref> fmt::Display for NetworkGraph<L> {
 	fn fmt(&self, f: &mut fmt::Formatter) -> Result<(), fmt::Error> {
 		writeln!(f, "Network map\n[Channels]")?;
 		for (key, val) in self.channels.read().unwrap().unordered_iter() {
@@ -1737,11 +1718,8 @@ where
 	}
 }
 
-impl<L: Deref> Eq for NetworkGraph<L> where L::Target: Logger {}
-impl<L: Deref> PartialEq for NetworkGraph<L>
-where
-	L::Target: Logger,
-{
+impl<L: Deref> Eq for NetworkGraph<L> {}
+impl<L: Deref> PartialEq for NetworkGraph<L> {
 	fn eq(&self, other: &Self) -> bool {
 		// For a total lockorder, sort by position in memory and take the inner locks in that order.
 		// (Assumes that we can't move within memory while a lock is held).
@@ -1769,10 +1747,7 @@ const CHAN_COUNT_ESTIMATE: usize = 60_000;
 // too low
 const NODE_COUNT_ESTIMATE: usize = 20_000;
 
-impl<L: Deref> NetworkGraph<L>
-where
-	L::Target: Logger,
-{
+impl<L: Deref> NetworkGraph<L> {
 	/// Creates a new, empty, network graph.
 	pub fn new(network: Network, logger: L) -> NetworkGraph<L> {
 		Self {

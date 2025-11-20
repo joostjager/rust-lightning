@@ -44,8 +44,7 @@ use std::collections::HashSet;
 /// [`Filter`]: lightning::chain::Filter
 pub struct EsploraSyncClient<L: Deref>
 where
-	L::Target: Logger,
-{
+	{
 	sync_state: MutexType<SyncState>,
 	queue: std::sync::Mutex<FilterQueue>,
 	client: EsploraClientType,
@@ -54,8 +53,7 @@ where
 
 impl<L: Deref> EsploraSyncClient<L>
 where
-	L::Target: Logger,
-{
+	{
 	/// Returns a new [`EsploraSyncClient`] object.
 	pub fn new(server_url: String, logger: L) -> Self {
 		let builder = Builder::new(&server_url);
@@ -474,8 +472,7 @@ type EsploraClientType = BlockingClient;
 
 impl<L: Deref> Filter for EsploraSyncClient<L>
 where
-	L::Target: Logger,
-{
+	{
 	fn register_tx(&self, txid: &Txid, _script_pubkey: &Script) {
 		let mut locked_queue = self.queue.lock().unwrap();
 		locked_queue.transactions.insert(*txid);

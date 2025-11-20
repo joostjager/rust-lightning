@@ -96,7 +96,6 @@ where
 pub struct WalletSync<W: Deref + MaybeSync + MaybeSend, L: Deref + MaybeSync + MaybeSend>
 where
 	W::Target: WalletSourceSync + MaybeSend,
-	L::Target: Logger + MaybeSend,
 {
 	wallet: Wallet<WalletSourceSyncWrapper<W>, L>,
 }
@@ -104,7 +103,6 @@ where
 impl<W: Deref + MaybeSync + MaybeSend, L: Deref + MaybeSync + MaybeSend> WalletSync<W, L>
 where
 	W::Target: WalletSourceSync + MaybeSend,
-	L::Target: Logger + MaybeSend,
 {
 	/// Constructs a new [`WalletSync`] instance.
 	pub fn new(source: W, logger: L) -> Self {
@@ -116,7 +114,6 @@ impl<W: Deref + MaybeSync + MaybeSend, L: Deref + MaybeSync + MaybeSend> CoinSel
 	for WalletSync<W, L>
 where
 	W::Target: WalletSourceSync + MaybeSend + MaybeSync,
-	L::Target: Logger + MaybeSend + MaybeSync,
 {
 	fn select_confirmed_utxos(
 		&self, claim_id: ClaimId, must_spend: Vec<Input>, must_pay_to: &[TxOut],
@@ -263,7 +260,6 @@ where
 	B::Target: BroadcasterInterface,
 	C::Target: CoinSelectionSourceSync,
 	SP::Target: SignerProvider,
-	L::Target: Logger,
 {
 	bump_transaction_event_handler:
 		BumpTransactionEventHandler<B, CoinSelectionSourceSyncWrapper<C>, SP, L>,
@@ -274,7 +270,6 @@ where
 	B::Target: BroadcasterInterface,
 	C::Target: CoinSelectionSourceSync,
 	SP::Target: SignerProvider,
-	L::Target: Logger,
 {
 	/// Constructs a new instance of [`BumpTransactionEventHandlerSync`].
 	pub fn new(broadcaster: B, utxo_source: C, signer_provider: SP, logger: L) -> Self {
