@@ -336,8 +336,15 @@ impl_writeable_tlv_based_enum!(OutputSpendStatus,
 ///
 /// [`Event::SpendableOutputs`]: crate::events::Event::SpendableOutputs
 // Note that updates to documentation on this struct should be copied to the synchronous version.
-pub struct OutputSweeper<B: Deref, D: Deref, E: Deref, F: Deref, K: Deref, L: Deref, O: Deref>
-where
+pub struct OutputSweeper<
+	B: Deref,
+	D: Deref,
+	E: Deref,
+	F: Deref,
+	K: Deref,
+	L: Deref<Target = dyn Logger + MaybeSend + MaybeSync>,
+	O: Deref,
+> where
 	B::Target: BroadcasterInterface,
 	D::Target: ChangeDestinationSource,
 	E::Target: FeeEstimator,
@@ -356,8 +363,15 @@ where
 	logger: L,
 }
 
-impl<B: Deref, D: Deref, E: Deref, F: Deref, K: Deref, L: Deref, O: Deref>
-	OutputSweeper<B, D, E, F, K, L, O>
+impl<
+		B: Deref,
+		D: Deref,
+		E: Deref,
+		F: Deref,
+		K: Deref,
+		L: Deref<Target = dyn Logger + MaybeSend + MaybeSync>,
+		O: Deref,
+	> OutputSweeper<B, D, E, F, K, L, O>
 where
 	B::Target: BroadcasterInterface,
 	D::Target: ChangeDestinationSource,
@@ -690,8 +704,15 @@ where
 	}
 }
 
-impl<B: Deref, D: Deref, E: Deref, F: Deref, K: Deref, L: Deref, O: Deref> Listen
-	for OutputSweeper<B, D, E, F, K, L, O>
+impl<
+		B: Deref,
+		D: Deref,
+		E: Deref,
+		F: Deref,
+		K: Deref,
+		L: Deref<Target = dyn Logger + MaybeSend + MaybeSync>,
+		O: Deref,
+	> Listen for OutputSweeper<B, D, E, F, K, L, O>
 where
 	B::Target: BroadcasterInterface,
 	D::Target: ChangeDestinationSource,
@@ -730,8 +751,15 @@ where
 	}
 }
 
-impl<B: Deref, D: Deref, E: Deref, F: Deref, K: Deref, L: Deref, O: Deref> Confirm
-	for OutputSweeper<B, D, E, F, K, L, O>
+impl<
+		B: Deref,
+		D: Deref,
+		E: Deref,
+		F: Deref,
+		K: Deref,
+		L: Deref<Target = dyn Logger + MaybeSend + MaybeSync>,
+		O: Deref,
+	> Confirm for OutputSweeper<B, D, E, F, K, L, O>
 where
 	B::Target: BroadcasterInterface,
 	D::Target: ChangeDestinationSource,
@@ -826,8 +854,15 @@ pub enum SpendingDelay {
 	},
 }
 
-impl<B: Deref, D: Deref, E: Deref, F: Deref, K: Deref, L: Deref, O: Deref>
-	ReadableArgs<(B, E, Option<F>, O, D, K, L)> for (BestBlock, OutputSweeper<B, D, E, F, K, L, O>)
+impl<
+		B: Deref,
+		D: Deref,
+		E: Deref,
+		F: Deref,
+		K: Deref,
+		L: Deref<Target = dyn Logger + MaybeSend + MaybeSync>,
+		O: Deref,
+	> ReadableArgs<(B, E, Option<F>, O, D, K, L)> for (BestBlock, OutputSweeper<B, D, E, F, K, L, O>)
 where
 	B::Target: BroadcasterInterface,
 	D::Target: ChangeDestinationSource,
@@ -895,8 +930,15 @@ where
 ///
 /// [`Event::SpendableOutputs`]: crate::events::Event::SpendableOutputs
 // Note that updates to documentation on this struct should be copied to the asynchronous version.
-pub struct OutputSweeperSync<B: Deref, D: Deref, E: Deref, F: Deref, K: Deref, L: Deref, O: Deref>
-where
+pub struct OutputSweeperSync<
+	B: Deref,
+	D: Deref,
+	E: Deref,
+	F: Deref,
+	K: Deref,
+	L: Deref<Target = dyn Logger + MaybeSend + MaybeSync>,
+	O: Deref,
+> where
 	B::Target: BroadcasterInterface,
 	D::Target: ChangeDestinationSourceSync,
 	E::Target: FeeEstimator,
@@ -908,8 +950,15 @@ where
 		OutputSweeper<B, ChangeDestinationSourceSyncWrapper<D>, E, F, KVStoreSyncWrapper<K>, L, O>,
 }
 
-impl<B: Deref, D: Deref, E: Deref, F: Deref, K: Deref, L: Deref, O: Deref>
-	OutputSweeperSync<B, D, E, F, K, L, O>
+impl<
+		B: Deref,
+		D: Deref,
+		E: Deref,
+		F: Deref,
+		K: Deref,
+		L: Deref<Target = dyn Logger + MaybeSend + MaybeSync>,
+		O: Deref,
+	> OutputSweeperSync<B, D, E, F, K, L, O>
 where
 	B::Target: BroadcasterInterface,
 	D::Target: ChangeDestinationSourceSync,
@@ -1027,8 +1076,15 @@ where
 	}
 }
 
-impl<B: Deref, D: Deref, E: Deref, F: Deref, K: Deref, L: Deref, O: Deref> Listen
-	for OutputSweeperSync<B, D, E, F, K, L, O>
+impl<
+		B: Deref,
+		D: Deref,
+		E: Deref,
+		F: Deref,
+		K: Deref,
+		L: Deref<Target = dyn Logger + MaybeSend + MaybeSync>,
+		O: Deref,
+	> Listen for OutputSweeperSync<B, D, E, F, K, L, O>
 where
 	B::Target: BroadcasterInterface,
 	D::Target: ChangeDestinationSourceSync,
@@ -1048,8 +1104,15 @@ where
 	}
 }
 
-impl<B: Deref, D: Deref, E: Deref, F: Deref, K: Deref, L: Deref, O: Deref> Confirm
-	for OutputSweeperSync<B, D, E, F, K, L, O>
+impl<
+		B: Deref,
+		D: Deref,
+		E: Deref,
+		F: Deref,
+		K: Deref,
+		L: Deref<Target = dyn Logger + MaybeSend + MaybeSync>,
+		O: Deref,
+	> Confirm for OutputSweeperSync<B, D, E, F, K, L, O>
 where
 	B::Target: BroadcasterInterface,
 	D::Target: ChangeDestinationSourceSync,
@@ -1077,8 +1140,16 @@ where
 	}
 }
 
-impl<B: Deref, D: Deref, E: Deref, F: Deref, K: Deref, L: Deref, O: Deref>
-	ReadableArgs<(B, E, Option<F>, O, D, K, L)> for (BestBlock, OutputSweeperSync<B, D, E, F, K, L, O>)
+impl<
+		B: Deref,
+		D: Deref,
+		E: Deref,
+		F: Deref,
+		K: Deref,
+		L: Deref<Target = dyn Logger + MaybeSend + MaybeSync>,
+		O: Deref,
+	> ReadableArgs<(B, E, Option<F>, O, D, K, L)>
+	for (BestBlock, OutputSweeperSync<B, D, E, F, K, L, O>)
 where
 	B::Target: BroadcasterInterface,
 	D::Target: ChangeDestinationSourceSync,

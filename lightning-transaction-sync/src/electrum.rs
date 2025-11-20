@@ -37,7 +37,7 @@ use std::time::Instant;
 /// [`ChainMonitor`]: lightning::chain::chainmonitor::ChainMonitor
 /// [`Watch::watch_channel`]: lightning::chain::Watch::watch_channel
 /// [`Filter`]: lightning::chain::Filter
-pub struct ElectrumSyncClient<L: Deref>
+pub struct ElectrumSyncClient<L: Deref<Target = dyn Logger + MaybeSend + MaybeSync>>
 where
 	{
 	sync_state: Mutex<SyncState>,
@@ -46,7 +46,7 @@ where
 	logger: L,
 }
 
-impl<L: Deref> ElectrumSyncClient<L>
+impl<L: Deref<Target = dyn Logger + MaybeSend + MaybeSync>> ElectrumSyncClient<L>
 where
 	{
 	/// Returns a new [`ElectrumSyncClient`] object.
@@ -492,7 +492,7 @@ where
 	}
 }
 
-impl<L: Deref> Filter for ElectrumSyncClient<L>
+impl<L: Deref<Target = dyn Logger + MaybeSend + MaybeSync>> Filter for ElectrumSyncClient<L>
 where
 	{
 	fn register_tx(&self, txid: &Txid, _script_pubkey: &Script) {

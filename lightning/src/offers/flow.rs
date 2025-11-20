@@ -74,7 +74,7 @@ use {
 ///
 /// [`OffersMessageFlow`] is parameterized by a [`MessageRouter`], which is responsible
 /// for finding message paths when initiating and retrying onion messages.
-pub struct OffersMessageFlow<MR: Deref, L: Deref>
+pub struct OffersMessageFlow<MR: Deref, L: Deref<Target = dyn Logger + MaybeSend + MaybeSync>>
 where
 	MR::Target: MessageRouter,
 {
@@ -106,7 +106,7 @@ where
 	logger: L,
 }
 
-impl<MR: Deref, L: Deref> OffersMessageFlow<MR, L>
+impl<MR: Deref, L: Deref<Target = dyn Logger + MaybeSend + MaybeSync>> OffersMessageFlow<MR, L>
 where
 	MR::Target: MessageRouter,
 {
@@ -264,7 +264,7 @@ const DEFAULT_ASYNC_RECEIVE_OFFER_EXPIRY: Duration = Duration::from_secs(365 * 2
 pub(crate) const TEST_DEFAULT_ASYNC_RECEIVE_OFFER_EXPIRY: Duration =
 	DEFAULT_ASYNC_RECEIVE_OFFER_EXPIRY;
 
-impl<MR: Deref, L: Deref> OffersMessageFlow<MR, L>
+impl<MR: Deref, L: Deref<Target = dyn Logger + MaybeSend + MaybeSync>> OffersMessageFlow<MR, L>
 where
 	MR::Target: MessageRouter,
 {
@@ -433,7 +433,7 @@ pub enum HeldHtlcReplyPath {
 	},
 }
 
-impl<MR: Deref, L: Deref> OffersMessageFlow<MR, L>
+impl<MR: Deref, L: Deref<Target = dyn Logger + MaybeSend + MaybeSync>> OffersMessageFlow<MR, L>
 where
 	MR::Target: MessageRouter,
 {

@@ -183,7 +183,7 @@ impl FromStr for NodeId {
 }
 
 /// Represents the network as nodes and channels between them
-pub struct NetworkGraph<L: Deref> {
+pub struct NetworkGraph<L: Deref<Target = dyn Logger + MaybeSend + MaybeSync>> {
 	secp_ctx: Secp256k1<secp256k1::VerifyOnly>,
 	last_rapid_gossip_sync_timestamp: Mutex<Option<u32>>,
 	chain_hash: ChainHash,
@@ -318,7 +318,7 @@ impl MaybeReadable for NetworkUpdate {
 /// This network graph is then used for routing payments.
 /// Provides interface to help with initial routing sync by
 /// serving historical announcements.
-pub struct P2PGossipSync<G: Deref<Target = NetworkGraph<L>>, U: Deref, L: Deref>
+pub struct P2PGossipSync<G: Deref<Target = NetworkGraph<L>>, U: Deref, L: Deref<Target = dyn Logger + MaybeSend + MaybeSync>>
 where
 	U::Target: UtxoLookup,
 {
@@ -329,7 +329,7 @@ where
 	logger: L,
 }
 
-impl<G: Deref<Target = NetworkGraph<L>>, U: Deref, L: Deref> P2PGossipSync<G, U, L>
+impl<G: Deref<Target = NetworkGraph<L>>, U: Deref, L: Deref<Target = dyn Logger + MaybeSend + MaybeSync>> P2PGossipSync<G, U, L>
 where
 	U::Target: UtxoLookup,
 {
@@ -409,7 +409,7 @@ where
 	}
 }
 
-impl<L: Deref> NetworkGraph<L> {
+impl<L: Deref<Target = dyn Logger + MaybeSend + MaybeSync>> NetworkGraph<L> {
 	/// Handles any network updates originating from [`Event`]s.
 	///
 	/// [`Event`]: crate::events::Event
@@ -522,7 +522,7 @@ pub fn verify_channel_announcement<C: Verification>(
 	Ok(())
 }
 
-impl<G: Deref<Target = NetworkGraph<L>>, U: Deref, L: Deref> RoutingMessageHandler
+impl<G: Deref<Target = NetworkGraph<L>>, U: Deref, L: Deref<Target = dyn Logger + MaybeSend + MaybeSync>> RoutingMessageHandler
 	for P2PGossipSync<G, U, L>
 where
 	U::Target: UtxoLookup,
@@ -750,7 +750,7 @@ where
 	}
 }
 
-impl<G: Deref<Target = NetworkGraph<L>>, U: Deref, L: Deref> BaseMessageHandler
+impl<G: Deref<Target = NetworkGraph<L>>, U: Deref, L: Deref<Target = dyn Logger + MaybeSend + MaybeSync>> BaseMessageHandler
 	for P2PGossipSync<G, U, L>
 where
 	U::Target: UtxoLookup,
@@ -1622,7 +1622,7 @@ impl Readable for NodeInfo {
 const SERIALIZATION_VERSION: u8 = 1;
 const MIN_SERIALIZATION_VERSION: u8 = 1;
 
-impl<L: Deref> Writeable for NetworkGraph<L> {
+impl<L: Deref<Target = dyn Logger + MaybeSend + MaybeSync>> Writeable for NetworkGraph<L> {
 	fn write<W: Writer>(&self, writer: &mut W) -> Result<(), io::Error> {
 		self.test_node_counter_consistency();
 
@@ -1650,7 +1650,7 @@ impl<L: Deref> Writeable for NetworkGraph<L> {
 	}
 }
 
-impl<L: Deref> ReadableArgs<L> for NetworkGraph<L> {
+impl<L: Deref<Target = dyn Logger + MaybeSend + MaybeSync>> ReadableArgs<L> for NetworkGraph<L> {
 	fn read<R: io::Read>(reader: &mut R, logger: L) -> Result<NetworkGraph<L>, DecodeError> {
 		let _ver = read_ver_prefix!(reader, SERIALIZATION_VERSION);
 
@@ -1704,7 +1704,7 @@ impl<L: Deref> ReadableArgs<L> for NetworkGraph<L> {
 	}
 }
 
-impl<L: Deref> fmt::Display for NetworkGraph<L> {
+impl<L: Deref<Target = dyn Logger + MaybeSend + MaybeSync>> fmt::Display for NetworkGraph<L> {
 	fn fmt(&self, f: &mut fmt::Formatter) -> Result<(), fmt::Error> {
 		writeln!(f, "Network map\n[Channels]")?;
 		for (key, val) in self.channels.read().unwrap().unordered_iter() {
@@ -1718,8 +1718,8 @@ impl<L: Deref> fmt::Display for NetworkGraph<L> {
 	}
 }
 
-impl<L: Deref> Eq for NetworkGraph<L> {}
-impl<L: Deref> PartialEq for NetworkGraph<L> {
+impl<L: Deref<Target = dyn Logger + MaybeSend + MaybeSync>> Eq for NetworkGraph<L> {}
+impl<L: Deref<Target = dyn Logger + MaybeSend + MaybeSync>> PartialEq for NetworkGraph<L> {
 	fn eq(&self, other: &Self) -> bool {
 		// For a total lockorder, sort by position in memory and take the inner locks in that order.
 		// (Assumes that we can't move within memory while a lock is held).
@@ -1747,7 +1747,7 @@ const CHAN_COUNT_ESTIMATE: usize = 60_000;
 // too low
 const NODE_COUNT_ESTIMATE: usize = 20_000;
 
-impl<L: Deref> NetworkGraph<L> {
+impl<L: Deref<Target = dyn Logger + MaybeSend + MaybeSync>> NetworkGraph<L> {
 	/// Creates a new, empty, network graph.
 	pub fn new(network: Network, logger: L) -> NetworkGraph<L> {
 		Self {

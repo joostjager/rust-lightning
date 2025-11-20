@@ -258,7 +258,7 @@ impl<ChannelSigner: EcdsaChannelSigner> Deref for LockedChannelMonitor<'_, Chann
 pub struct AsyncPersister<
 	K: Deref + MaybeSend + MaybeSync + 'static,
 	S: FutureSpawner,
-	L: Deref + MaybeSend + MaybeSync + 'static,
+	L: Deref<Target = dyn Logger + MaybeSend + MaybeSync> + 'static,
 	ES: Deref + MaybeSend + MaybeSync + 'static,
 	SP: Deref + MaybeSend + MaybeSync + 'static,
 	BI: Deref + MaybeSend + MaybeSync + 'static,
@@ -277,7 +277,7 @@ pub struct AsyncPersister<
 impl<
 		K: Deref + MaybeSend + MaybeSync + 'static,
 		S: FutureSpawner,
-		L: Deref + MaybeSend + MaybeSync + 'static,
+		L: Deref<Target = dyn Logger + MaybeSend + MaybeSync> + 'static,
 		ES: Deref + MaybeSend + MaybeSync + 'static,
 		SP: Deref + MaybeSend + MaybeSync + 'static,
 		BI: Deref + MaybeSend + MaybeSync + 'static,
@@ -299,7 +299,7 @@ where
 impl<
 		K: Deref + MaybeSend + MaybeSync + 'static,
 		S: FutureSpawner,
-		L: Deref + MaybeSend + MaybeSync + 'static,
+		L: Deref<Target = dyn Logger + MaybeSend + MaybeSync> + 'static,
 		ES: Deref + MaybeSend + MaybeSync + 'static,
 		SP: Deref + MaybeSend + MaybeSync + 'static,
 		BI: Deref + MaybeSend + MaybeSync + 'static,
@@ -361,7 +361,7 @@ pub struct ChainMonitor<
 	C: Deref,
 	T: Deref,
 	F: Deref,
-	L: Deref,
+	L: Deref<Target = dyn Logger + MaybeSend + MaybeSync>,
 	P: Deref,
 	ES: Deref,
 > where
@@ -402,7 +402,7 @@ impl<
 		C: Deref,
 		T: Deref + MaybeSend + MaybeSync + 'static,
 		F: Deref + MaybeSend + MaybeSync + 'static,
-		L: Deref + MaybeSend + MaybeSync + 'static,
+		L: Deref<Target = dyn Logger + MaybeSend + MaybeSync> + 'static,
 		ES: Deref + MaybeSend + MaybeSync + 'static,
 	>
 	ChainMonitor<
@@ -459,7 +459,7 @@ impl<
 		C: Deref,
 		T: Deref,
 		F: Deref,
-		L: Deref,
+		L: Deref<Target = dyn Logger + MaybeSend + MaybeSync>,
 		P: Deref,
 		ES: Deref,
 	> ChainMonitor<ChannelSigner, C, T, F, L, P, ES>
@@ -1105,7 +1105,7 @@ impl<
 		C: Deref,
 		T: Deref,
 		F: Deref,
-		L: Deref,
+		L: Deref<Target = dyn Logger + MaybeSend + MaybeSync>,
 		P: Deref,
 		ES: Deref,
 	> BaseMessageHandler for ChainMonitor<ChannelSigner, C, T, F, L, P, ES>
@@ -1143,7 +1143,7 @@ impl<
 		C: Deref,
 		T: Deref,
 		F: Deref,
-		L: Deref,
+		L: Deref<Target = dyn Logger + MaybeSend + MaybeSync>,
 		P: Deref,
 		ES: Deref,
 	> SendOnlyMessageHandler for ChainMonitor<ChannelSigner, C, T, F, L, P, ES>
@@ -1161,7 +1161,7 @@ impl<
 		C: Deref,
 		T: Deref,
 		F: Deref,
-		L: Deref,
+		L: Deref<Target = dyn Logger + MaybeSend + MaybeSync>,
 		P: Deref,
 		ES: Deref,
 	> chain::Listen for ChainMonitor<ChannelSigner, C, T, F, L, P, ES>
@@ -1224,7 +1224,7 @@ impl<
 		C: Deref,
 		T: Deref,
 		F: Deref,
-		L: Deref,
+		L: Deref<Target = dyn Logger + MaybeSend + MaybeSync>,
 		P: Deref,
 		ES: Deref,
 	> chain::Confirm for ChainMonitor<ChannelSigner, C, T, F, L, P, ES>
@@ -1318,7 +1318,7 @@ impl<
 		C: Deref,
 		T: Deref,
 		F: Deref,
-		L: Deref,
+		L: Deref<Target = dyn Logger + MaybeSend + MaybeSync>,
 		P: Deref,
 		ES: Deref,
 	> chain::Watch<ChannelSigner> for ChainMonitor<ChannelSigner, C, T, F, L, P, ES>
@@ -1513,7 +1513,7 @@ impl<
 		C: Deref,
 		T: Deref,
 		F: Deref,
-		L: Deref,
+		L: Deref<Target = dyn Logger + MaybeSend + MaybeSync>,
 		P: Deref,
 		ES: Deref,
 	> events::EventsProvider for ChainMonitor<ChannelSigner, C, T, F, L, P, ES>

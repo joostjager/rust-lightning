@@ -479,7 +479,7 @@ impl ReadableArgs<u64> for FixedPenaltyScorer {
 /// [`liquidity_offset_half_life`]: ProbabilisticScoringDecayParameters::liquidity_offset_half_life
 /// [`historical_liquidity_penalty_multiplier_msat`]: ProbabilisticScoringFeeParameters::historical_liquidity_penalty_multiplier_msat
 /// [`historical_liquidity_penalty_amount_multiplier_msat`]: ProbabilisticScoringFeeParameters::historical_liquidity_penalty_amount_multiplier_msat
-pub struct ProbabilisticScorer<G: Deref<Target = NetworkGraph<L>>, L: Deref> {
+pub struct ProbabilisticScorer<G: Deref<Target = NetworkGraph<L>>, L: Deref<Target = dyn Logger + MaybeSend + MaybeSync>> {
 	decay_params: ProbabilisticScoringDecayParameters,
 	network_graph: G,
 	logger: L,
@@ -961,7 +961,7 @@ struct DirectedChannelLiquidity<
 	last_datapoint_time: T,
 }
 
-impl<G: Deref<Target = NetworkGraph<L>>, L: Deref> ProbabilisticScorer<G, L> {
+impl<G: Deref<Target = NetworkGraph<L>>, L: Deref<Target = dyn Logger + MaybeSend + MaybeSync>> ProbabilisticScorer<G, L> {
 	/// Creates a new scorer using the given scoring parameters for sending payments from a node
 	/// through a network graph.
 	pub fn new(
@@ -1580,7 +1580,7 @@ impl<
 }
 
 impl<
-		L: DerefMut<Target = u64>,
+	L: Deref<Target = dyn Logger + MaybeSend + MaybeSync>>ut<Target = u64>,
 		HT: DerefMut<Target = HistoricalLiquidityTracker>,
 		T: DerefMut<Target = Duration>,
 	> DirectedChannelLiquidity<L, HT, T>
@@ -1663,7 +1663,7 @@ impl<
 	}
 }
 
-impl<G: Deref<Target = NetworkGraph<L>>, L: Deref> ScoreLookUp for ProbabilisticScorer<G, L> {
+impl<G: Deref<Target = NetworkGraph<L>>, L: Deref<Target = dyn Logger + MaybeSend + MaybeSync>> ScoreLookUp for ProbabilisticScorer<G, L> {
 	type ScoreParams = ProbabilisticScoringFeeParameters;
 	#[rustfmt::skip]
 	fn channel_penalty_msat(
@@ -1726,7 +1726,7 @@ impl<G: Deref<Target = NetworkGraph<L>>, L: Deref> ScoreLookUp for Probabilistic
 	}
 }
 
-impl<G: Deref<Target = NetworkGraph<L>>, L: Deref> ScoreUpdate for ProbabilisticScorer<G, L> {
+impl<G: Deref<Target = NetworkGraph<L>>, L: Deref<Target = dyn Logger + MaybeSend + MaybeSync>> ScoreUpdate for ProbabilisticScorer<G, L> {
 	#[rustfmt::skip]
 	fn payment_path_failed(&mut self, path: &Path, short_channel_id: u64, duration_since_epoch: Duration) {
 		let amount_msat = path.final_value_msat();
@@ -1824,12 +1824,12 @@ impl<G: Deref<Target = NetworkGraph<L>>, L: Deref> ScoreUpdate for Probabilistic
 ///
 /// Note that only the locally acquired data is persisted. After a restart, the external scores will be lost and must be
 /// resupplied.
-pub struct CombinedScorer<G: Deref<Target = NetworkGraph<L>>, L: Deref> {
+pub struct CombinedScorer<G: Deref<Target = NetworkGraph<L>>, L: Deref<Target = dyn Logger + MaybeSend + MaybeSync>> {
 	local_only_scorer: ProbabilisticScorer<G, L>,
 	scorer: ProbabilisticScorer<G, L>,
 }
 
-impl<G: Deref<Target = NetworkGraph<L>> + Clone, L: Deref + Clone> CombinedScorer<G, L> {
+impl<G: Deref<Target = NetworkGraph<L>> + Clone,L: Deref<Target = dyn Logger + MaybeSend + MaybeSync>>+ Clone> CombinedScorer<G, L> {
 	/// Create a new combined scorer with the given local scorer.
 	#[rustfmt::skip]
 	pub fn new(local_scorer: ProbabilisticScorer<G, L>) -> Self {
@@ -1871,7 +1871,7 @@ impl<G: Deref<Target = NetworkGraph<L>> + Clone, L: Deref + Clone> CombinedScore
 	}
 }
 
-impl<G: Deref<Target = NetworkGraph<L>>, L: Deref> ScoreLookUp for CombinedScorer<G, L> {
+impl<G: Deref<Target = NetworkGraph<L>>, L: Deref<Target = dyn Logger + MaybeSend + MaybeSync>> ScoreLookUp for CombinedScorer<G, L> {
 	type ScoreParams = ProbabilisticScoringFeeParameters;
 
 	fn channel_penalty_msat(
@@ -1882,7 +1882,7 @@ impl<G: Deref<Target = NetworkGraph<L>>, L: Deref> ScoreLookUp for CombinedScore
 	}
 }
 
-impl<G: Deref<Target = NetworkGraph<L>>, L: Deref> ScoreUpdate for CombinedScorer<G, L> {
+impl<G: Deref<Target = NetworkGraph<L>>, L: Deref<Target = dyn Logger + MaybeSend + MaybeSync>> ScoreUpdate for CombinedScorer<G, L> {
 	fn payment_path_failed(
 		&mut self, path: &Path, short_channel_id: u64, duration_since_epoch: Duration,
 	) {
@@ -1911,14 +1911,14 @@ impl<G: Deref<Target = NetworkGraph<L>>, L: Deref> ScoreUpdate for CombinedScore
 	}
 }
 
-impl<G: Deref<Target = NetworkGraph<L>>, L: Deref> Writeable for CombinedScorer<G, L> {
+impl<G: Deref<Target = NetworkGraph<L>>, L: Deref<Target = dyn Logger + MaybeSend + MaybeSync>> Writeable for CombinedScorer<G, L> {
 	fn write<W: crate::util::ser::Writer>(&self, writer: &mut W) -> Result<(), crate::io::Error> {
 		self.local_only_scorer.write(writer)
 	}
 }
 
 #[cfg(c_bindings)]
-impl<G: Deref<Target = NetworkGraph<L>>, L: Deref> Score for ProbabilisticScorer<G, L> {}
+impl<G: Deref<Target = NetworkGraph<L>>, L: Deref<Target = dyn Logger + MaybeSend + MaybeSync>> Score for ProbabilisticScorer<G, L> {}
 
 #[cfg(feature = "std")]
 #[inline]
@@ -2490,14 +2490,14 @@ mod bucketed_history {
 	}
 }
 
-impl<G: Deref<Target = NetworkGraph<L>>, L: Deref> Writeable for ProbabilisticScorer<G, L> {
+impl<G: Deref<Target = NetworkGraph<L>>, L: Deref<Target = dyn Logger + MaybeSend + MaybeSync>> Writeable for ProbabilisticScorer<G, L> {
 	#[inline]
 	fn write<W: Writer>(&self, w: &mut W) -> Result<(), io::Error> {
 		self.channel_liquidities.write(w)
 	}
 }
 
-impl<G: Deref<Target = NetworkGraph<L>>, L: Deref>
+impl<G: Deref<Target = NetworkGraph<L>>, L: Deref<Target = dyn Logger + MaybeSend + MaybeSync>>
 	ReadableArgs<(ProbabilisticScoringDecayParameters, G, L)> for ProbabilisticScorer<G, L>
 {
 	#[inline]

@@ -837,14 +837,14 @@ pub(super) struct SendAlongPathArgs<'a> {
 	pub hold_htlc_at_next_hop: bool,
 }
 
-pub(super) struct OutboundPayments<L: Deref> {
+pub(super) struct OutboundPayments<L: Deref<Target = dyn Logger + MaybeSend + MaybeSync>> {
 	pub(super) pending_outbound_payments: Mutex<HashMap<PaymentId, PendingOutboundPayment>>,
 	awaiting_invoice: AtomicBool,
 	retry_lock: Mutex<()>,
 	logger: L,
 }
 
-impl<L: Deref> OutboundPayments<L> {
+impl<L: Deref<Target = dyn Logger + MaybeSend + MaybeSync>> OutboundPayments<L> {
 	pub(super) fn new(
 		pending_outbound_payments: HashMap<PaymentId, PendingOutboundPayment>, logger: L,
 	) -> Self {

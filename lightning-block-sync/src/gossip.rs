@@ -125,7 +125,7 @@ impl<
 pub struct GossipVerifier<
 	S: FutureSpawner,
 	Blocks: Deref + Send + Sync + 'static + Clone,
-	L: Deref + Send + Sync + 'static,
+	L: Deref<Target = dyn Logger + MaybeSend + MaybeSync> + 'static,
 > where
 	Blocks::Target: UtxoSource,
 {
@@ -138,8 +138,11 @@ pub struct GossipVerifier<
 
 const BLOCK_CACHE_SIZE: usize = 5;
 
-impl<S: FutureSpawner, Blocks: Deref + Send + Sync + Clone, L: Deref + Send + Sync>
-	GossipVerifier<S, Blocks, L>
+impl<
+		S: FutureSpawner,
+		Blocks: Deref + Send + Sync + Clone,
+		L: Deref<Target = dyn Logger + MaybeSend + MaybeSync>,
+	> GossipVerifier<S, Blocks, L>
 where
 	Blocks::Target: UtxoSource,
 {
@@ -246,8 +249,11 @@ where
 	}
 }
 
-impl<S: FutureSpawner, Blocks: Deref + Send + Sync + Clone, L: Deref + Send + Sync> Deref
-	for GossipVerifier<S, Blocks, L>
+impl<
+		S: FutureSpawner,
+		Blocks: Deref + Send + Sync + Clone,
+		L: Deref<Target = dyn Logger + MaybeSend + MaybeSync>,
+	> Deref for GossipVerifier<S, Blocks, L>
 where
 	Blocks::Target: UtxoSource,
 {
@@ -257,8 +263,11 @@ where
 	}
 }
 
-impl<S: FutureSpawner, Blocks: Deref + Send + Sync + Clone, L: Deref + Send + Sync> UtxoLookup
-	for GossipVerifier<S, Blocks, L>
+impl<
+		S: FutureSpawner,
+		Blocks: Deref + Send + Sync + Clone,
+		L: Deref<Target = dyn Logger + MaybeSend + MaybeSync>,
+	> UtxoLookup for GossipVerifier<S, Blocks, L>
 where
 	Blocks::Target: UtxoSource,
 {

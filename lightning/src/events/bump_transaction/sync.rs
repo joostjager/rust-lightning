@@ -93,14 +93,17 @@ where
 ///
 /// For an asynchronous version of this wrapper, see [`Wallet`].
 // Note that updates to documentation on this struct should be copied to the asynchronous version.
-pub struct WalletSync<W: Deref + MaybeSync + MaybeSend, L: Deref + MaybeSync + MaybeSend>
-where
+pub struct WalletSync<
+	W: Deref + MaybeSync + MaybeSend,
+	L: Deref<Target = dyn Logger + MaybeSend + MaybeSync>,
+> where
 	W::Target: WalletSourceSync + MaybeSend,
 {
 	wallet: Wallet<WalletSourceSyncWrapper<W>, L>,
 }
 
-impl<W: Deref + MaybeSync + MaybeSend, L: Deref + MaybeSync + MaybeSend> WalletSync<W, L>
+impl<W: Deref + MaybeSync + MaybeSend, L: Deref<Target = dyn Logger + MaybeSend + MaybeSync>>
+	WalletSync<W, L>
 where
 	W::Target: WalletSourceSync + MaybeSend,
 {
@@ -110,8 +113,8 @@ where
 	}
 }
 
-impl<W: Deref + MaybeSync + MaybeSend, L: Deref + MaybeSync + MaybeSend> CoinSelectionSourceSync
-	for WalletSync<W, L>
+impl<W: Deref + MaybeSync + MaybeSend, L: Deref<Target = dyn Logger + MaybeSend + MaybeSync>>
+	CoinSelectionSourceSync for WalletSync<W, L>
 where
 	W::Target: WalletSourceSync + MaybeSend + MaybeSync,
 {
@@ -255,8 +258,12 @@ where
 ///
 /// [`Event::BumpTransaction`]: crate::events::Event::BumpTransaction
 // Note that updates to documentation on this struct should be copied to the synchronous version.
-pub struct BumpTransactionEventHandlerSync<B: Deref, C: Deref, SP: Deref, L: Deref>
-where
+pub struct BumpTransactionEventHandlerSync<
+	B: Deref,
+	C: Deref,
+	SP: Deref,
+	L: Deref<Target = dyn Logger + MaybeSend + MaybeSync>,
+> where
 	B::Target: BroadcasterInterface,
 	C::Target: CoinSelectionSourceSync,
 	SP::Target: SignerProvider,
@@ -265,7 +272,8 @@ where
 		BumpTransactionEventHandler<B, CoinSelectionSourceSyncWrapper<C>, SP, L>,
 }
 
-impl<B: Deref, C: Deref, SP: Deref, L: Deref> BumpTransactionEventHandlerSync<B, C, SP, L>
+impl<B: Deref, C: Deref, SP: Deref, L: Deref<Target = dyn Logger + MaybeSend + MaybeSync>>
+	BumpTransactionEventHandlerSync<B, C, SP, L>
 where
 	B::Target: BroadcasterInterface,
 	C::Target: CoinSelectionSourceSync,

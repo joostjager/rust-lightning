@@ -67,7 +67,7 @@ use core::time::Duration;
 	feature = "std",
 	doc = "This can be used in a `no_std` environment, where [`std::time::SystemTime`] is not available and the current time is supplied by the caller."
 )]
-pub fn create_phantom_invoice<ES: Deref, NS: Deref, L: Deref>(
+pub fn create_phantom_invoice<ES: Deref, NS: Deref, L: Deref<Target = dyn Logger + MaybeSend + MaybeSync>>(
 	amt_msat: Option<u64>, payment_hash: Option<PaymentHash>, description: String,
 	invoice_expiry_delta_secs: u32, phantom_route_hints: Vec<PhantomRouteHints>,
 	entropy_source: ES, node_signer: NS, logger: L, network: Currency,
@@ -134,7 +134,7 @@ where
 	feature = "std",
 	doc = "This version can be used in a `no_std` environment, where [`std::time::SystemTime`] is not available and the current time is supplied by the caller."
 )]
-pub fn create_phantom_invoice_with_description_hash<ES: Deref, NS: Deref, L: Deref>(
+pub fn create_phantom_invoice_with_description_hash<ES: Deref, NS: Deref, L: Deref<Target = dyn Logger + MaybeSend + MaybeSync>>(
 	amt_msat: Option<u64>, payment_hash: Option<PaymentHash>, invoice_expiry_delta_secs: u32,
 	description_hash: Sha256, phantom_route_hints: Vec<PhantomRouteHints>, entropy_source: ES,
 	node_signer: NS, logger: L, network: Currency, min_final_cltv_expiry_delta: Option<u16>,
@@ -161,7 +161,7 @@ where
 
 const MAX_CHANNEL_HINTS: usize = 3;
 
-fn _create_phantom_invoice<ES: Deref, NS: Deref, L: Deref>(
+fn _create_phantom_invoice<ES: Deref, NS: Deref, L: Deref<Target = dyn Logger + MaybeSend + MaybeSync>>(
 	amt_msat: Option<u64>, payment_hash: Option<PaymentHash>,
 	description: Bolt11InvoiceDescription, invoice_expiry_delta_secs: u32,
 	phantom_route_hints: Vec<PhantomRouteHints>, entropy_source: ES, node_signer: NS, logger: L,
@@ -265,7 +265,7 @@ where
 /// * Select one hint from each node, up to three hints or until we run out of hints.
 ///
 /// [`PhantomKeysManager`]: crate::sign::PhantomKeysManager
-fn select_phantom_hints<L: Deref>(
+fn select_phantom_hints<L: Deref<Target = dyn Logger + MaybeSend + MaybeSync>>(
 	amt_msat: Option<u64>, phantom_route_hints: Vec<PhantomRouteHints>, logger: L,
 ) -> impl Iterator<Item = RouteHint>
 where {
@@ -364,7 +364,7 @@ fn rotate_through_iterators<T, I: Iterator<Item = T>>(mut vecs: Vec<I>) -> impl 
 /// * Limited to a total of 3 channels.
 /// * Sorted by lowest inbound capacity if an online channel with the minimum amount requested exists,
 ///   otherwise sort by highest inbound capacity to give the payment the best chance of succeeding.
-pub(super) fn sort_and_filter_channels<L: Deref>(
+pub(super) fn sort_and_filter_channels<L: Deref<Target = dyn Logger + MaybeSend + MaybeSync>>(
 	channels: Vec<ChannelDetails>, min_inbound_capacity_msat: Option<u64>, logger: &L,
 ) -> impl ExactSizeIterator<Item = RouteHint>
 where {
@@ -573,14 +573,14 @@ fn prefer_current_channel(
 }
 
 /// Adds relevant context to a [`Record`] before passing it to the wrapped [`Logger`].
-struct WithChannelDetails<'a, 'b, L: Deref> {
+struct WithChannelDetails<'a, 'b, L: Deref<Target = dyn Logger + MaybeSend + MaybeSync>> {
 	/// The logger to delegate to after adding context to the record.
 	logger: &'a L,
 	/// The [`ChannelDetails`] for adding relevant context to the logged record.
 	details: &'b ChannelDetails,
 }
 
-impl<'a, 'b, L: Deref> Logger for WithChannelDetails<'a, 'b, L> {
+impl<'a, 'b, L: Deref<Target = dyn Logger + MaybeSend + MaybeSync>> Logger for WithChannelDetails<'a, 'b, L> {
 	fn log(&self, mut record: Record) {
 		record.peer_id = Some(self.details.counterparty.node_id);
 		record.channel_id = Some(self.details.channel_id);
@@ -588,7 +588,7 @@ impl<'a, 'b, L: Deref> Logger for WithChannelDetails<'a, 'b, L> {
 	}
 }
 
-impl<'a, 'b, L: Deref> WithChannelDetails<'a, 'b, L> {
+impl<'a, 'b, L: Deref<Target = dyn Logger + MaybeSend + MaybeSync>> WithChannelDetails<'a, 'b, L> {
 	fn from(logger: &'a L, details: &'b ChannelDetails) -> Self {
 		Self { logger, details }
 	}

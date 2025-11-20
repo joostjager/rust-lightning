@@ -584,9 +584,14 @@ fn poll_sync_future<F: Future>(future: F) -> F::Output {
 /// If you have many stale updates stored (such as after a crash with pending lazy deletes), and
 /// would like to get rid of them, consider using the
 /// [`MonitorUpdatingPersister::cleanup_stale_updates`] function.
-pub struct MonitorUpdatingPersister<K: Deref, L: Deref, ES: Deref, SP: Deref, BI: Deref, FE: Deref>(
-	MonitorUpdatingPersisterAsync<KVStoreSyncWrapper<K>, PanicingSpawner, L, ES, SP, BI, FE>,
-)
+pub struct MonitorUpdatingPersister<
+	K: Deref,
+	L: Deref<Target = dyn Logger + MaybeSend + MaybeSync>,
+	ES: Deref,
+	SP: Deref,
+	BI: Deref,
+	FE: Deref,
+>(MonitorUpdatingPersisterAsync<KVStoreSyncWrapper<K>, PanicingSpawner, L, ES, SP, BI, FE>)
 where
 	K::Target: KVStoreSync,
 	ES::Target: EntropySource + Sized,
@@ -594,8 +599,14 @@ where
 	BI::Target: BroadcasterInterface,
 	FE::Target: FeeEstimator;
 
-impl<K: Deref, L: Deref, ES: Deref, SP: Deref, BI: Deref, FE: Deref>
-	MonitorUpdatingPersister<K, L, ES, SP, BI, FE>
+impl<
+		K: Deref,
+		L: Deref<Target = dyn Logger + MaybeSend + MaybeSync>,
+		ES: Deref,
+		SP: Deref,
+		BI: Deref,
+		FE: Deref,
+	> MonitorUpdatingPersister<K, L, ES, SP, BI, FE>
 where
 	K::Target: KVStoreSync,
 	ES::Target: EntropySource + Sized,
@@ -696,7 +707,7 @@ where
 impl<
 		ChannelSigner: EcdsaChannelSigner,
 		K: Deref,
-		L: Deref,
+		L: Deref<Target = dyn Logger + MaybeSend + MaybeSync>,
 		ES: Deref,
 		SP: Deref,
 		BI: Deref,
@@ -781,7 +792,7 @@ where
 pub struct MonitorUpdatingPersisterAsync<
 	K: Deref,
 	S: FutureSpawner,
-	L: Deref,
+	L: Deref<Target = dyn Logger + MaybeSend + MaybeSync>,
 	ES: Deref,
 	SP: Deref,
 	BI: Deref,
@@ -797,7 +808,7 @@ where
 struct MonitorUpdatingPersisterAsyncInner<
 	K: Deref,
 	S: FutureSpawner,
-	L: Deref,
+	L: Deref<Target = dyn Logger + MaybeSend + MaybeSync>,
 	ES: Deref,
 	SP: Deref,
 	BI: Deref,
@@ -820,8 +831,15 @@ struct MonitorUpdatingPersisterAsyncInner<
 	fee_estimator: FE,
 }
 
-impl<K: Deref, S: FutureSpawner, L: Deref, ES: Deref, SP: Deref, BI: Deref, FE: Deref>
-	MonitorUpdatingPersisterAsync<K, S, L, ES, SP, BI, FE>
+impl<
+		K: Deref,
+		S: FutureSpawner,
+		L: Deref<Target = dyn Logger + MaybeSend + MaybeSync>,
+		ES: Deref,
+		SP: Deref,
+		BI: Deref,
+		FE: Deref,
+	> MonitorUpdatingPersisterAsync<K, S, L, ES, SP, BI, FE>
 where
 	K::Target: KVStore,
 	ES::Target: EntropySource + Sized,
@@ -914,7 +932,7 @@ where
 impl<
 		K: Deref + MaybeSend + MaybeSync + 'static,
 		S: FutureSpawner,
-		L: Deref + MaybeSend + MaybeSync + 'static,
+		L: Deref<Target = dyn Logger + MaybeSend + MaybeSync> + 'static,
 		ES: Deref + MaybeSend + MaybeSync + 'static,
 		SP: Deref + MaybeSend + MaybeSync + 'static,
 		BI: Deref + MaybeSend + MaybeSync + 'static,
@@ -999,8 +1017,15 @@ where
 	}
 }
 
-impl<K: Deref, S: FutureSpawner, L: Deref, ES: Deref, SP: Deref, BI: Deref, FE: Deref>
-	MonitorUpdatingPersisterAsyncInner<K, S, L, ES, SP, BI, FE>
+impl<
+		K: Deref,
+		S: FutureSpawner,
+		L: Deref<Target = dyn Logger + MaybeSend + MaybeSync>,
+		ES: Deref,
+		SP: Deref,
+		BI: Deref,
+		FE: Deref,
+	> MonitorUpdatingPersisterAsyncInner<K, S, L, ES, SP, BI, FE>
 where
 	K::Target: KVStore,
 	ES::Target: EntropySource + Sized,

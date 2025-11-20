@@ -1003,7 +1003,7 @@ impl<
 		CM: Deref,
 		RM: Deref,
 		OM: Deref,
-		L: Deref,
+	L: Deref<Target = dyn Logger + MaybeSend + MaybeSync>>
 		CMH: Deref,
 		NS: Deref,
 		SM: Deref,
@@ -1060,7 +1060,7 @@ pub struct PeerManager<
 	CM: Deref,
 	RM: Deref,
 	OM: Deref,
-	L: Deref,
+L: Deref<Target = dyn Logger + MaybeSend + MaybeSync>>
 	CMH: Deref,
 	NS: Deref,
 	SM: Deref,
@@ -1148,7 +1148,7 @@ macro_rules! encode_msg {
 	}};
 }
 
-impl<Descriptor: SocketDescriptor, CM: Deref, OM: Deref, L: Deref, NS: Deref, SM: Deref>
+impl<Descriptor: SocketDescriptor, CM: Deref, OM: Deref,L: Deref<Target = dyn Logger + MaybeSend + MaybeSync>> NS: Deref, SM: Deref>
 	PeerManager<Descriptor, CM, IgnoringMessageHandler, OM, L, IgnoringMessageHandler, NS, SM>
 where
 	CM::Target: ChannelMessageHandler,
@@ -1190,7 +1190,7 @@ where
 	}
 }
 
-impl<Descriptor: SocketDescriptor, RM: Deref, L: Deref, NS: Deref>
+impl<Descriptor: SocketDescriptor, RM: Deref,L: Deref<Target = dyn Logger + MaybeSend + MaybeSync>> NS: Deref>
 	PeerManager<
 		Descriptor,
 		ErroringMessageHandler,
@@ -1291,7 +1291,7 @@ impl<
 		CM: Deref,
 		RM: Deref,
 		OM: Deref,
-		L: Deref,
+	L: Deref<Target = dyn Logger + MaybeSend + MaybeSync>>
 		CMH: Deref,
 		NS: Deref,
 		SM: Deref,

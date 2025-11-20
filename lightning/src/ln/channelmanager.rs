@@ -1166,7 +1166,7 @@ impl ClaimablePayments {
 	///
 	/// If no payment is found, `Err(Vec::new())` is returned.
 	#[rustfmt::skip]
-	fn begin_claiming_payment<L: Deref, S: Deref>(
+	fn begin_claiming_payment<L: Deref<Target = dyn Logger + MaybeSend + MaybeSync>> S: Deref>(
 		&mut self, payment_hash: PaymentHash, node_signer: &S, logger: &L,
 		inbound_payment_id_secret: &[u8; 32], custom_tlvs_known: bool,
 	) -> Result<(Vec<ClaimableHTLC>, ClaimingPayment), Vec<ClaimableHTLC>>
@@ -1822,7 +1822,7 @@ impl<
 		F: Deref,
 		R: Deref,
 		MR: Deref,
-		L: Deref,
+	L: Deref<Target = dyn Logger + MaybeSend + MaybeSync>>
 	> AChannelManager for ChannelManager<M, T, ES, NS, SP, F, R, MR, L>
 where
 	M::Target: chain::Watch<<SP::Target as SignerProvider>::EcdsaSigner>,
@@ -2646,7 +2646,7 @@ pub struct ChannelManager<
 	F: Deref,
 	R: Deref,
 	MR: Deref,
-	L: Deref,
+L: Deref<Target = dyn Logger + MaybeSend + MaybeSync>>
 > where
 	M::Target: chain::Watch<<SP::Target as SignerProvider>::EcdsaSigner>,
 	T::Target: BroadcasterInterface,
@@ -3895,7 +3895,7 @@ impl<
 		F: Deref,
 		R: Deref,
 		MR: Deref,
-		L: Deref,
+	L: Deref<Target = dyn Logger + MaybeSend + MaybeSync>>
 	> ChannelManager<M, T, ES, NS, SP, F, R, MR, L>
 where
 	M::Target: chain::Watch<<SP::Target as SignerProvider>::EcdsaSigner>,
@@ -12911,7 +12911,7 @@ impl<
 		F: Deref,
 		R: Deref,
 		MR: Deref,
-		L: Deref,
+	L: Deref<Target = dyn Logger + MaybeSend + MaybeSync>>
 	> ChannelManager<M, T, ES, NS, SP, F, R, MR, L>
 where
 	M::Target: chain::Watch<<SP::Target as SignerProvider>::EcdsaSigner>,
@@ -13762,7 +13762,7 @@ impl<
 		F: Deref,
 		R: Deref,
 		MR: Deref,
-		L: Deref,
+	L: Deref<Target = dyn Logger + MaybeSend + MaybeSync>>
 	> BaseMessageHandler for ChannelManager<M, T, ES, NS, SP, F, R, MR, L>
 where
 	M::Target: chain::Watch<<SP::Target as SignerProvider>::EcdsaSigner>,
@@ -14112,7 +14112,7 @@ impl<
 		F: Deref,
 		R: Deref,
 		MR: Deref,
-		L: Deref,
+	L: Deref<Target = dyn Logger + MaybeSend + MaybeSync>>
 	> EventsProvider for ChannelManager<M, T, ES, NS, SP, F, R, MR, L>
 where
 	M::Target: chain::Watch<<SP::Target as SignerProvider>::EcdsaSigner>,
@@ -14146,7 +14146,7 @@ impl<
 		F: Deref,
 		R: Deref,
 		MR: Deref,
-		L: Deref,
+	L: Deref<Target = dyn Logger + MaybeSend + MaybeSync>>
 	> chain::Listen for ChannelManager<M, T, ES, NS, SP, F, R, MR, L>
 where
 	M::Target: chain::Watch<<SP::Target as SignerProvider>::EcdsaSigner>,
@@ -14206,7 +14206,7 @@ impl<
 		F: Deref,
 		R: Deref,
 		MR: Deref,
-		L: Deref,
+	L: Deref<Target = dyn Logger + MaybeSend + MaybeSync>>
 	> chain::Confirm for ChannelManager<M, T, ES, NS, SP, F, R, MR, L>
 where
 	M::Target: chain::Watch<<SP::Target as SignerProvider>::EcdsaSigner>,
@@ -14378,7 +14378,7 @@ impl<
 		F: Deref,
 		R: Deref,
 		MR: Deref,
-		L: Deref,
+	L: Deref<Target = dyn Logger + MaybeSend + MaybeSync>>
 	> ChannelManager<M, T, ES, NS, SP, F, R, MR, L>
 where
 	M::Target: chain::Watch<<SP::Target as SignerProvider>::EcdsaSigner>,
@@ -14704,7 +14704,7 @@ impl<
 		F: Deref,
 		R: Deref,
 		MR: Deref,
-		L: Deref,
+	L: Deref<Target = dyn Logger + MaybeSend + MaybeSync>>
 	> ChannelMessageHandler for ChannelManager<M, T, ES, NS, SP, F, R, MR, L>
 where
 	M::Target: chain::Watch<<SP::Target as SignerProvider>::EcdsaSigner>,
@@ -15278,7 +15278,7 @@ impl<
 		F: Deref,
 		R: Deref,
 		MR: Deref,
-		L: Deref,
+	L: Deref<Target = dyn Logger + MaybeSend + MaybeSync>>
 	> OffersMessageHandler for ChannelManager<M, T, ES, NS, SP, F, R, MR, L>
 where
 	M::Target: chain::Watch<<SP::Target as SignerProvider>::EcdsaSigner>,
@@ -15494,7 +15494,7 @@ impl<
 		F: Deref,
 		R: Deref,
 		MR: Deref,
-		L: Deref,
+	L: Deref<Target = dyn Logger + MaybeSend + MaybeSync>>
 	> AsyncPaymentsMessageHandler for ChannelManager<M, T, ES, NS, SP, F, R, MR, L>
 where
 	M::Target: chain::Watch<<SP::Target as SignerProvider>::EcdsaSigner>,
@@ -15695,7 +15695,7 @@ impl<
 		F: Deref,
 		R: Deref,
 		MR: Deref,
-		L: Deref,
+	L: Deref<Target = dyn Logger + MaybeSend + MaybeSync>>
 	> DNSResolverMessageHandler for ChannelManager<M, T, ES, NS, SP, F, R, MR, L>
 where
 	M::Target: chain::Watch<<SP::Target as SignerProvider>::EcdsaSigner>,
@@ -15762,7 +15762,7 @@ impl<
 		F: Deref,
 		R: Deref,
 		MR: Deref,
-		L: Deref,
+	L: Deref<Target = dyn Logger + MaybeSend + MaybeSync>>
 	> NodeIdLookUp for ChannelManager<M, T, ES, NS, SP, F, R, MR, L>
 where
 	M::Target: chain::Watch<<SP::Target as SignerProvider>::EcdsaSigner>,
@@ -16276,7 +16276,7 @@ impl<
 		F: Deref,
 		R: Deref,
 		MR: Deref,
-		L: Deref,
+	L: Deref<Target = dyn Logger + MaybeSend + MaybeSync>>
 	> Writeable for ChannelManager<M, T, ES, NS, SP, F, R, MR, L>
 where
 	M::Target: chain::Watch<<SP::Target as SignerProvider>::EcdsaSigner>,
@@ -16642,7 +16642,7 @@ pub struct ChannelManagerReadArgs<
 	F: Deref,
 	R: Deref,
 	MR: Deref,
-	L: Deref + Clone,
+L: Deref<Target = dyn Logger + MaybeSend + MaybeSync>>+ Clone,
 > where
 	M::Target: chain::Watch<<SP::Target as SignerProvider>::EcdsaSigner>,
 	T::Target: BroadcasterInterface,
@@ -16721,7 +16721,7 @@ impl<
 		F: Deref,
 		R: Deref,
 		MR: Deref,
-		L: Deref + Clone,
+	L: Deref<Target = dyn Logger + MaybeSend + MaybeSync>>+ Clone,
 	> ChannelManagerReadArgs<'a, M, T, ES, NS, SP, F, R, MR, L>
 where
 	M::Target: chain::Watch<<SP::Target as SignerProvider>::EcdsaSigner>,
@@ -16772,7 +16772,7 @@ impl<
 		F: Deref,
 		R: Deref,
 		MR: Deref,
-		L: Deref + Clone,
+	L: Deref<Target = dyn Logger + MaybeSend + MaybeSync>>+ Clone,
 	> ReadableArgs<ChannelManagerReadArgs<'a, M, T, ES, NS, SP, F, R, MR, L>>
 	for (BlockHash, Arc<ChannelManager<M, T, ES, NS, SP, F, R, MR, L>>)
 where
@@ -16804,7 +16804,7 @@ impl<
 		F: Deref,
 		R: Deref,
 		MR: Deref,
-		L: Deref + Clone,
+	L: Deref<Target = dyn Logger + MaybeSend + MaybeSync>>+ Clone,
 	> ReadableArgs<ChannelManagerReadArgs<'a, M, T, ES, NS, SP, F, R, MR, L>>
 	for (BlockHash, ChannelManager<M, T, ES, NS, SP, F, R, MR, L>)
 where

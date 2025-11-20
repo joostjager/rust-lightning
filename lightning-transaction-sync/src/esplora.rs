@@ -42,7 +42,7 @@ use std::collections::HashSet;
 /// [`ChainMonitor`]: lightning::chain::chainmonitor::ChainMonitor
 /// [`Watch::watch_channel`]: lightning::chain::Watch::watch_channel
 /// [`Filter`]: lightning::chain::Filter
-pub struct EsploraSyncClient<L: Deref>
+pub struct EsploraSyncClient<L: Deref<Target = dyn Logger + MaybeSend + MaybeSync>>
 where
 	{
 	sync_state: MutexType<SyncState>,
@@ -51,7 +51,7 @@ where
 	logger: L,
 }
 
-impl<L: Deref> EsploraSyncClient<L>
+impl<L: Deref<Target = dyn Logger + MaybeSend + MaybeSync>> EsploraSyncClient<L>
 where
 	{
 	/// Returns a new [`EsploraSyncClient`] object.
@@ -470,7 +470,7 @@ type EsploraClientType = AsyncClient;
 #[cfg(not(feature = "async-interface"))]
 type EsploraClientType = BlockingClient;
 
-impl<L: Deref> Filter for EsploraSyncClient<L>
+impl<L: Deref<Target = dyn Logger + MaybeSend + MaybeSync>> Filter for EsploraSyncClient<L>
 where
 	{
 	fn register_tx(&self, txid: &Txid, _script_pubkey: &Script) {
