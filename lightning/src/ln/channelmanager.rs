@@ -17722,7 +17722,7 @@ where
 			pending_intercepted_htlcs: Mutex::new(new_hash_map()),
 
 			forward_htlcs: Mutex::new(new_hash_map()),
-			decode_update_add_htlcs: Mutex::new(new_hash_map()),
+			decode_update_add_htlcs: Mutex::new(decode_update_add_htlcs),
 			claimable_payments: Mutex::new(ClaimablePayments {
 				claimable_payments: new_hash_map(),
 				pending_claiming_payments: new_hash_map(),
