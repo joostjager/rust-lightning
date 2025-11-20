@@ -17298,7 +17298,7 @@ where
 		// should ensure we try them again on the inbound edge. We put them here and do so after we
 		// have a fully-constructed `ChannelManager` at the end.
 		let mut pending_claims_to_replay = Vec::new();
-
+		let mut decode_update_add_htlcs = new_hash_map();
 		{
 			// If we're tracking pending payments, ensure we haven't lost any by looking at the
 			// ChannelMonitor data for any channels for which we do not have authorative state
@@ -17318,6 +17318,21 @@ where
 					let mut peer_state_lock = peer_state_mtx.lock().unwrap();
 					let peer_state = &mut *peer_state_lock;
 					is_channel_closed = !peer_state.channel_by_id.contains_key(channel_id);
+					if let Some(chan) = peer_state.channel_by_id.get(channel_id) {
+						if let Some(funded_chan) = chan.as_funded() {
+							let inbound_committed_update_adds =
+								funded_chan.get_inbound_committed_update_adds();
+							if !inbound_committed_update_adds.is_empty() {
+								// Reconstruct `ChannelManager::decode_update_add_htlcs` from the serialized
+								// `Channel`, as part of removing the requirement to regularly persist the
+								// `ChannelManager`.
+								decode_update_add_htlcs.insert(
+									funded_chan.context.outbound_scid_alias(),
+									inbound_committed_update_adds,
+								);
+							}
+						}
+					}
 				}
 
 				if is_channel_closed {
@@ -17364,7 +17379,19 @@ where
 					{
 						let htlc_id = SentHTLCId::from_source(&htlc_source);
 						match htlc_source {
-							HTLCSource::PreviousHopData(..) => {},
+							HTLCSource::PreviousHopData(prev_hop_data) => {
+								// The ChannelMonitor is now responsible for this HTLC's
+								// failure/success and will let us know what its outcome is. If we
+								// still have an entry for this HTLC in `forward_htlcs`,
+								// `pending_intercepted_htlcs`, or `decode_update_add_htlcs`, we were apparently not
+								// persisted after the monitor was when forwarding the payment.
+								dedup_decode_update_add_htlcs(
+									&mut decode_update_add_htlcs,
+									&prev_hop_data,
+									"HTLC was forwarded to the closed channel",
+									&args.logger,
+								);
+							},
 							HTLCSource::OutboundRoute {
 								payment_id,
 								session_priv,
@@ -17648,6 +17675,23 @@ where
 		}
 
 		let bounded_fee_estimator = LowerBoundedFeeEstimator::new(args.fee_estimator);
+
+		// In the future, the set of pending HTLCs will be pulled from `Channel{Monitor}` data and
+		// placed in `ChannelManager::decode_update_add_htlcs` on read, to be handled on the next call
+		// to `process_pending_htlc_forwards`. This is part of a larger effort to remove the requirement
+		// of regularly persisting the `ChannelManager`. However, this new pipeline cannot currently
+		// handle inbound HTLC receives, some of which may be present in `failed_htlcs`, so continue
+		// handling HTLCs present in `failed_htlcs` during deserialization for now.
+		for (src, _, _, _, _, _) in failed_htlcs.iter() {
+			if let HTLCSource::PreviousHopData(prev_hop_data) = src {
+				dedup_decode_update_add_htlcs(
+					&mut decode_update_add_htlcs,
+					prev_hop_data,
+					"HTLC was failed backwards during manager read",
+					&args.logger,
+				);
+			}
+		}
 
 		let best_block = BestBlock::new(best_block_hash, best_block_height);
 		let flow = OffersMessageFlow::new(
