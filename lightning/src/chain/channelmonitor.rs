@@ -51,7 +51,7 @@ use crate::ln::chan_utils::{
 	HTLCClaim, HTLCOutputInCommitment, HolderCommitmentTransaction,
 };
 #[cfg(feature = "safe_channels")]
-use crate::ln::channel::read_check_data;
+use crate::ln::channel::FundedChannelState;
 use crate::ln::channel::INITIAL_COMMITMENT_NUMBER;
 use crate::ln::channel_keys::{
 	DelayedPaymentBasepoint, DelayedPaymentKey, HtlcBasepoint, HtlcKey, RevocationBasepoint,
@@ -116,7 +116,7 @@ pub struct ChannelMonitorUpdate {
 
 	/// The encoded channel data associated with this ChannelMonitor, if any.
 	#[cfg(feature = "safe_channels")]
-	pub encoded_channel: Option<Vec<u8>>,
+	pub encoded_channel: Option<Option<FundedChannelState>>,
 }
 
 impl ChannelMonitorUpdate {
@@ -1432,7 +1432,7 @@ pub(crate) struct ChannelMonitorImpl<Signer: EcdsaChannelSigner> {
 	/// The serialized channel state as provided via the last `ChannelMonitorUpdate` or via a call to
 	/// [`ChannelMonitor::update_encoded_channel`].
 	#[cfg(feature = "safe_channels")]
-	encoded_channel: Option<Vec<u8>>,
+	encoded_channel: Option<FundedChannelState>,
 }
 
 // Returns a `&FundingScope` for the one we are currently observing/handling commitment transactions
@@ -2182,14 +2182,14 @@ impl<Signer: EcdsaChannelSigner> ChannelMonitor<Signer> {
 
 	/// Gets the encoded channel data, if any, associated with this ChannelMonitor.
 	#[cfg(feature = "safe_channels")]
-	pub fn get_encoded_channel(&self) -> Option<Vec<u8>> {
+	pub fn get_encoded_channel(&self) -> Option<FundedChannelState> {
 		self.inner.lock().unwrap().encoded_channel.clone()
 	}
 
 	/// Updates the encoded channel data associated with this ChannelMonitor. To clear the encoded channel data (for
-	/// example after shut down of a channel), pass an empty vector.
+	/// example after shut down of a channel), pass `None`.
 	#[cfg(feature = "safe_channels")]
-	pub fn update_encoded_channel(&self, encoded: Vec<u8>) {
+	pub fn update_encoded_channel(&self, encoded: Option<FundedChannelState>) {
 		self.inner.lock().unwrap().update_encoded_channel(encoded);
 	}
 
@@ -2799,52 +2799,45 @@ impl<Signer: EcdsaChannelSigner> ChannelMonitor<Signer> {
 
 impl<Signer: EcdsaChannelSigner> ChannelMonitorImpl<Signer> {
 	#[cfg(feature = "safe_channels")]
-	fn check_encoded_channel_consistency(&self, encoded: &[u8]) {
-		let encoded_channel_reader = &mut &encoded[..];
-		let check_res = read_check_data(encoded_channel_reader);
-		if let Ok(check_data) = check_res {
-			debug_assert!(
-				check_data.cur_holder_commitment_transaction_number
-					<= self.get_cur_holder_commitment_number(),
-				"cur_holder_commitment_transaction_number - channel: {} vs monitor: {}",
-				check_data.cur_holder_commitment_transaction_number,
-				self.get_cur_holder_commitment_number()
-			);
-			debug_assert!(
-				check_data.revoked_counterparty_commitment_transaction_number
-					<= self.get_min_seen_secret(),
-				"revoked_counterparty_commitment_transaction_number - channel: {} vs monitor: {}",
-				check_data.revoked_counterparty_commitment_transaction_number,
-				self.get_min_seen_secret()
-			);
-			debug_assert!(
-				check_data.cur_counterparty_commitment_transaction_number
-					<= self.get_cur_counterparty_commitment_number(),
-				"cur_counterparty_commitment_transaction_number - channel: {} vs monitor: {}",
-				check_data.cur_counterparty_commitment_transaction_number,
-				self.get_cur_counterparty_commitment_number()
-			);
-			debug_assert!(
-				check_data.latest_monitor_update_id >= self.get_latest_update_id(),
-				"latest_monitor_update_id - channel: {} vs monitor: {}",
-				check_data.latest_monitor_update_id,
-				self.get_latest_update_id()
-			);
-		} else {
-			debug_assert!(false, "Failed to read check data from encoded channel");
-		}
+	fn check_encoded_channel_consistency(&self, encoded: &FundedChannelState) {
+		debug_assert!(
+			encoded.get_cur_holder_commitment_transaction_number()
+				<= self.get_cur_holder_commitment_number(),
+			"cur_holder_commitment_transaction_number - channel: {} vs monitor: {}",
+			encoded.get_cur_holder_commitment_transaction_number(),
+			self.get_cur_holder_commitment_number()
+		);
+		debug_assert!(
+			encoded.get_revoked_counterparty_commitment_transaction_number()
+				<= self.get_min_seen_secret(),
+			"revoked_counterparty_commitment_transaction_number - channel: {} vs monitor: {}",
+			encoded.get_revoked_counterparty_commitment_transaction_number(),
+			self.get_min_seen_secret()
+		);
+		debug_assert!(
+			encoded.get_cur_counterparty_commitment_transaction_number()
+				<= self.get_cur_counterparty_commitment_number(),
+			"cur_counterparty_commitment_transaction_number - channel: {} vs monitor: {}",
+			encoded.get_cur_counterparty_commitment_transaction_number(),
+			self.get_cur_counterparty_commitment_number()
+		);
+		debug_assert!(
+			encoded.latest_monitor_update_id >= self.get_latest_update_id(),
+			"latest_monitor_update_id - channel: {} vs monitor: {}",
+			encoded.latest_monitor_update_id,
+			self.get_latest_update_id()
+		);
 	}
 
 	#[cfg(feature = "safe_channels")]
-	fn update_encoded_channel(&mut self, encoded: Vec<u8>) {
-		if encoded.len() > 0 {
+	fn update_encoded_channel(&mut self, encoded: Option<FundedChannelState>) {
+		if let Some(ref encoded) = encoded {
 			// Check that the encoded channel is consistent with the rest of the monitor. This sets an invariant for the
 			// safe_channels feature.
-			self.check_encoded_channel_consistency(&encoded);
-			self.encoded_channel = Some(encoded);
-		} else {
-			self.encoded_channel = None;
+			self.check_encoded_channel_consistency(encoded);
 		}
+
+		self.encoded_channel = encoded;
 	}
 
 	/// Helper for get_claimable_balances which does the work for an individual HTLC, generating up

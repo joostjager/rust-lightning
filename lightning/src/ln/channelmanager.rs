@@ -10311,7 +10311,7 @@ This indicates a bug inside LDK. Please report this error at https://github.com/
 			hash_map::Entry::Vacant(e) => {
 				#[cfg(feature = "safe_channels")]
 				{
-					monitor.update_encoded_channel(chan.encode());
+					monitor.update_encoded_channel(Some((&mut chan).into()));
 				}
 				let monitor_res = self.chain_monitor.watch_channel(monitor.channel_id(), monitor);
 				if let Ok(persist_state) = monitor_res {
@@ -10479,7 +10479,7 @@ This indicates a bug inside LDK. Please report this error at https://github.com/
 					.and_then(|(funded_chan, monitor)| {
 						#[cfg(feature = "safe_channels")]
 						{
-							monitor.update_encoded_channel(funded_chan.encode());
+							monitor.update_encoded_channel(Some(funded_chan.into()));
 						}
 						self.chain_monitor
 							.watch_channel(funded_chan.context.channel_id(), monitor)
@@ -11200,7 +11200,7 @@ This indicates a bug inside LDK. Please report this error at https://github.com/
 					if let Some(monitor) = monitor_opt {
 						#[cfg(feature = "safe_channels")]
 						{
-							monitor.update_encoded_channel(chan.encode());
+							monitor.update_encoded_channel(Some(chan.into()));
 						}
 						let monitor_res = self.chain_monitor.watch_channel(monitor.channel_id(), monitor);
 						if let Ok(persist_state) = monitor_res {
@@ -17013,7 +17013,7 @@ where
 					}],
 					channel_id: Some(monitor.channel_id()),
 					#[cfg(feature = "safe_channels")]
-					encoded_channel: Some(Vec::new()),
+					encoded_channel: Some(None),
 				};
 				log_info!(
 					logger,
