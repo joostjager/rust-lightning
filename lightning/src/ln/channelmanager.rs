@@ -16741,6 +16741,7 @@ where
 		reader_unused: &mut Reader,
 		mut args: ChannelManagerReadArgs<'a, M, T, ES, NS, SP, F, R, MR, L>,
 	) -> Result<Self, DecodeError> {
+		// GET THESE FROM MONITOR
 		let chain_hash: ChainHash = Readable::read(reader_unused)?;
 		let best_block_height: u32 = Readable::read(reader_unused)?;
 		let best_block_hash: BlockHash = Readable::read(reader_unused)?;
@@ -16828,6 +16829,7 @@ where
 
 		let mut pending_outbound_payments_compat = new_hash_map();
 
+		// STORE THIS ONE IN CHANNELS OR MONITORS?
 		let highest_seen_timestamp: u32 = 0;
 
 		// pending_outbound_payments_no_retry is for compatibility with 0.0.101 clients.
@@ -16855,6 +16857,13 @@ where
 		let mut inbound_payment_id_secret = None;
 		let mut peer_storage_dir: Option<Vec<(PublicKey, Vec<u8>)>> = None;
 		let mut async_receive_offer_cache: AsyncReceiveOfferCache = AsyncReceiveOfferCache::new();
+		// KEEP:
+		// received_network_pubkey
+		// fake_scid_rand_bytes
+		// probing_cookie_secret
+		// inbound_payment_id_secret
+		// peer_storage_dir -> store on per channel basis? maybe ignore for now
+		// async_receive_offer_cache -> ignore :)
 		let mut decode_update_add_htlcs = decode_update_add_htlcs.unwrap_or_else(|| new_hash_map());
 		let peer_storage_dir: Vec<(PublicKey, Vec<u8>)> = peer_storage_dir.unwrap_or_else(Vec::new);
 		if fake_scid_rand_bytes.is_none() {
