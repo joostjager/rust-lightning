@@ -6765,6 +6765,22 @@ where
 	quiescent_action: Option<QuiescentAction>,
 }
 
+pub struct Recursive {
+	child: Vec<Child>,
+}
+
+pub struct Child {
+	recursive: Recursive,
+}
+
+impl_writeable_tlv_based!(Recursive, {
+	(0, child, required_vec),
+});
+
+impl_writeable_tlv_based!(Child, {
+	(0, recursive, required),
+});
+
 #[cfg(any(test, fuzzing))]
 #[derive(Clone, Copy, Default, Debug)]
 struct PredictedNextFee {
@@ -15745,7 +15761,7 @@ mod tests {
 	use crate::ln::channel::{
 		AwaitingChannelReadyFlags, ChannelState, FundedChannel, HTLCCandidate, HTLCInitiator,
 		HTLCUpdateAwaitingACK, InboundHTLCOutput, InboundHTLCState, InboundV1Channel,
-		OutboundHTLCOutput, OutboundHTLCState, OutboundV1Channel,
+		OutboundHTLCOutput, OutboundHTLCState, OutboundV1Channel, Recursive,
 	};
 	use crate::ln::channel::{
 		MAX_FUNDING_SATOSHIS_NO_WUMBO, MIN_THEIR_CHAN_RESERVE_SATOSHIS,
@@ -15769,7 +15785,7 @@ mod tests {
 	use crate::types::payment::{PaymentHash, PaymentPreimage};
 	use crate::util::config::UserConfig;
 	use crate::util::errors::APIError;
-	use crate::util::ser::{ReadableArgs, Writeable};
+	use crate::util::ser::{Readable, ReadableArgs, Writeable};
 	use crate::util::test_utils::{
 		self, OnGetShutdownScriptpubkey, TestFeeEstimator, TestKeysInterface, TestLogger,
 	};
@@ -18211,5 +18227,13 @@ mod tests {
 			assert_eq!(pre_channel_value, 9_000);
 			assert_eq!(post_channel_value, 9223372036854784807);
 		}
+	}
+
+	#[test]
+	fn test_recursive() {
+		let bytes = vec![0u8; 1024];
+		let mut reader = &bytes[..];
+
+		let _ = Recursive::read(&mut reader);
 	}
 }
