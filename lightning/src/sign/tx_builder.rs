@@ -14,7 +14,7 @@ use crate::ln::chan_utils::{
 use crate::ln::channel::{CommitmentStats, ANCHOR_OUTPUT_VALUE_SATOSHI};
 use crate::prelude::*;
 use crate::types::features::ChannelTypeFeatures;
-use crate::util::logger::Logger;
+use crate::util::logger::{Logger, LoggerTarget};
 
 pub(crate) struct HTLCAmountDirection {
 	pub outbound: bool,
@@ -169,7 +169,7 @@ pub(crate) trait TxBuilder {
 		&self, is_outbound_from_holder: bool, value_to_self_after_htlcs: u64,
 		value_to_remote_after_htlcs: u64, channel_type: &ChannelTypeFeatures,
 	) -> (u64, u64);
-	fn build_commitment_transaction<L: XXX>(
+	fn build_commitment_transaction<L: Deref<Target = LoggerTarget>>(
 		&self, local: bool, commitment_number: u64, per_commitment_point: &PublicKey,
 		channel_parameters: &ChannelTransactionParameters, secp_ctx: &Secp256k1<secp256k1::All>,
 		value_to_self_msat: u64, htlcs_in_tx: Vec<HTLCOutputInCommitment>, feerate_per_kw: u32,
@@ -320,7 +320,7 @@ impl TxBuilder for SpecTxBuilder {
 
 		(local_balance_before_fee_msat, remote_balance_before_fee_msat)
 	}
-	fn build_commitment_transaction<L: XXX>(
+	fn build_commitment_transaction<L: Deref<Target = LoggerTarget>>(
 		&self, local: bool, commitment_number: u64, per_commitment_point: &PublicKey,
 		channel_parameters: &ChannelTransactionParameters, secp_ctx: &Secp256k1<secp256k1::All>,
 		value_to_self_msat: u64, mut htlcs_in_tx: Vec<HTLCOutputInCommitment>, feerate_per_kw: u32,

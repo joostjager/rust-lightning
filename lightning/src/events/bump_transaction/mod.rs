@@ -37,7 +37,7 @@ use crate::sign::{
 };
 use crate::sync::Mutex;
 use crate::util::async_poll::{AsyncResult, MaybeSend, MaybeSync};
-use crate::util::logger::Logger;
+use crate::util::logger::{Logger, LoggerTarget};
 
 use bitcoin::amount::Amount;
 use bitcoin::consensus::Encodable;
@@ -433,8 +433,10 @@ pub trait WalletSource {
 ///
 /// This is not exported to bindings users as async is only supported in Rust.
 // Note that updates to documentation on this struct should be copied to the synchronous version.
-pub struct Wallet<W: Deref + MaybeSync + MaybeSend, L: XXX + MaybeSync + MaybeSend>
-where
+pub struct Wallet<
+	W: Deref + MaybeSync + MaybeSend,
+	L: Deref<Target = LoggerTarget> + MaybeSync + MaybeSend,
+> where
 	W::Target: WalletSource + MaybeSend,
 {
 	source: W,
@@ -445,7 +447,8 @@ where
 	locked_utxos: Mutex<HashMap<OutPoint, ClaimId>>,
 }
 
-impl<W: Deref + MaybeSync + MaybeSend, L: XXX + MaybeSync + MaybeSend> Wallet<W, L>
+impl<W: Deref + MaybeSync + MaybeSend, L: Deref<Target = LoggerTarget> + MaybeSync + MaybeSend>
+	Wallet<W, L>
 where
 	W::Target: WalletSource + MaybeSend,
 {
@@ -606,8 +609,8 @@ where
 	}
 }
 
-impl<W: Deref + MaybeSync + MaybeSend, L: XXX + MaybeSync + MaybeSend> CoinSelectionSource
-	for Wallet<W, L>
+impl<W: Deref + MaybeSync + MaybeSend, L: Deref<Target = LoggerTarget> + MaybeSync + MaybeSend>
+	CoinSelectionSource for Wallet<W, L>
 where
 	W::Target: WalletSource + MaybeSend + MaybeSync,
 {
@@ -680,8 +683,12 @@ where
 ///
 /// [`Event::BumpTransaction`]: crate::events::Event::BumpTransaction
 // Note that updates to documentation on this struct should be copied to the synchronous version.
-pub struct BumpTransactionEventHandler<B: Deref, C: Deref, SP: Deref, L: XXX>
-where
+pub struct BumpTransactionEventHandler<
+	B: Deref,
+	C: Deref,
+	SP: Deref,
+	L: Deref<Target = LoggerTarget>,
+> where
 	B::Target: BroadcasterInterface,
 	C::Target: CoinSelectionSource,
 	SP::Target: SignerProvider,
@@ -693,7 +700,8 @@ where
 	secp: Secp256k1<secp256k1::All>,
 }
 
-impl<B: Deref, C: Deref, SP: Deref, L: XXX> BumpTransactionEventHandler<B, C, SP, L>
+impl<B: Deref, C: Deref, SP: Deref, L: Deref<Target = LoggerTarget>>
+	BumpTransactionEventHandler<B, C, SP, L>
 where
 	B::Target: BroadcasterInterface,
 	C::Target: CoinSelectionSource,

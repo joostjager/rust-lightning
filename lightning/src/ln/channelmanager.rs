@@ -124,7 +124,7 @@ use crate::types::payment::{PaymentHash, PaymentPreimage, PaymentSecret};
 use crate::types::string::UntrustedString;
 use crate::util::config::{ChannelConfig, ChannelConfigOverrides, ChannelConfigUpdate, UserConfig};
 use crate::util::errors::APIError;
-use crate::util::logger::{Level, Logger, WithContext};
+use crate::util::logger::{Level, Logger, LoggerTarget, WithContext};
 use crate::util::scid_utils::fake_scid;
 use crate::util::ser::{
 	BigSize, FixedLengthReader, LengthReadable, MaybeReadable, Readable, ReadableArgs, VecWriter,
@@ -1166,7 +1166,7 @@ impl ClaimablePayments {
 	///
 	/// If no payment is found, `Err(Vec::new())` is returned.
 	#[rustfmt::skip]
-	fn begin_claiming_payment<L: XXX, S: Deref>(
+	fn begin_claiming_payment<L: Deref<Target = LoggerTarget>, S: Deref>(
 		&mut self, payment_hash: PaymentHash, node_signer: &S, logger: &L,
 		inbound_payment_id_secret: &[u8; 32], custom_tlvs_known: bool,
 	) -> Result<(Vec<ClaimableHTLC>, ClaimingPayment), Vec<ClaimableHTLC>>
@@ -1793,10 +1793,8 @@ pub trait AChannelManager {
 	type MessageRouter: MessageRouter + ?Sized;
 	/// A type that may be dereferenced to [`Self::MessageRouter`].
 	type MR: Deref<Target = Self::MessageRouter>;
-	/// A type implementing [`Logger`].
-	type Logger: Logger + ?Sized;
 	/// A type that may be dereferenced to [`Self::Logger`].
-	type L: XXX<Target = Self::Logger>;
+	type L: Deref<Target = LoggerTarget>;
 	/// Returns a reference to the actual [`ChannelManager`] object.
 	fn get_cm(
 		&self,
@@ -1822,7 +1820,7 @@ impl<
 		F: Deref,
 		R: Deref,
 		MR: Deref,
-		L: XXX,
+		L: Deref<Target = LoggerTarget>,
 	> AChannelManager for ChannelManager<M, T, ES, NS, SP, F, R, MR, L>
 where
 	M::Target: chain::Watch<<SP::Target as SignerProvider>::EcdsaSigner>,
@@ -2645,7 +2643,7 @@ pub struct ChannelManager<
 	F: Deref,
 	R: Deref,
 	MR: Deref,
-	L: XXX,
+	L: Deref<Target = LoggerTarget>,
 > where
 	M::Target: chain::Watch<<SP::Target as SignerProvider>::EcdsaSigner>,
 	T::Target: BroadcasterInterface,
@@ -3897,7 +3895,7 @@ impl<
 		F: Deref,
 		R: Deref,
 		MR: Deref,
-		L: XXX,
+		L: Deref<Target = LoggerTarget>,
 	> ChannelManager<M, T, ES, NS, SP, F, R, MR, L>
 where
 	M::Target: chain::Watch<<SP::Target as SignerProvider>::EcdsaSigner>,
@@ -12917,7 +12915,7 @@ impl<
 		F: Deref,
 		R: Deref,
 		MR: Deref,
-		L: XXX,
+		L: Deref<Target = LoggerTarget>,
 	> ChannelManager<M, T, ES, NS, SP, F, R, MR, L>
 where
 	M::Target: chain::Watch<<SP::Target as SignerProvider>::EcdsaSigner>,
@@ -13768,7 +13766,7 @@ impl<
 		F: Deref,
 		R: Deref,
 		MR: Deref,
-		L: XXX,
+		L: Deref<Target = LoggerTarget>,
 	> BaseMessageHandler for ChannelManager<M, T, ES, NS, SP, F, R, MR, L>
 where
 	M::Target: chain::Watch<<SP::Target as SignerProvider>::EcdsaSigner>,
@@ -14118,7 +14116,7 @@ impl<
 		F: Deref,
 		R: Deref,
 		MR: Deref,
-		L: XXX,
+		L: Deref<Target = LoggerTarget>,
 	> EventsProvider for ChannelManager<M, T, ES, NS, SP, F, R, MR, L>
 where
 	M::Target: chain::Watch<<SP::Target as SignerProvider>::EcdsaSigner>,
@@ -14152,7 +14150,7 @@ impl<
 		F: Deref,
 		R: Deref,
 		MR: Deref,
-		L: XXX,
+		L: Deref<Target = LoggerTarget>,
 	> chain::Listen for ChannelManager<M, T, ES, NS, SP, F, R, MR, L>
 where
 	M::Target: chain::Watch<<SP::Target as SignerProvider>::EcdsaSigner>,
@@ -14212,7 +14210,7 @@ impl<
 		F: Deref,
 		R: Deref,
 		MR: Deref,
-		L: XXX,
+		L: Deref<Target = LoggerTarget>,
 	> chain::Confirm for ChannelManager<M, T, ES, NS, SP, F, R, MR, L>
 where
 	M::Target: chain::Watch<<SP::Target as SignerProvider>::EcdsaSigner>,
@@ -14384,7 +14382,7 @@ impl<
 		F: Deref,
 		R: Deref,
 		MR: Deref,
-		L: XXX,
+		L: Deref<Target = LoggerTarget>,
 	> ChannelManager<M, T, ES, NS, SP, F, R, MR, L>
 where
 	M::Target: chain::Watch<<SP::Target as SignerProvider>::EcdsaSigner>,
@@ -14710,7 +14708,7 @@ impl<
 		F: Deref,
 		R: Deref,
 		MR: Deref,
-		L: XXX,
+		L: Deref<Target = LoggerTarget>,
 	> ChannelMessageHandler for ChannelManager<M, T, ES, NS, SP, F, R, MR, L>
 where
 	M::Target: chain::Watch<<SP::Target as SignerProvider>::EcdsaSigner>,
@@ -15284,7 +15282,7 @@ impl<
 		F: Deref,
 		R: Deref,
 		MR: Deref,
-		L: XXX,
+		L: Deref<Target = LoggerTarget>,
 	> OffersMessageHandler for ChannelManager<M, T, ES, NS, SP, F, R, MR, L>
 where
 	M::Target: chain::Watch<<SP::Target as SignerProvider>::EcdsaSigner>,
@@ -15500,7 +15498,7 @@ impl<
 		F: Deref,
 		R: Deref,
 		MR: Deref,
-		L: XXX,
+		L: Deref<Target = LoggerTarget>,
 	> AsyncPaymentsMessageHandler for ChannelManager<M, T, ES, NS, SP, F, R, MR, L>
 where
 	M::Target: chain::Watch<<SP::Target as SignerProvider>::EcdsaSigner>,
@@ -15701,7 +15699,7 @@ impl<
 		F: Deref,
 		R: Deref,
 		MR: Deref,
-		L: XXX,
+		L: Deref<Target = LoggerTarget>,
 	> DNSResolverMessageHandler for ChannelManager<M, T, ES, NS, SP, F, R, MR, L>
 where
 	M::Target: chain::Watch<<SP::Target as SignerProvider>::EcdsaSigner>,
@@ -15768,7 +15766,7 @@ impl<
 		F: Deref,
 		R: Deref,
 		MR: Deref,
-		L: XXX,
+		L: Deref<Target = LoggerTarget>,
 	> NodeIdLookUp for ChannelManager<M, T, ES, NS, SP, F, R, MR, L>
 where
 	M::Target: chain::Watch<<SP::Target as SignerProvider>::EcdsaSigner>,
@@ -16282,7 +16280,7 @@ impl<
 		F: Deref,
 		R: Deref,
 		MR: Deref,
-		L: XXX,
+		L: Deref<Target = LoggerTarget>,
 	> Writeable for ChannelManager<M, T, ES, NS, SP, F, R, MR, L>
 where
 	M::Target: chain::Watch<<SP::Target as SignerProvider>::EcdsaSigner>,
@@ -16648,7 +16646,7 @@ pub struct ChannelManagerReadArgs<
 	F: Deref,
 	R: Deref,
 	MR: Deref,
-	L: XXX + Clone,
+	L: Deref<Target = LoggerTarget> + Clone,
 > where
 	M::Target: chain::Watch<<SP::Target as SignerProvider>::EcdsaSigner>,
 	T::Target: BroadcasterInterface,
@@ -16727,7 +16725,7 @@ impl<
 		F: Deref,
 		R: Deref,
 		MR: Deref,
-		L: XXX + Clone,
+		L: Deref<Target = LoggerTarget> + Clone,
 	> ChannelManagerReadArgs<'a, M, T, ES, NS, SP, F, R, MR, L>
 where
 	M::Target: chain::Watch<<SP::Target as SignerProvider>::EcdsaSigner>,
@@ -16778,7 +16776,7 @@ impl<
 		F: Deref,
 		R: Deref,
 		MR: Deref,
-		L: XXX + Clone,
+		L: Deref<Target = LoggerTarget> + Clone,
 	> ReadableArgs<ChannelManagerReadArgs<'a, M, T, ES, NS, SP, F, R, MR, L>>
 	for (BlockHash, Arc<ChannelManager<M, T, ES, NS, SP, F, R, MR, L>>)
 where
@@ -16810,7 +16808,7 @@ impl<
 		F: Deref,
 		R: Deref,
 		MR: Deref,
-		L: XXX + Clone,
+		L: Deref<Target = LoggerTarget> + Clone,
 	> ReadableArgs<ChannelManagerReadArgs<'a, M, T, ES, NS, SP, F, R, MR, L>>
 	for (BlockHash, ChannelManager<M, T, ES, NS, SP, F, R, MR, L>)
 where

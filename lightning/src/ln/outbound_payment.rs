@@ -34,7 +34,7 @@ use crate::sign::{EntropySource, NodeSigner, Recipient};
 use crate::types::features::Bolt12InvoiceFeatures;
 use crate::types::payment::{PaymentHash, PaymentPreimage, PaymentSecret};
 use crate::util::errors::APIError;
-use crate::util::logger::Logger;
+use crate::util::logger::{Logger, LoggerTarget};
 use crate::util::ser::ReadableArgs;
 #[cfg(feature = "std")]
 use crate::util::time::Instant;
@@ -837,14 +837,14 @@ pub(super) struct SendAlongPathArgs<'a> {
 	pub hold_htlc_at_next_hop: bool,
 }
 
-pub(super) struct OutboundPayments<L: XXX> {
+pub(super) struct OutboundPayments<L: Deref<Target = LoggerTarget>> {
 	pub(super) pending_outbound_payments: Mutex<HashMap<PaymentId, PendingOutboundPayment>>,
 	awaiting_invoice: AtomicBool,
 	retry_lock: Mutex<()>,
 	logger: L,
 }
 
-impl<L: XXX> OutboundPayments<L> {
+impl<L: Deref<Target = LoggerTarget>> OutboundPayments<L> {
 	pub(super) fn new(
 		pending_outbound_payments: HashMap<PaymentId, PendingOutboundPayment>, logger: L,
 	) -> Self {

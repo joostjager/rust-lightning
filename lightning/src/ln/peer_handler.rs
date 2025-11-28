@@ -47,7 +47,7 @@ use crate::sign::{NodeSigner, Recipient};
 use crate::types::features::{InitFeatures, NodeFeatures};
 use crate::types::string::PrintableString;
 use crate::util::atomic_counter::AtomicCounter;
-use crate::util::logger::{Level, Logger, WithContext};
+use crate::util::logger::{Level, Logger, LoggerTarget, WithContext};
 use crate::util::ser::{VecWriter, Writeable, Writer};
 
 #[allow(unused_imports)]
@@ -975,8 +975,7 @@ pub trait APeerManager {
 	type RM: Deref<Target = Self::RMT>;
 	type OMT: OnionMessageHandler + ?Sized;
 	type OM: Deref<Target = Self::OMT>;
-	type LT: Logger + ?Sized;
-	type L: XXX<Target = Self::LT>;
+	type L: Deref<Target = LoggerTarget>;
 	type CMHT: CustomMessageHandler + ?Sized;
 	type CMH: Deref<Target = Self::CMHT>;
 	type NST: NodeSigner + ?Sized;
@@ -1003,7 +1002,7 @@ impl<
 		CM: Deref,
 		RM: Deref,
 		OM: Deref,
-		L: XXX,
+		L: Deref<Target = LoggerTarget>,
 		CMH: Deref,
 		NS: Deref,
 		SM: Deref,
@@ -1024,7 +1023,6 @@ where
 	type RM = RM;
 	type OMT = <OM as Deref>::Target;
 	type OM = OM;
-	type LT = <L as Deref>::Target;
 	type L = L;
 	type CMHT = <CMH as Deref>::Target;
 	type CMH = CMH;
@@ -1061,7 +1059,7 @@ pub struct PeerManager<
 	CM: Deref,
 	RM: Deref,
 	OM: Deref,
-	L: XXX,
+	L: Deref<Target = LoggerTarget>,
 	CMH: Deref,
 	NS: Deref,
 	SM: Deref,
@@ -1150,8 +1148,14 @@ macro_rules! encode_msg {
 	}};
 }
 
-impl<Descriptor: SocketDescriptor, CM: Deref, OM: Deref, L: XXX, NS: Deref, SM: Deref>
-	PeerManager<Descriptor, CM, IgnoringMessageHandler, OM, L, IgnoringMessageHandler, NS, SM>
+impl<
+		Descriptor: SocketDescriptor,
+		CM: Deref,
+		OM: Deref,
+		L: Deref<Target = LoggerTarget>,
+		NS: Deref,
+		SM: Deref,
+	> PeerManager<Descriptor, CM, IgnoringMessageHandler, OM, L, IgnoringMessageHandler, NS, SM>
 where
 	CM::Target: ChannelMessageHandler,
 	OM::Target: OnionMessageHandler,
@@ -1193,7 +1197,7 @@ where
 	}
 }
 
-impl<Descriptor: SocketDescriptor, RM: Deref, L: XXX, NS: Deref>
+impl<Descriptor: SocketDescriptor, RM: Deref, L: Deref<Target = LoggerTarget>, NS: Deref>
 	PeerManager<
 		Descriptor,
 		ErroringMessageHandler,
@@ -1295,7 +1299,7 @@ impl<
 		CM: Deref,
 		RM: Deref,
 		OM: Deref,
-		L: XXX,
+		L: Deref<Target = LoggerTarget>,
 		CMH: Deref,
 		NS: Deref,
 		SM: Deref,

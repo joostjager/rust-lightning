@@ -15,6 +15,7 @@
 
 use bitcoin::secp256k1::PublicKey;
 
+use crate::util::async_poll::{MaybeSend, MaybeSync};
 use core::cmp;
 use core::fmt;
 use core::fmt::Display;
@@ -287,11 +288,13 @@ pub trait Logger {
 	fn log(&self, record: Record);
 }
 
+pub type LoggerTarget = dyn Logger + MaybeSend + MaybeSync;
+
 /// Adds relevant context to a [`Record`] before passing it to the wrapped [`Logger`].
 ///
 /// This is not exported to bindings users as lifetimes are problematic and there's little reason
 /// for this to be used downstream anyway.
-pub struct WithContext<'a, L: XXX> {
+pub struct WithContext<'a, L: Deref<Target = LoggerTarget>> {
 	/// The logger to delegate to after adding context to the record.
 	logger: &'a L,
 	/// The node id of the peer pertaining to the logged record.
@@ -302,7 +305,7 @@ pub struct WithContext<'a, L: XXX> {
 	payment_hash: Option<PaymentHash>,
 }
 
-impl<'a, L: XXX> Logger for WithContext<'a, L> {
+impl<'a, L: Deref<Target = LoggerTarget>> Logger for WithContext<'a, L> {
 	fn log(&self, mut record: Record) {
 		if self.peer_id.is_some() {
 			record.peer_id = self.peer_id
@@ -317,7 +320,7 @@ impl<'a, L: XXX> Logger for WithContext<'a, L> {
 	}
 }
 
-impl<'a, L: XXX> WithContext<'a, L> {
+impl<'a, L: Deref<Target = LoggerTarget>> WithContext<'a, L> {
 	/// Wraps the given logger, providing additional context to any logged records.
 	pub fn from(
 		logger: &'a L, peer_id: Option<PublicKey>, channel_id: Option<ChannelId>,

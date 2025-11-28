@@ -182,7 +182,7 @@ pub enum GossipSync<
 	R: Deref<Target = RapidGossipSync<G, L>>,
 	G: Deref<Target = NetworkGraph<L>>,
 	U: Deref,
-	L: XXX,
+	L: Deref<Target = LoggerTarget>,
 > where
 	U::Target: UtxoLookup,
 {
@@ -199,7 +199,7 @@ impl<
 		R: Deref<Target = RapidGossipSync<G, L>>,
 		G: Deref<Target = NetworkGraph<L>>,
 		U: Deref,
-		L: XXX,
+		L: Deref<Target = LoggerTarget>,
 	> GossipSync<P, R, G, U, L>
 where
 	U::Target: UtxoLookup,
@@ -232,7 +232,7 @@ impl<
 		P: Deref<Target = P2PGossipSync<G, U, L>>,
 		G: Deref<Target = NetworkGraph<L>>,
 		U: Deref,
-		L: XXX,
+		L: Deref<Target = LoggerTarget>,
 	> GossipSync<P, &RapidGossipSync<G, L>, G, U, L>
 where
 	U::Target: UtxoLookup,
@@ -244,7 +244,7 @@ where
 }
 
 /// This is not exported to bindings users as the bindings concretize everything and have constructors for us
-impl<'a, R: Deref<Target = RapidGossipSync<G, L>>, G: Deref<Target = NetworkGraph<L>>, L: XXX>
+impl<'a, R: Deref<Target = RapidGossipSync<G, L>>, G: Deref<Target = NetworkGraph<L>>, L: Deref<Target = LoggerTarget>>
 	GossipSync<
 		&P2PGossipSync<G, &'a (dyn UtxoLookup + Send + Sync), L>,
 		R,
@@ -260,7 +260,7 @@ impl<'a, R: Deref<Target = RapidGossipSync<G, L>>, G: Deref<Target = NetworkGrap
 }
 
 /// This is not exported to bindings users as the bindings concretize everything and have constructors for us
-impl<'a, L: XXX>
+impl<'a, L: Deref<Target = LoggerTarget>>
 	GossipSync<
 		&P2PGossipSync<&'a NetworkGraph<L>, &'a (dyn UtxoLookup + Send + Sync), L>,
 		&RapidGossipSync<&'a NetworkGraph<L>, L>,
@@ -275,7 +275,7 @@ impl<'a, L: XXX>
 	}
 }
 
-fn handle_network_graph_update<L: XXX>(network_graph: &NetworkGraph<L>, event: &Event) {
+fn handle_network_graph_update<L: Deref<Target = LoggerTarget>>(network_graph: &NetworkGraph<L>, event: &Event) {
 	if let Event::PaymentPathFailed {
 		failure: PathFailure::OnPath { network_update: Some(ref upd) },
 		..
@@ -870,7 +870,7 @@ pub async fn process_events_async<
 	T: Deref,
 	F: Deref,
 	G: Deref<Target = NetworkGraph<L>>,
-	L: XXX,
+	L: Deref<Target = LoggerTarget>,
 	P: Deref,
 	EventHandlerFuture: core::future::Future<Output = Result<(), ReplayEvent>>,
 	EventHandler: Fn(Event) -> EventHandlerFuture,
@@ -1341,7 +1341,7 @@ pub async fn process_events_async_with_kv_store_sync<
 	T: Deref,
 	F: Deref,
 	G: Deref<Target = NetworkGraph<L>>,
-	L: XXX,
+	L: Deref<Target = LoggerTarget>,
 	P: Deref,
 	EventHandlerFuture: core::future::Future<Output = Result<(), ReplayEvent>>,
 	EventHandler: Fn(Event) -> EventHandlerFuture,

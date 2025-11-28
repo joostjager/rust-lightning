@@ -21,7 +21,7 @@ use crate::ln::onion_utils::{HTLCFailReason, LocalHTLCFailureReason, ONION_DATA_
 use crate::sign::{NodeSigner, Recipient};
 use crate::types::features::BlindedHopFeatures;
 use crate::types::payment::PaymentHash;
-use crate::util::logger::Logger;
+use crate::util::logger::{Logger, LoggerTarget};
 
 #[allow(unused_imports)]
 use crate::prelude::*;
@@ -432,7 +432,7 @@ pub(super) fn create_recv_pending_htlc_info(
 ///
 /// [`Event::PaymentClaimable`]: crate::events::Event::PaymentClaimable
 #[rustfmt::skip]
-pub fn peel_payment_onion<NS: Deref, L: XXX, T: secp256k1::Verification>(
+pub fn peel_payment_onion<NS: Deref, L: Deref<Target = LoggerTarget>, T: secp256k1::Verification>(
 	msg: &msgs::UpdateAddHTLC, node_signer: NS, logger: L, secp_ctx: &Secp256k1<T>,
 	cur_height: u32, allow_skimmed_fees: bool,
 ) -> Result<PendingHTLCInfo, InboundHTLCErr>
@@ -505,7 +505,7 @@ pub(super) struct NextPacketDetails {
 }
 
 #[rustfmt::skip]
-pub(super) fn decode_incoming_update_add_htlc_onion<NS: Deref, L: XXX, T: secp256k1::Verification>(
+pub(super) fn decode_incoming_update_add_htlc_onion<NS: Deref, L: Deref<Target = LoggerTarget>, T: secp256k1::Verification>(
 	msg: &msgs::UpdateAddHTLC, node_signer: NS, logger: L, secp_ctx: &Secp256k1<T>,
 ) -> Result<(onion_utils::Hop, Option<NextPacketDetails>), (HTLCFailureMsg, LocalHTLCFailureReason)>
 where
