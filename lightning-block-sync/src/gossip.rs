@@ -128,7 +128,6 @@ pub struct GossipVerifier<
 	L: XXX + Send + Sync + 'static,
 > where
 	Blocks::Target: UtxoSource,
-	L::Target: Logger,
 {
 	source: Blocks,
 	peer_manager_wake: Arc<dyn Fn() + Send + Sync>,
@@ -143,7 +142,6 @@ impl<S: FutureSpawner, Blocks: Deref + Send + Sync + Clone, L: XXX + Send + Sync
 	GossipVerifier<S, Blocks, L>
 where
 	Blocks::Target: UtxoSource,
-	L::Target: Logger,
 {
 	/// Constructs a new [`GossipVerifier`].
 	///
@@ -252,7 +250,6 @@ impl<S: FutureSpawner, Blocks: Deref + Send + Sync + Clone, L: XXX + Send + Sync
 	for GossipVerifier<S, Blocks, L>
 where
 	Blocks::Target: UtxoSource,
-	L::Target: Logger,
 {
 	type Target = Self;
 	fn deref(&self) -> &Self {
@@ -264,7 +261,6 @@ impl<S: FutureSpawner, Blocks: Deref + Send + Sync + Clone, L: XXX + Send + Sync
 	for GossipVerifier<S, Blocks, L>
 where
 	Blocks::Target: UtxoSource,
-	L::Target: Logger,
 {
 	fn get_utxo(&self, _chain_hash: &ChainHash, short_channel_id: u64) -> UtxoResult {
 		let res = UtxoFuture::new();

@@ -436,7 +436,6 @@ pub trait WalletSource {
 pub struct Wallet<W: Deref + MaybeSync + MaybeSend, L: XXX + MaybeSync + MaybeSend>
 where
 	W::Target: WalletSource + MaybeSend,
-	L::Target: Logger + MaybeSend,
 {
 	source: W,
 	logger: L,
@@ -449,7 +448,6 @@ where
 impl<W: Deref + MaybeSync + MaybeSend, L: XXX + MaybeSync + MaybeSend> Wallet<W, L>
 where
 	W::Target: WalletSource + MaybeSend,
-	L::Target: Logger + MaybeSend,
 {
 	/// Returns a new instance backed by the given [`WalletSource`] that serves as an implementation
 	/// of [`CoinSelectionSource`].
@@ -612,7 +610,6 @@ impl<W: Deref + MaybeSync + MaybeSend, L: XXX + MaybeSync + MaybeSend> CoinSelec
 	for Wallet<W, L>
 where
 	W::Target: WalletSource + MaybeSend + MaybeSync,
-	L::Target: Logger + MaybeSend + MaybeSync,
 {
 	fn select_confirmed_utxos<'a>(
 		&'a self, claim_id: ClaimId, must_spend: Vec<Input>, must_pay_to: &'a [TxOut],
@@ -688,7 +685,6 @@ where
 	B::Target: BroadcasterInterface,
 	C::Target: CoinSelectionSource,
 	SP::Target: SignerProvider,
-	L::Target: Logger,
 {
 	broadcaster: B,
 	utxo_source: C,
@@ -702,7 +698,6 @@ where
 	B::Target: BroadcasterInterface,
 	C::Target: CoinSelectionSource,
 	SP::Target: SignerProvider,
-	L::Target: Logger,
 {
 	/// Returns a new instance capable of handling [`Event::BumpTransaction`] events.
 	///

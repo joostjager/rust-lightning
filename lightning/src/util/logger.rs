@@ -291,10 +291,7 @@ pub trait Logger {
 ///
 /// This is not exported to bindings users as lifetimes are problematic and there's little reason
 /// for this to be used downstream anyway.
-pub struct WithContext<'a, L: XXX>
-where
-	L::Target: Logger,
-{
+pub struct WithContext<'a, L: XXX> {
 	/// The logger to delegate to after adding context to the record.
 	logger: &'a L,
 	/// The node id of the peer pertaining to the logged record.
@@ -305,10 +302,7 @@ where
 	payment_hash: Option<PaymentHash>,
 }
 
-impl<'a, L: XXX> Logger for WithContext<'a, L>
-where
-	L::Target: Logger,
-{
+impl<'a, L: XXX> Logger for WithContext<'a, L> {
 	fn log(&self, mut record: Record) {
 		if self.peer_id.is_some() {
 			record.peer_id = self.peer_id
@@ -323,10 +317,7 @@ where
 	}
 }
 
-impl<'a, L: XXX> WithContext<'a, L>
-where
-	L::Target: Logger,
-{
+impl<'a, L: XXX> WithContext<'a, L> {
 	/// Wraps the given logger, providing additional context to any logged records.
 	pub fn from(
 		logger: &'a L, peer_id: Option<PublicKey>, channel_id: Option<ChannelId>,

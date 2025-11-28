@@ -77,7 +77,6 @@ use {
 pub struct OffersMessageFlow<MR: Deref, L: XXX>
 where
 	MR::Target: MessageRouter,
-	L::Target: Logger,
 {
 	chain_hash: ChainHash,
 	best_block: RwLock<BestBlock>,
@@ -110,7 +109,6 @@ where
 impl<MR: Deref, L: XXX> OffersMessageFlow<MR, L>
 where
 	MR::Target: MessageRouter,
-	L::Target: Logger,
 {
 	/// Creates a new [`OffersMessageFlow`]
 	pub fn new(
@@ -269,7 +267,6 @@ pub(crate) const TEST_DEFAULT_ASYNC_RECEIVE_OFFER_EXPIRY: Duration =
 impl<MR: Deref, L: XXX> OffersMessageFlow<MR, L>
 where
 	MR::Target: MessageRouter,
-	L::Target: Logger,
 {
 	/// [`BlindedMessagePath`]s for an async recipient to communicate with this node and interactively
 	/// build [`Offer`]s and [`StaticInvoice`]s for receiving async payments.
@@ -439,7 +436,6 @@ pub enum HeldHtlcReplyPath {
 impl<MR: Deref, L: XXX> OffersMessageFlow<MR, L>
 where
 	MR::Target: MessageRouter,
-	L::Target: Logger,
 {
 	/// Verifies an [`InvoiceRequest`] using the provided [`OffersContext`] or the [`InvoiceRequest::metadata`].
 	///

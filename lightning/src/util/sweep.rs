@@ -343,7 +343,7 @@ where
 	E::Target: FeeEstimator,
 	F::Target: Filter,
 	K::Target: KVStore,
-	L::Target: Logger,
+
 	O::Target: OutputSpender,
 {
 	sweeper_state: Mutex<SweeperState>,
@@ -365,7 +365,7 @@ where
 	E::Target: FeeEstimator,
 	F::Target: Filter,
 	K::Target: KVStore,
-	L::Target: Logger,
+
 	O::Target: OutputSpender,
 {
 	/// Constructs a new [`OutputSweeper`].
@@ -700,7 +700,7 @@ where
 	E::Target: FeeEstimator,
 	F::Target: Filter + Sync + Send,
 	K::Target: KVStore,
-	L::Target: Logger,
+
 	O::Target: OutputSpender,
 {
 	fn filtered_block_connected(
@@ -741,7 +741,7 @@ where
 	E::Target: FeeEstimator,
 	F::Target: Filter + Sync + Send,
 	K::Target: KVStore,
-	L::Target: Logger,
+
 	O::Target: OutputSpender,
 {
 	fn transactions_confirmed(
@@ -838,7 +838,7 @@ where
 	E::Target: FeeEstimator,
 	F::Target: Filter + Sync + Send,
 	K::Target: KVStore,
-	L::Target: Logger,
+
 	O::Target: OutputSpender,
 {
 	#[inline]
@@ -907,7 +907,7 @@ where
 	E::Target: FeeEstimator,
 	F::Target: Filter,
 	K::Target: KVStoreSync,
-	L::Target: Logger,
+
 	O::Target: OutputSpender,
 {
 	sweeper:
@@ -922,7 +922,7 @@ where
 	E::Target: FeeEstimator,
 	F::Target: Filter,
 	K::Target: KVStoreSync,
-	L::Target: Logger,
+
 	O::Target: OutputSpender,
 {
 	/// Constructs a new [`OutputSweeperSync`] instance.
@@ -1042,7 +1042,7 @@ where
 	E::Target: FeeEstimator,
 	F::Target: Filter + Sync + Send,
 	K::Target: KVStoreSync,
-	L::Target: Logger,
+
 	O::Target: OutputSpender,
 {
 	fn filtered_block_connected(
@@ -1064,7 +1064,7 @@ where
 	E::Target: FeeEstimator,
 	F::Target: Filter + Sync + Send,
 	K::Target: KVStoreSync,
-	L::Target: Logger,
+
 	O::Target: OutputSpender,
 {
 	fn transactions_confirmed(
@@ -1094,7 +1094,7 @@ where
 	E::Target: FeeEstimator,
 	F::Target: Filter + Sync + Send,
 	K::Target: KVStoreSync,
-	L::Target: Logger,
+
 	O::Target: OutputSpender,
 {
 	#[inline]

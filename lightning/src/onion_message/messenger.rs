@@ -131,7 +131,7 @@ impl<
 where
 	ES::Target: EntropySource,
 	NS::Target: NodeSigner,
-	L::Target: Logger,
+
 	NL::Target: NodeIdLookUp,
 	MR::Target: MessageRouter,
 	OMH::Target: OffersMessageHandler,
@@ -143,7 +143,6 @@ where
 	type ES = ES;
 	type NodeSigner = NS::Target;
 	type NS = NS;
-	type Logger = L::Target;
 	type L = L;
 	type NodeIdLookUp = NL::Target;
 	type NL = NL;
@@ -296,7 +295,7 @@ pub struct OnionMessenger<
 > where
 	ES::Target: EntropySource,
 	NS::Target: NodeSigner,
-	L::Target: Logger,
+
 	NL::Target: NodeIdLookUp,
 	MR::Target: MessageRouter,
 	OMH::Target: OffersMessageHandler,
@@ -548,7 +547,6 @@ pub trait MessageRouter {
 /// message, and thus an `Err` is returned.
 pub struct DefaultMessageRouter<G: Deref<Target = NetworkGraph<L>>, L: XXX, ES: Deref>
 where
-	L::Target: Logger,
 	ES::Target: EntropySource,
 {
 	network_graph: G,
@@ -565,7 +563,6 @@ pub(crate) const PADDED_PATH_LENGTH: usize = 4;
 
 impl<G: Deref<Target = NetworkGraph<L>>, L: XXX, ES: Deref> DefaultMessageRouter<G, L, ES>
 where
-	L::Target: Logger,
 	ES::Target: EntropySource,
 {
 	/// Creates a [`DefaultMessageRouter`] using the given [`NetworkGraph`].
@@ -719,7 +716,6 @@ where
 impl<G: Deref<Target = NetworkGraph<L>>, L: XXX, ES: Deref> MessageRouter
 	for DefaultMessageRouter<G, L, ES>
 where
-	L::Target: Logger,
 	ES::Target: EntropySource,
 {
 	fn find_path(
@@ -758,7 +754,6 @@ where
 /// message, and thus an `Err` is returned.
 pub struct NodeIdMessageRouter<G: Deref<Target = NetworkGraph<L>>, L: XXX, ES: Deref>
 where
-	L::Target: Logger,
 	ES::Target: EntropySource,
 {
 	network_graph: G,
@@ -767,7 +762,6 @@ where
 
 impl<G: Deref<Target = NetworkGraph<L>>, L: XXX, ES: Deref> NodeIdMessageRouter<G, L, ES>
 where
-	L::Target: Logger,
 	ES::Target: EntropySource,
 {
 	/// Creates a [`NodeIdMessageRouter`] using the given [`NetworkGraph`].
@@ -779,7 +773,6 @@ where
 impl<G: Deref<Target = NetworkGraph<L>>, L: XXX, ES: Deref> MessageRouter
 	for NodeIdMessageRouter<G, L, ES>
 where
-	L::Target: Logger,
 	ES::Target: EntropySource,
 {
 	fn find_path(
@@ -1146,7 +1139,7 @@ pub fn peel_onion_message<NS: Deref, L: XXX, CMH: Deref>(
 ) -> Result<PeeledOnion<<<CMH>::Target as CustomOnionMessageHandler>::CustomMessage>, ()>
 where
 	NS::Target: NodeSigner,
-	L::Target: Logger,
+
 	CMH::Target: CustomOnionMessageHandler,
 {
 	let control_tlvs_ss = match node_signer.ecdh(Recipient::Node, &msg.blinding_point, None) {
@@ -1376,7 +1369,7 @@ impl<
 where
 	ES::Target: EntropySource,
 	NS::Target: NodeSigner,
-	L::Target: Logger,
+
 	NL::Target: NodeIdLookUp,
 	MR::Target: MessageRouter,
 	OMH::Target: OffersMessageHandler,
@@ -2020,7 +2013,7 @@ impl<
 where
 	ES::Target: EntropySource,
 	NS::Target: NodeSigner,
-	L::Target: Logger,
+
 	NL::Target: NodeIdLookUp,
 	MR::Target: MessageRouter,
 	OMH::Target: OffersMessageHandler,
@@ -2141,7 +2134,7 @@ impl<
 where
 	ES::Target: EntropySource,
 	NS::Target: NodeSigner,
-	L::Target: Logger,
+
 	NL::Target: NodeIdLookUp,
 	MR::Target: MessageRouter,
 	OMH::Target: OffersMessageHandler,
@@ -2213,7 +2206,7 @@ impl<
 where
 	ES::Target: EntropySource,
 	NS::Target: NodeSigner,
-	L::Target: Logger,
+
 	NL::Target: NodeIdLookUp,
 	MR::Target: MessageRouter,
 	OMH::Target: OffersMessageHandler,

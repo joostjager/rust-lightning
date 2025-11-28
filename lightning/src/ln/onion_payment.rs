@@ -438,7 +438,7 @@ pub fn peel_payment_onion<NS: Deref, L: XXX, T: secp256k1::Verification>(
 ) -> Result<PendingHTLCInfo, InboundHTLCErr>
 where
 	NS::Target: NodeSigner,
-	L::Target: Logger,
+
 {
 	let (hop, next_packet_details_opt) =
 		decode_incoming_update_add_htlc_onion(msg, node_signer, logger, secp_ctx
@@ -510,7 +510,7 @@ pub(super) fn decode_incoming_update_add_htlc_onion<NS: Deref, L: XXX, T: secp25
 ) -> Result<(onion_utils::Hop, Option<NextPacketDetails>), (HTLCFailureMsg, LocalHTLCFailureReason)>
 where
 	NS::Target: NodeSigner,
-	L::Target: Logger,
+
 {
 	let encode_malformed_error = |message: &str, failure_reason: LocalHTLCFailureReason| {
 		log_info!(logger, "Failed to accept/forward incoming HTLC: {}", message);

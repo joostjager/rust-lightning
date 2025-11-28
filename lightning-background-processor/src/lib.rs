@@ -185,7 +185,6 @@ pub enum GossipSync<
 	L: XXX,
 > where
 	U::Target: UtxoLookup,
-	L::Target: Logger,
 {
 	/// Gossip sync via the lightning peer-to-peer network as defined by BOLT 7.
 	P2P(P),
@@ -204,7 +203,6 @@ impl<
 	> GossipSync<P, R, G, U, L>
 where
 	U::Target: UtxoLookup,
-	L::Target: Logger,
 {
 	fn network_graph(&self) -> Option<&G> {
 		match self {
@@ -238,7 +236,6 @@ impl<
 	> GossipSync<P, &RapidGossipSync<G, L>, G, U, L>
 where
 	U::Target: UtxoLookup,
-	L::Target: Logger,
 {
 	/// Initializes a new [`GossipSync::P2P`] variant.
 	pub fn p2p(gossip_sync: P) -> Self {
@@ -247,20 +244,14 @@ where
 }
 
 /// This is not exported to bindings users as the bindings concretize everything and have constructors for us
-impl<
-		'a,
-		R: Deref<Target = RapidGossipSync<G, L>>,
-		G: Deref<Target = NetworkGraph<L>>,
-		L: XXX,
-	>
+impl<'a, R: Deref<Target = RapidGossipSync<G, L>>, G: Deref<Target = NetworkGraph<L>>, L: XXX>
 	GossipSync<
 		&P2PGossipSync<G, &'a (dyn UtxoLookup + Send + Sync), L>,
 		R,
 		G,
 		&'a (dyn UtxoLookup + Send + Sync),
 		L,
-	> where
-	L::Target: Logger,
+	>
 {
 	/// Initializes a new [`GossipSync::Rapid`] variant.
 	pub fn rapid(gossip_sync: R) -> Self {
@@ -276,8 +267,7 @@ impl<'a, L: XXX>
 		&'a NetworkGraph<L>,
 		&'a (dyn UtxoLookup + Send + Sync),
 		L,
-	> where
-	L::Target: Logger,
+	>
 {
 	/// Initializes a new [`GossipSync::None`] variant.
 	pub fn none() -> Self {
@@ -285,10 +275,7 @@ impl<'a, L: XXX>
 	}
 }
 
-fn handle_network_graph_update<L: XXX>(network_graph: &NetworkGraph<L>, event: &Event)
-where
-	L::Target: Logger,
-{
+fn handle_network_graph_update<L: XXX>(network_graph: &NetworkGraph<L>, event: &Event) {
 	if let Event::PaymentPathFailed {
 		failure: PathFailure::OnPath { network_update: Some(ref upd) },
 		..
@@ -915,7 +902,7 @@ where
 	CF::Target: chain::Filter,
 	T::Target: BroadcasterInterface,
 	F::Target: FeeEstimator,
-	L::Target: Logger,
+
 	P::Target: Persist<<CM::Target as AChannelManager>::Signer>,
 	ES::Target: EntropySource,
 	CM::Target: AChannelManager,
@@ -1386,7 +1373,7 @@ where
 	CF::Target: chain::Filter,
 	T::Target: BroadcasterInterface,
 	F::Target: FeeEstimator,
-	L::Target: Logger,
+
 	P::Target: Persist<<CM::Target as AChannelManager>::Signer>,
 	ES::Target: EntropySource,
 	CM::Target: AChannelManager,
@@ -1500,7 +1487,6 @@ impl BackgroundProcessor {
 		CF::Target: 'static + chain::Filter,
 		T::Target: 'static + BroadcasterInterface,
 		F::Target: 'static + FeeEstimator,
-		L::Target: 'static + Logger,
 		P::Target: 'static + Persist<<CM::Target as AChannelManager>::Signer>,
 		ES::Target: 'static + EntropySource,
 		CM::Target: AChannelManager,

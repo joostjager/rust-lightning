@@ -63,7 +63,6 @@ pub struct DefaultRouter<
 	SP: Sized,
 	Sc: ScoreLookUp<ScoreParams = SP>,
 > where
-	L::Target: Logger,
 	S::Target: for<'a> LockableScore<'a, ScoreLookUp = Sc>,
 	ES::Target: EntropySource,
 {
@@ -83,7 +82,6 @@ impl<
 		Sc: ScoreLookUp<ScoreParams = SP>,
 	> DefaultRouter<G, L, ES, S, SP, Sc>
 where
-	L::Target: Logger,
 	S::Target: for<'a> LockableScore<'a, ScoreLookUp = Sc>,
 	ES::Target: EntropySource,
 {
@@ -104,7 +102,6 @@ impl<
 		Sc: ScoreLookUp<ScoreParams = SP>,
 	> Router for DefaultRouter<G, L, ES, S, SP, Sc>
 where
-	L::Target: Logger,
 	S::Target: for<'a> LockableScore<'a, ScoreLookUp = Sc>,
 	ES::Target: EntropySource,
 {
@@ -1950,7 +1947,7 @@ fn calculate_blinded_path_intro_points<'a, L: XXX>(
 	network_graph: &ReadOnlyNetworkGraph, logger: &L, our_node_id: NodeId,
 	first_hop_targets: &HashMap<NodeId, (Vec<&ChannelDetails>, u32)>,
 ) -> Result<Vec<Option<(&'a NodeId, u32)>>, &'static str>
-where L::Target: Logger {
+ {
 	let introduction_node_id_cache = payment_params.payee.blinded_route_hints().iter()
 		.map(|path| {
 			match path.introduction_node() {
@@ -2456,7 +2453,7 @@ pub fn find_route<L: XXX, GL: XXX, S: ScoreLookUp>(
 	network_graph: &NetworkGraph<GL>, first_hops: Option<&[&ChannelDetails]>, logger: L,
 	scorer: &S, score_params: &S::ScoreParams, random_seed_bytes: &[u8; 32]
 ) -> Result<Route, &'static str>
-where L::Target: Logger, GL::Target: Logger {
+ {
 	let graph_lock = network_graph.read_only();
 	let mut route = get_route(our_node_pubkey, &route_params, &graph_lock, first_hops, logger,
 		scorer, score_params, random_seed_bytes)?;
@@ -2470,7 +2467,7 @@ pub(crate) fn get_route<L: XXX, S: ScoreLookUp>(
 	first_hops: Option<&[&ChannelDetails]>, logger: L, scorer: &S, score_params: &S::ScoreParams,
 	_random_seed_bytes: &[u8; 32]
 ) -> Result<Route, &'static str>
-where L::Target: Logger {
+ {
 
 	let payment_params = &route_params.payment_params;
 	let max_path_length = core::cmp::min(payment_params.max_path_length, MAX_PATH_LENGTH_ESTIMATE);
@@ -3858,7 +3855,7 @@ pub fn build_route_from_hops<L: XXX, GL: XXX>(
 	our_node_pubkey: &PublicKey, hops: &[PublicKey], route_params: &RouteParameters,
 	network_graph: &NetworkGraph<GL>, logger: L, random_seed_bytes: &[u8; 32]
 ) -> Result<Route, &'static str>
-where L::Target: Logger, GL::Target: Logger {
+ {
 	let graph_lock = network_graph.read_only();
 	let mut route = build_route_from_hops_internal(our_node_pubkey, hops, &route_params,
 		&graph_lock, logger, random_seed_bytes)?;
@@ -3870,7 +3867,7 @@ where L::Target: Logger, GL::Target: Logger {
 fn build_route_from_hops_internal<L: XXX>(
 	our_node_pubkey: &PublicKey, hops: &[PublicKey], route_params: &RouteParameters,
 	network_graph: &ReadOnlyNetworkGraph, logger: L, random_seed_bytes: &[u8; 32],
-) -> Result<Route, &'static str> where L::Target: Logger {
+) -> Result<Route, &'static str>  {
 
 	struct HopScorer {
 		our_node_id: NodeId,

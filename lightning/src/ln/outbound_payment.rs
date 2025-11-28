@@ -837,20 +837,14 @@ pub(super) struct SendAlongPathArgs<'a> {
 	pub hold_htlc_at_next_hop: bool,
 }
 
-pub(super) struct OutboundPayments<L: XXX>
-where
-	L::Target: Logger,
-{
+pub(super) struct OutboundPayments<L: XXX> {
 	pub(super) pending_outbound_payments: Mutex<HashMap<PaymentId, PendingOutboundPayment>>,
 	awaiting_invoice: AtomicBool,
 	retry_lock: Mutex<()>,
 	logger: L,
 }
 
-impl<L: XXX> OutboundPayments<L>
-where
-	L::Target: Logger,
-{
+impl<L: XXX> OutboundPayments<L> {
 	pub(super) fn new(
 		pending_outbound_payments: HashMap<PaymentId, PendingOutboundPayment>, logger: L,
 	) -> Self {
@@ -1423,7 +1417,7 @@ where
 	where
 		R::Target: Router,
 		NS::Target: NodeSigner,
-		L::Target: Logger,
+
 		IH: Fn() -> InFlightHtlcs,
 	{
 		#[cfg(feature = "std")] {
@@ -1480,7 +1474,7 @@ where
 		R::Target: Router,
 		ES::Target: EntropySource,
 		NS::Target: NodeSigner,
-		L::Target: Logger,
+
 		IH: Fn() -> InFlightHtlcs,
 		SP: Fn(SendAlongPathArgs) -> Result<(), APIError>,
 	{
@@ -1524,7 +1518,7 @@ where
 		R::Target: Router,
 		ES::Target: EntropySource,
 		NS::Target: NodeSigner,
-		L::Target: Logger,
+
 		IH: Fn() -> InFlightHtlcs,
 		SP: Fn(SendAlongPathArgs) -> Result<(), APIError>,
 	{

@@ -38,8 +38,6 @@ use std::time::Instant;
 /// [`Watch::watch_channel`]: lightning::chain::Watch::watch_channel
 /// [`Filter`]: lightning::chain::Filter
 pub struct ElectrumSyncClient<L: XXX>
-where
-	L::Target: Logger,
 {
 	sync_state: Mutex<SyncState>,
 	queue: Mutex<FilterQueue>,
@@ -48,8 +46,6 @@ where
 }
 
 impl<L: XXX> ElectrumSyncClient<L>
-where
-	L::Target: Logger,
 {
 	/// Returns a new [`ElectrumSyncClient`] object.
 	pub fn new(server_url: String, logger: L) -> Result<Self, TxSyncError> {
@@ -495,8 +491,6 @@ where
 }
 
 impl<L: XXX> Filter for ElectrumSyncClient<L>
-where
-	L::Target: Logger,
 {
 	fn register_tx(&self, txid: &Txid, _script_pubkey: &Script) {
 		let mut locked_queue = self.queue.lock().unwrap();
