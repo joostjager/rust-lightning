@@ -291,7 +291,7 @@ pub trait Logger {
 ///
 /// This is not exported to bindings users as lifetimes are problematic and there's little reason
 /// for this to be used downstream anyway.
-pub struct WithContext<'a, L: Deref>
+pub struct WithContext<'a, L: XXX>
 where
 	L::Target: Logger,
 {
@@ -305,7 +305,7 @@ where
 	payment_hash: Option<PaymentHash>,
 }
 
-impl<'a, L: Deref> Logger for WithContext<'a, L>
+impl<'a, L: XXX> Logger for WithContext<'a, L>
 where
 	L::Target: Logger,
 {
@@ -323,7 +323,7 @@ where
 	}
 }
 
-impl<'a, L: Deref> WithContext<'a, L>
+impl<'a, L: XXX> WithContext<'a, L>
 where
 	L::Target: Logger,
 {

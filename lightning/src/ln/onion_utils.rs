@@ -985,7 +985,7 @@ pub use self::fuzzy_onion_utils::*;
 #[cfg(not(fuzzing))]
 pub(crate) use self::fuzzy_onion_utils::*;
 
-pub fn process_onion_failure<T: secp256k1::Signing, L: Deref>(
+pub fn process_onion_failure<T: secp256k1::Signing, L: XXX>(
 	secp_ctx: &Secp256k1<T>, logger: &L, htlc_source: &HTLCSource,
 	encrypted_packet: OnionErrorPacket,
 ) -> DecodedOnionFailure
@@ -1002,7 +1002,7 @@ where
 
 /// Process failure we got back from upstream on a payment we sent (implying htlc_source is an
 /// OutboundRoute).
-fn process_onion_failure_inner<T: secp256k1::Signing, L: Deref>(
+fn process_onion_failure_inner<T: secp256k1::Signing, L: XXX>(
 	secp_ctx: &Secp256k1<T>, logger: &L, path: &Path, session_priv: &SecretKey,
 	trampoline_session_priv_override: Option<SecretKey>, mut encrypted_packet: OnionErrorPacket,
 ) -> DecodedOnionFailure
@@ -1450,7 +1450,7 @@ where
 }
 
 /// Decodes the attribution data that we got back from upstream on a payment we sent.
-pub fn decode_fulfill_attribution_data<T: secp256k1::Signing, L: Deref>(
+pub fn decode_fulfill_attribution_data<T: secp256k1::Signing, L: XXX>(
 	secp_ctx: &Secp256k1<T>, logger: &L, path: &Path, outer_session_priv: &SecretKey,
 	mut attribution_data: AttributionData,
 ) -> Vec<u32>
@@ -2097,7 +2097,7 @@ impl HTLCFailReason {
 		}
 	}
 
-	pub(super) fn decode_onion_failure<T: secp256k1::Signing, L: Deref>(
+	pub(super) fn decode_onion_failure<T: secp256k1::Signing, L: XXX>(
 		&self, secp_ctx: &Secp256k1<T>, logger: &L, htlc_source: &HTLCSource,
 	) -> DecodedOnionFailure
 	where

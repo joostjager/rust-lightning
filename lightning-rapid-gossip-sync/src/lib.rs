@@ -132,7 +132,7 @@ impl From<LightningError> for GraphSyncError {
 /// See [crate-level documentation] for usage.
 ///
 /// [crate-level documentation]: crate
-pub struct RapidGossipSync<NG: Deref<Target = NetworkGraph<L>>, L: Deref>
+pub struct RapidGossipSync<NG: Deref<Target = NetworkGraph<L>>, L: XXX>
 where
 	L::Target: Logger,
 {
@@ -141,7 +141,7 @@ where
 	is_initial_sync_complete: AtomicBool,
 }
 
-impl<NG: Deref<Target = NetworkGraph<L>>, L: Deref> RapidGossipSync<NG, L>
+impl<NG: Deref<Target = NetworkGraph<L>>, L: XXX> RapidGossipSync<NG, L>
 where
 	L::Target: Logger,
 {

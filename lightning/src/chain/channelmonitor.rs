@@ -1825,7 +1825,7 @@ macro_rules! _process_events_body {
 }
 pub(super) use _process_events_body as process_events_body;
 
-pub(crate) struct WithChannelMonitor<'a, L: Deref>
+pub(crate) struct WithChannelMonitor<'a, L: XXX>
 where
 	L::Target: Logger,
 {
@@ -1835,7 +1835,7 @@ where
 	payment_hash: Option<PaymentHash>,
 }
 
-impl<'a, L: Deref> Logger for WithChannelMonitor<'a, L>
+impl<'a, L: XXX> Logger for WithChannelMonitor<'a, L>
 where
 	L::Target: Logger,
 {
@@ -1847,7 +1847,7 @@ where
 	}
 }
 
-impl<'a, L: Deref> WithChannelMonitor<'a, L>
+impl<'a, L: XXX> WithChannelMonitor<'a, L>
 where
 	L::Target: Logger,
 {
@@ -2076,7 +2076,7 @@ impl<Signer: EcdsaChannelSigner> ChannelMonitor<Signer> {
 	///
 	/// [`ChannelManager`]: crate::ln::channelmanager::ChannelManager
 	#[rustfmt::skip]
-	pub(crate) fn provide_payment_preimage_unsafe_legacy<B: Deref, F: Deref, L: Deref>(
+	pub(crate) fn provide_payment_preimage_unsafe_legacy<B: Deref, F: Deref, L: XXX>(
 		&self,
 		payment_hash: &PaymentHash,
 		payment_preimage: &PaymentPreimage,
@@ -2101,7 +2101,7 @@ impl<Signer: EcdsaChannelSigner> ChannelMonitor<Signer> {
 	/// itself.
 	///
 	/// panics if the given update is not the next update by update_id.
-	pub fn update_monitor<B: Deref, F: Deref, L: Deref>(
+	pub fn update_monitor<B: Deref, F: Deref, L: XXX>(
 		&self, updates: &ChannelMonitorUpdate, broadcaster: &B, fee_estimator: &F, logger: &L,
 	) -> Result<(), ()>
 	where
@@ -2158,7 +2158,7 @@ impl<Signer: EcdsaChannelSigner> ChannelMonitor<Signer> {
 	/// calling `chain::Filter::register_output` and `chain::Filter::register_tx` until all outputs
 	/// have been registered.
 	#[rustfmt::skip]
-	pub fn load_outputs_to_watch<F: Deref, L: Deref>(&self, filter: &F, logger: &L)
+	pub fn load_outputs_to_watch<F: Deref, L: XXX>(&self, filter: &F, logger: &L)
 	where
 		F::Target: chain::Filter, L::Target: Logger,
 	{
@@ -2205,7 +2205,7 @@ impl<Signer: EcdsaChannelSigner> ChannelMonitor<Signer> {
 	///
 	/// [`SpendableOutputs`]: crate::events::Event::SpendableOutputs
 	/// [`BumpTransaction`]: crate::events::Event::BumpTransaction
-	pub fn process_pending_events<H: Deref, L: Deref>(
+	pub fn process_pending_events<H: Deref, L: XXX>(
 		&self, handler: &H, logger: &L,
 	) -> Result<(), ReplayEvent>
 	where
@@ -2222,7 +2222,7 @@ impl<Signer: EcdsaChannelSigner> ChannelMonitor<Signer> {
 	pub async fn process_pending_events_async<
 		Future: core::future::Future<Output = Result<(), ReplayEvent>>,
 		H: Fn(Event) -> Future,
-		L: Deref,
+		L: XXX,
 	>(
 		&self, handler: &H, logger: &L,
 	) -> Result<(), ReplayEvent>
@@ -2356,7 +2356,7 @@ impl<Signer: EcdsaChannelSigner> ChannelMonitor<Signer> {
 	/// transactions that cannot be confirmed until the funding transaction is visible.
 	///
 	/// [`Event::BumpTransaction`]: crate::events::Event::BumpTransaction
-	pub fn broadcast_latest_holder_commitment_txn<B: Deref, F: Deref, L: Deref>(
+	pub fn broadcast_latest_holder_commitment_txn<B: Deref, F: Deref, L: XXX>(
 		&self, broadcaster: &B, fee_estimator: &F, logger: &L,
 	) where
 		B::Target: BroadcasterInterface,
@@ -2379,7 +2379,7 @@ impl<Signer: EcdsaChannelSigner> ChannelMonitor<Signer> {
 	/// to bypass HolderCommitmentTransaction state update lockdown after signature and generate
 	/// revoked commitment transaction.
 	#[cfg(any(test, feature = "_test_utils", feature = "unsafe_revoked_tx_signing"))]
-	pub fn unsafe_get_latest_holder_commitment_txn<L: Deref>(&self, logger: &L) -> Vec<Transaction>
+	pub fn unsafe_get_latest_holder_commitment_txn<L: XXX>(&self, logger: &L) -> Vec<Transaction>
 	where
 		L::Target: Logger,
 	{
@@ -2400,7 +2400,7 @@ impl<Signer: EcdsaChannelSigner> ChannelMonitor<Signer> {
 	///
 	/// [`get_outputs_to_watch`]: #method.get_outputs_to_watch
 	#[rustfmt::skip]
-	pub fn block_connected<B: Deref, F: Deref, L: Deref>(
+	pub fn block_connected<B: Deref, F: Deref, L: XXX>(
 		&self,
 		header: &Header,
 		txdata: &TransactionData,
@@ -2422,7 +2422,7 @@ impl<Signer: EcdsaChannelSigner> ChannelMonitor<Signer> {
 
 	/// Determines if the disconnected block contained any transactions of interest and updates
 	/// appropriately.
-	pub fn blocks_disconnected<B: Deref, F: Deref, L: Deref>(
+	pub fn blocks_disconnected<B: Deref, F: Deref, L: XXX>(
 		&self, fork_point: BestBlock, broadcaster: B, fee_estimator: F, logger: &L,
 	) where
 		B::Target: BroadcasterInterface,
@@ -2442,7 +2442,7 @@ impl<Signer: EcdsaChannelSigner> ChannelMonitor<Signer> {
 	///
 	/// [`block_connected`]: Self::block_connected
 	#[rustfmt::skip]
-	pub fn transactions_confirmed<B: Deref, F: Deref, L: Deref>(
+	pub fn transactions_confirmed<B: Deref, F: Deref, L: XXX>(
 		&self,
 		header: &Header,
 		txdata: &TransactionData,
@@ -2470,7 +2470,7 @@ impl<Signer: EcdsaChannelSigner> ChannelMonitor<Signer> {
 	///
 	/// [`blocks_disconnected`]: Self::blocks_disconnected
 	#[rustfmt::skip]
-	pub fn transaction_unconfirmed<B: Deref, F: Deref, L: Deref>(
+	pub fn transaction_unconfirmed<B: Deref, F: Deref, L: XXX>(
 		&self,
 		txid: &Txid,
 		broadcaster: B,
@@ -2497,7 +2497,7 @@ impl<Signer: EcdsaChannelSigner> ChannelMonitor<Signer> {
 	///
 	/// [`block_connected`]: Self::block_connected
 	#[rustfmt::skip]
-	pub fn best_block_updated<B: Deref, F: Deref, L: Deref>(
+	pub fn best_block_updated<B: Deref, F: Deref, L: XXX>(
 		&self,
 		header: &Header,
 		height: u32,
@@ -2544,7 +2544,7 @@ impl<Signer: EcdsaChannelSigner> ChannelMonitor<Signer> {
 	/// invoking this every 30 seconds, or lower if running in an environment with spotty
 	/// connections, like on mobile.
 	#[rustfmt::skip]
-	pub fn rebroadcast_pending_claims<B: Deref, F: Deref, L: Deref>(
+	pub fn rebroadcast_pending_claims<B: Deref, F: Deref, L: XXX>(
 		&self, broadcaster: B, fee_estimator: F, logger: &L,
 	)
 	where
@@ -2572,7 +2572,7 @@ impl<Signer: EcdsaChannelSigner> ChannelMonitor<Signer> {
 	/// Triggers rebroadcasts of pending claims from a force-closed channel after a transaction
 	/// signature generation failure.
 	#[rustfmt::skip]
-	pub fn signer_unblocked<B: Deref, F: Deref, L: Deref>(
+	pub fn signer_unblocked<B: Deref, F: Deref, L: XXX>(
 		&self, broadcaster: B, fee_estimator: F, logger: &L,
 	)
 	where
@@ -3826,7 +3826,7 @@ impl<Signer: EcdsaChannelSigner> ChannelMonitorImpl<Signer> {
 	///
 	/// Note that this is often called multiple times for the same payment and must be idempotent.
 	#[rustfmt::skip]
-	fn provide_payment_preimage<B: Deref, F: Deref, L: Deref>(
+	fn provide_payment_preimage<B: Deref, F: Deref, L: XXX>(
 		&mut self, payment_hash: &PaymentHash, payment_preimage: &PaymentPreimage,
 		payment_info: &Option<PaymentClaimDetails>, broadcaster: &B,
 		fee_estimator: &LowerBoundedFeeEstimator<F>, logger: &WithChannelMonitor<L>)
@@ -4005,7 +4005,7 @@ impl<Signer: EcdsaChannelSigner> ChannelMonitorImpl<Signer> {
 	/// See also [`ChannelMonitor::broadcast_latest_holder_commitment_txn`].
 	///
 	/// [`ChannelMonitor::broadcast_latest_holder_commitment_txn`]: crate::chain::channelmonitor::ChannelMonitor::broadcast_latest_holder_commitment_txn
-	pub(crate) fn queue_latest_holder_commitment_txn_for_broadcast<B: Deref, F: Deref, L: Deref>(
+	pub(crate) fn queue_latest_holder_commitment_txn_for_broadcast<B: Deref, F: Deref, L: XXX>(
 		&mut self, broadcaster: &B, fee_estimator: &LowerBoundedFeeEstimator<F>, logger: &WithChannelMonitor<L>,
 		require_funding_seen: bool,
 	)
@@ -4033,7 +4033,7 @@ impl<Signer: EcdsaChannelSigner> ChannelMonitorImpl<Signer> {
 		);
 	}
 
-	fn renegotiated_funding<L: Deref>(
+	fn renegotiated_funding<L: XXX>(
 		&mut self, logger: &WithChannelMonitor<L>,
 		channel_parameters: &ChannelTransactionParameters,
 		alternative_holder_commitment_tx: &HolderCommitmentTransaction,
@@ -4209,7 +4209,7 @@ impl<Signer: EcdsaChannelSigner> ChannelMonitorImpl<Signer> {
 	}
 
 	#[rustfmt::skip]
-	fn update_monitor<B: Deref, F: Deref, L: Deref>(
+	fn update_monitor<B: Deref, F: Deref, L: XXX>(
 		&mut self, updates: &ChannelMonitorUpdate, broadcaster: &B, fee_estimator: &F, logger: &WithChannelMonitor<L>
 	) -> Result<(), ()>
 	where B::Target: BroadcasterInterface,
@@ -4677,7 +4677,7 @@ impl<Signer: EcdsaChannelSigner> ChannelMonitorImpl<Signer> {
 	/// Returns packages to claim the revoked output(s) and general information about the output that
 	/// is to the counterparty in the commitment transaction.
 	#[rustfmt::skip]
-	fn check_spend_counterparty_transaction<L: Deref>(&mut self, commitment_txid: Txid, commitment_tx: &Transaction, height: u32, block_hash: &BlockHash, logger: &L)
+	fn check_spend_counterparty_transaction<L: XXX>(&mut self, commitment_txid: Txid, commitment_tx: &Transaction, height: u32, block_hash: &BlockHash, logger: &L)
 		-> (Vec<PackageTemplate>, CommitmentTxCounterpartyOutputInfo)
 	where L::Target: Logger {
 		// Most secp and related errors trying to create keys means we have no hope of constructing
@@ -4967,7 +4967,7 @@ impl<Signer: EcdsaChannelSigner> ChannelMonitorImpl<Signer> {
 
 	/// Attempts to claim a counterparty HTLC-Success/HTLC-Timeout's outputs using the revocation key
 	#[rustfmt::skip]
-	fn check_spend_counterparty_htlc<L: Deref>(
+	fn check_spend_counterparty_htlc<L: XXX>(
 		&mut self, tx: &Transaction, commitment_number: u64, commitment_txid: &Txid, height: u32, logger: &L
 	) -> (Vec<PackageTemplate>, Option<TransactionOutputs>) where L::Target: Logger {
 		let secret = if let Some(secret) = self.get_secret(commitment_number) { secret } else { return (Vec::new(), None); };
@@ -5110,7 +5110,7 @@ impl<Signer: EcdsaChannelSigner> ChannelMonitorImpl<Signer> {
 	/// revoked using data in holder_claimable_outpoints.
 	/// Should not be used if check_spend_revoked_transaction succeeds.
 	/// Returns None unless the transaction is definitely one of our commitment transactions.
-	fn check_spend_holder_transaction<L: Deref>(
+	fn check_spend_holder_transaction<L: XXX>(
 		&mut self, commitment_txid: Txid, commitment_tx: &Transaction, height: u32,
 		block_hash: &BlockHash, logger: &L,
 	) -> Option<(Vec<PackageTemplate>, TransactionOutputs)>
@@ -5179,7 +5179,7 @@ impl<Signer: EcdsaChannelSigner> ChannelMonitorImpl<Signer> {
 	/// Cancels any existing pending claims for a commitment that previously confirmed and has now
 	/// been replaced by another.
 	#[rustfmt::skip]
-	pub fn cancel_prev_commitment_claims<L: Deref>(
+	pub fn cancel_prev_commitment_claims<L: XXX>(
 		&mut self, logger: &L, confirmed_commitment_txid: &Txid
 	) where L::Target: Logger {
 		for (counterparty_commitment_txid, _) in &self.counterparty_commitment_txn_on_chain {
@@ -5253,7 +5253,7 @@ impl<Signer: EcdsaChannelSigner> ChannelMonitorImpl<Signer> {
 	#[cfg(any(test, feature = "_test_utils", feature = "unsafe_revoked_tx_signing"))]
 	/// Note that this includes possibly-locktimed-in-the-future transactions!
 	#[rustfmt::skip]
-	fn unsafe_get_latest_holder_commitment_txn<L: Deref>(
+	fn unsafe_get_latest_holder_commitment_txn<L: XXX>(
 		&mut self, logger: &WithChannelMonitor<L>
 	) -> Vec<Transaction> where L::Target: Logger {
 		log_debug!(logger, "Getting signed copy of latest holder commitment transaction!");
@@ -5305,7 +5305,7 @@ impl<Signer: EcdsaChannelSigner> ChannelMonitorImpl<Signer> {
 	}
 
 	#[rustfmt::skip]
-	fn block_connected<B: Deref, F: Deref, L: Deref>(
+	fn block_connected<B: Deref, F: Deref, L: XXX>(
 		&mut self, header: &Header, txdata: &TransactionData, height: u32, broadcaster: B,
 		fee_estimator: F, logger: &WithChannelMonitor<L>,
 	) -> Vec<TransactionOutputs>
@@ -5321,7 +5321,7 @@ impl<Signer: EcdsaChannelSigner> ChannelMonitorImpl<Signer> {
 	}
 
 	#[rustfmt::skip]
-	fn best_block_updated<B: Deref, F: Deref, L: Deref>(
+	fn best_block_updated<B: Deref, F: Deref, L: XXX>(
 		&mut self,
 		header: &Header,
 		height: u32,
@@ -5353,7 +5353,7 @@ impl<Signer: EcdsaChannelSigner> ChannelMonitorImpl<Signer> {
 	}
 
 	#[rustfmt::skip]
-	fn transactions_confirmed<B: Deref, F: Deref, L: Deref>(
+	fn transactions_confirmed<B: Deref, F: Deref, L: XXX>(
 		&mut self,
 		header: &Header,
 		txdata: &TransactionData,
@@ -5638,7 +5638,7 @@ impl<Signer: EcdsaChannelSigner> ChannelMonitorImpl<Signer> {
 	/// `conf_height` should be set to the height at which any new transaction(s)/block(s) were
 	/// confirmed at, even if it is not the current best height.
 	#[rustfmt::skip]
-	fn block_confirmed<B: Deref, F: Deref, L: Deref>(
+	fn block_confirmed<B: Deref, F: Deref, L: XXX>(
 		&mut self,
 		conf_height: u32,
 		conf_hash: BlockHash,
@@ -5866,7 +5866,7 @@ impl<Signer: EcdsaChannelSigner> ChannelMonitorImpl<Signer> {
 	}
 
 	#[rustfmt::skip]
-	fn blocks_disconnected<B: Deref, F: Deref, L: Deref>(
+	fn blocks_disconnected<B: Deref, F: Deref, L: XXX>(
 		&mut self, fork_point: BestBlock, broadcaster: B, fee_estimator: F, logger: &WithChannelMonitor<L>
 	) where B::Target: BroadcasterInterface,
 		F::Target: FeeEstimator,
@@ -5915,7 +5915,7 @@ impl<Signer: EcdsaChannelSigner> ChannelMonitorImpl<Signer> {
 	}
 
 	#[rustfmt::skip]
-	fn transaction_unconfirmed<B: Deref, F: Deref, L: Deref>(
+	fn transaction_unconfirmed<B: Deref, F: Deref, L: XXX>(
 		&mut self,
 		txid: &Txid,
 		broadcaster: B,
@@ -6030,7 +6030,7 @@ impl<Signer: EcdsaChannelSigner> ChannelMonitorImpl<Signer> {
 	}
 
 	#[rustfmt::skip]
-	fn should_broadcast_holder_commitment_txn<L: Deref>(
+	fn should_broadcast_holder_commitment_txn<L: XXX>(
 		&self, logger: &WithChannelMonitor<L>
 	) -> Option<PaymentHash> where L::Target: Logger {
 		// There's no need to broadcast our commitment transaction if we've seen one confirmed (even
@@ -6097,7 +6097,7 @@ impl<Signer: EcdsaChannelSigner> ChannelMonitorImpl<Signer> {
 	/// Check if any transaction broadcasted is resolving HTLC output by a success or timeout on a holder
 	/// or counterparty commitment tx, if so send back the source, preimage if found and payment_hash of resolved HTLC
 	#[rustfmt::skip]
-	fn is_resolving_htlc_output<L: Deref>(
+	fn is_resolving_htlc_output<L: XXX>(
 		&mut self, tx: &Transaction, height: u32, block_hash: &BlockHash, logger: &WithChannelMonitor<L>,
 	) where L::Target: Logger {
 		let funding_spent = get_confirmed_funding_scope!(self);
@@ -6354,7 +6354,7 @@ impl<Signer: EcdsaChannelSigner> ChannelMonitorImpl<Signer> {
 	/// Checks if the confirmed transaction is paying funds back to some address we can assume to
 	/// own.
 	#[rustfmt::skip]
-	fn check_tx_and_push_spendable_outputs<L: Deref>(
+	fn check_tx_and_push_spendable_outputs<L: XXX>(
 		&mut self, tx: &Transaction, height: u32, block_hash: &BlockHash, logger: &WithChannelMonitor<L>,
 	) where L::Target: Logger {
 		let funding_spent = get_confirmed_funding_scope!(self);
@@ -6376,7 +6376,7 @@ impl<Signer: EcdsaChannelSigner> ChannelMonitorImpl<Signer> {
 	}
 }
 
-impl<Signer: EcdsaChannelSigner, T: Deref, F: Deref, L: Deref> chain::Listen
+impl<Signer: EcdsaChannelSigner, T: Deref, F: Deref, L: XXX> chain::Listen
 	for (ChannelMonitor<Signer>, T, F, L)
 where
 	T::Target: BroadcasterInterface,
@@ -6392,7 +6392,7 @@ where
 	}
 }
 
-impl<Signer: EcdsaChannelSigner, M, T: Deref, F: Deref, L: Deref> chain::Confirm for (M, T, F, L)
+impl<Signer: EcdsaChannelSigner, M, T: Deref, F: Deref, L: XXX> chain::Confirm for (M, T, F, L)
 where
 	M: Deref<Target = ChannelMonitor<Signer>>,
 	T::Target: BroadcasterInterface,

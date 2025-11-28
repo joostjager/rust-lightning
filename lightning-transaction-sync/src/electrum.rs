@@ -37,7 +37,7 @@ use std::time::Instant;
 /// [`ChainMonitor`]: lightning::chain::chainmonitor::ChainMonitor
 /// [`Watch::watch_channel`]: lightning::chain::Watch::watch_channel
 /// [`Filter`]: lightning::chain::Filter
-pub struct ElectrumSyncClient<L: Deref>
+pub struct ElectrumSyncClient<L: XXX>
 where
 	L::Target: Logger,
 {
@@ -47,7 +47,7 @@ where
 	logger: L,
 }
 
-impl<L: Deref> ElectrumSyncClient<L>
+impl<L: XXX> ElectrumSyncClient<L>
 where
 	L::Target: Logger,
 {
@@ -494,7 +494,7 @@ where
 	}
 }
 
-impl<L: Deref> Filter for ElectrumSyncClient<L>
+impl<L: XXX> Filter for ElectrumSyncClient<L>
 where
 	L::Target: Logger,
 {

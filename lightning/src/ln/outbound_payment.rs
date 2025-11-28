@@ -837,7 +837,7 @@ pub(super) struct SendAlongPathArgs<'a> {
 	pub hold_htlc_at_next_hop: bool,
 }
 
-pub(super) struct OutboundPayments<L: Deref>
+pub(super) struct OutboundPayments<L: XXX>
 where
 	L::Target: Logger,
 {
@@ -847,7 +847,7 @@ where
 	logger: L,
 }
 
-impl<L: Deref> OutboundPayments<L>
+impl<L: XXX> OutboundPayments<L>
 where
 	L::Target: Logger,
 {

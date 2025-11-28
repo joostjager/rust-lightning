@@ -345,7 +345,7 @@ fn construct_payment_secret(
 /// [`NodeSigner::get_expanded_key`]: crate::sign::NodeSigner::get_expanded_key
 /// [`create_inbound_payment`]: crate::ln::channelmanager::ChannelManager::create_inbound_payment
 /// [`create_inbound_payment_for_hash`]: crate::ln::channelmanager::ChannelManager::create_inbound_payment_for_hash
-pub(super) fn verify<L: Deref>(
+pub(super) fn verify<L: XXX>(
 	payment_hash: PaymentHash, payment_data: &msgs::FinalOnionHopData, highest_seen_timestamp: u64,
 	keys: &ExpandedKey, logger: &L,
 ) -> Result<(Option<PaymentPreimage>, Option<u16>), ()>

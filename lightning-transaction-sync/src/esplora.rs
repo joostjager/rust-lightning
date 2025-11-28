@@ -42,7 +42,7 @@ use std::collections::HashSet;
 /// [`ChainMonitor`]: lightning::chain::chainmonitor::ChainMonitor
 /// [`Watch::watch_channel`]: lightning::chain::Watch::watch_channel
 /// [`Filter`]: lightning::chain::Filter
-pub struct EsploraSyncClient<L: Deref>
+pub struct EsploraSyncClient<L: XXX>
 where
 	L::Target: Logger,
 {
@@ -52,7 +52,7 @@ where
 	logger: L,
 }
 
-impl<L: Deref> EsploraSyncClient<L>
+impl<L: XXX> EsploraSyncClient<L>
 where
 	L::Target: Logger,
 {
@@ -472,7 +472,7 @@ type EsploraClientType = AsyncClient;
 #[cfg(not(feature = "async-interface"))]
 type EsploraClientType = BlockingClient;
 
-impl<L: Deref> Filter for EsploraSyncClient<L>
+impl<L: XXX> Filter for EsploraSyncClient<L>
 where
 	L::Target: Logger,
 {

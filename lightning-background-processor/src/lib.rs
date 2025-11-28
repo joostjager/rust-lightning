@@ -182,7 +182,7 @@ pub enum GossipSync<
 	R: Deref<Target = RapidGossipSync<G, L>>,
 	G: Deref<Target = NetworkGraph<L>>,
 	U: Deref,
-	L: Deref,
+	L: XXX,
 > where
 	U::Target: UtxoLookup,
 	L::Target: Logger,
@@ -200,7 +200,7 @@ impl<
 		R: Deref<Target = RapidGossipSync<G, L>>,
 		G: Deref<Target = NetworkGraph<L>>,
 		U: Deref,
-		L: Deref,
+		L: XXX,
 	> GossipSync<P, R, G, U, L>
 where
 	U::Target: UtxoLookup,
@@ -234,7 +234,7 @@ impl<
 		P: Deref<Target = P2PGossipSync<G, U, L>>,
 		G: Deref<Target = NetworkGraph<L>>,
 		U: Deref,
-		L: Deref,
+		L: XXX,
 	> GossipSync<P, &RapidGossipSync<G, L>, G, U, L>
 where
 	U::Target: UtxoLookup,
@@ -251,7 +251,7 @@ impl<
 		'a,
 		R: Deref<Target = RapidGossipSync<G, L>>,
 		G: Deref<Target = NetworkGraph<L>>,
-		L: Deref,
+		L: XXX,
 	>
 	GossipSync<
 		&P2PGossipSync<G, &'a (dyn UtxoLookup + Send + Sync), L>,
@@ -269,7 +269,7 @@ impl<
 }
 
 /// This is not exported to bindings users as the bindings concretize everything and have constructors for us
-impl<'a, L: Deref>
+impl<'a, L: XXX>
 	GossipSync<
 		&P2PGossipSync<&'a NetworkGraph<L>, &'a (dyn UtxoLookup + Send + Sync), L>,
 		&RapidGossipSync<&'a NetworkGraph<L>, L>,
@@ -285,7 +285,7 @@ impl<'a, L: Deref>
 	}
 }
 
-fn handle_network_graph_update<L: Deref>(network_graph: &NetworkGraph<L>, event: &Event)
+fn handle_network_graph_update<L: XXX>(network_graph: &NetworkGraph<L>, event: &Event)
 where
 	L::Target: Logger,
 {
@@ -883,7 +883,7 @@ pub async fn process_events_async<
 	T: Deref,
 	F: Deref,
 	G: Deref<Target = NetworkGraph<L>>,
-	L: Deref,
+	L: XXX,
 	P: Deref,
 	EventHandlerFuture: core::future::Future<Output = Result<(), ReplayEvent>>,
 	EventHandler: Fn(Event) -> EventHandlerFuture,
@@ -1354,7 +1354,7 @@ pub async fn process_events_async_with_kv_store_sync<
 	T: Deref,
 	F: Deref,
 	G: Deref<Target = NetworkGraph<L>>,
-	L: Deref,
+	L: XXX,
 	P: Deref,
 	EventHandlerFuture: core::future::Future<Output = Result<(), ReplayEvent>>,
 	EventHandler: Fn(Event) -> EventHandlerFuture,

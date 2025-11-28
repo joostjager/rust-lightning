@@ -179,7 +179,7 @@ pub enum BlockData {
 /// custom cache eviction policy. This offers flexibility to those sensitive to resource usage.
 /// Hence, there is a trade-off between a lower memory footprint and potentially increased network
 /// I/O as headers are re-fetched during fork detection.
-pub struct SpvClient<'a, P: Poll, C: Cache, L: Deref>
+pub struct SpvClient<'a, P: Poll, C: Cache, L: XXX>
 where
 	L::Target: chain::Listen,
 {
@@ -228,7 +228,7 @@ impl Cache for UnboundedCache {
 	}
 }
 
-impl<'a, P: Poll, C: Cache, L: Deref> SpvClient<'a, P, C, L>
+impl<'a, P: Poll, C: Cache, L: XXX> SpvClient<'a, P, C, L>
 where
 	L::Target: chain::Listen,
 {
@@ -297,7 +297,7 @@ where
 /// Notifies [listeners] of blocks that have been connected or disconnected from the chain.
 ///
 /// [listeners]: lightning::chain::Listen
-pub struct ChainNotifier<'a, C: Cache, L: Deref>
+pub struct ChainNotifier<'a, C: Cache, L: XXX>
 where
 	L::Target: chain::Listen,
 {
@@ -326,7 +326,7 @@ struct ChainDifference {
 	connected_blocks: Vec<ValidatedBlockHeader>,
 }
 
-impl<'a, C: Cache, L: Deref> ChainNotifier<'a, C, L>
+impl<'a, C: Cache, L: XXX> ChainNotifier<'a, C, L>
 where
 	L::Target: chain::Listen,
 {

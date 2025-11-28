@@ -183,7 +183,7 @@ impl FromStr for NodeId {
 }
 
 /// Represents the network as nodes and channels between them
-pub struct NetworkGraph<L: Deref>
+pub struct NetworkGraph<L: XXX>
 where
 	L::Target: Logger,
 {
@@ -321,7 +321,7 @@ impl MaybeReadable for NetworkUpdate {
 /// This network graph is then used for routing payments.
 /// Provides interface to help with initial routing sync by
 /// serving historical announcements.
-pub struct P2PGossipSync<G: Deref<Target = NetworkGraph<L>>, U: Deref, L: Deref>
+pub struct P2PGossipSync<G: Deref<Target = NetworkGraph<L>>, U: Deref, L: XXX>
 where
 	U::Target: UtxoLookup,
 	L::Target: Logger,
@@ -333,7 +333,7 @@ where
 	logger: L,
 }
 
-impl<G: Deref<Target = NetworkGraph<L>>, U: Deref, L: Deref> P2PGossipSync<G, U, L>
+impl<G: Deref<Target = NetworkGraph<L>>, U: Deref, L: XXX> P2PGossipSync<G, U, L>
 where
 	U::Target: UtxoLookup,
 	L::Target: Logger,
@@ -414,7 +414,7 @@ where
 	}
 }
 
-impl<L: Deref> NetworkGraph<L>
+impl<L: XXX> NetworkGraph<L>
 where
 	L::Target: Logger,
 {
@@ -530,7 +530,7 @@ pub fn verify_channel_announcement<C: Verification>(
 	Ok(())
 }
 
-impl<G: Deref<Target = NetworkGraph<L>>, U: Deref, L: Deref> RoutingMessageHandler
+impl<G: Deref<Target = NetworkGraph<L>>, U: Deref, L: XXX> RoutingMessageHandler
 	for P2PGossipSync<G, U, L>
 where
 	U::Target: UtxoLookup,
@@ -759,7 +759,7 @@ where
 	}
 }
 
-impl<G: Deref<Target = NetworkGraph<L>>, U: Deref, L: Deref> BaseMessageHandler
+impl<G: Deref<Target = NetworkGraph<L>>, U: Deref, L: XXX> BaseMessageHandler
 	for P2PGossipSync<G, U, L>
 where
 	U::Target: UtxoLookup,
@@ -1632,7 +1632,7 @@ impl Readable for NodeInfo {
 const SERIALIZATION_VERSION: u8 = 1;
 const MIN_SERIALIZATION_VERSION: u8 = 1;
 
-impl<L: Deref> Writeable for NetworkGraph<L>
+impl<L: XXX> Writeable for NetworkGraph<L>
 where
 	L::Target: Logger,
 {
@@ -1663,7 +1663,7 @@ where
 	}
 }
 
-impl<L: Deref> ReadableArgs<L> for NetworkGraph<L>
+impl<L: XXX> ReadableArgs<L> for NetworkGraph<L>
 where
 	L::Target: Logger,
 {
@@ -1720,7 +1720,7 @@ where
 	}
 }
 
-impl<L: Deref> fmt::Display for NetworkGraph<L>
+impl<L: XXX> fmt::Display for NetworkGraph<L>
 where
 	L::Target: Logger,
 {
@@ -1737,8 +1737,8 @@ where
 	}
 }
 
-impl<L: Deref> Eq for NetworkGraph<L> where L::Target: Logger {}
-impl<L: Deref> PartialEq for NetworkGraph<L>
+impl<L: XXX> Eq for NetworkGraph<L> where L::Target: Logger {}
+impl<L: XXX> PartialEq for NetworkGraph<L>
 where
 	L::Target: Logger,
 {
@@ -1769,7 +1769,7 @@ const CHAN_COUNT_ESTIMATE: usize = 60_000;
 // too low
 const NODE_COUNT_ESTIMATE: usize = 20_000;
 
-impl<L: Deref> NetworkGraph<L>
+impl<L: XXX> NetworkGraph<L>
 where
 	L::Target: Logger,
 {

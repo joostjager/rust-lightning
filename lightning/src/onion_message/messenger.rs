@@ -76,7 +76,7 @@ pub trait AOnionMessenger {
 	/// A type implementing [`Logger`]
 	type Logger: Logger + ?Sized;
 	/// A type that may be dereferenced to [`Self::Logger`]
-	type L: Deref<Target = Self::Logger>;
+	type L: XXX<Target = Self::Logger>;
 	/// A type implementing [`NodeIdLookUp`]
 	type NodeIdLookUp: NodeIdLookUp + ?Sized;
 	/// A type that may be dereferenced to [`Self::NodeIdLookUp`]
@@ -120,7 +120,7 @@ pub trait AOnionMessenger {
 impl<
 		ES: Deref,
 		NS: Deref,
-		L: Deref,
+		L: XXX,
 		NL: Deref,
 		MR: Deref,
 		OMH: Deref,
@@ -286,7 +286,7 @@ where
 pub struct OnionMessenger<
 	ES: Deref,
 	NS: Deref,
-	L: Deref,
+	L: XXX,
 	NL: Deref,
 	MR: Deref,
 	OMH: Deref,
@@ -546,7 +546,7 @@ pub trait MessageRouter {
 /// it will create a one-hop path using the recipient as the introduction node if it is an announced
 /// node. Otherwise, there is no way to find a path to the introduction node in order to send a
 /// message, and thus an `Err` is returned.
-pub struct DefaultMessageRouter<G: Deref<Target = NetworkGraph<L>>, L: Deref, ES: Deref>
+pub struct DefaultMessageRouter<G: Deref<Target = NetworkGraph<L>>, L: XXX, ES: Deref>
 where
 	L::Target: Logger,
 	ES::Target: EntropySource,
@@ -563,7 +563,7 @@ where
 // adding dummy hops to them.
 pub(crate) const PADDED_PATH_LENGTH: usize = 4;
 
-impl<G: Deref<Target = NetworkGraph<L>>, L: Deref, ES: Deref> DefaultMessageRouter<G, L, ES>
+impl<G: Deref<Target = NetworkGraph<L>>, L: XXX, ES: Deref> DefaultMessageRouter<G, L, ES>
 where
 	L::Target: Logger,
 	ES::Target: EntropySource,
@@ -716,7 +716,7 @@ where
 	}
 }
 
-impl<G: Deref<Target = NetworkGraph<L>>, L: Deref, ES: Deref> MessageRouter
+impl<G: Deref<Target = NetworkGraph<L>>, L: XXX, ES: Deref> MessageRouter
 	for DefaultMessageRouter<G, L, ES>
 where
 	L::Target: Logger,
@@ -756,7 +756,7 @@ where
 /// it will create a one-hop path using the recipient as the introduction node if it is an announced
 /// node. Otherwise, there is no way to find a path to the introduction node in order to send a
 /// message, and thus an `Err` is returned.
-pub struct NodeIdMessageRouter<G: Deref<Target = NetworkGraph<L>>, L: Deref, ES: Deref>
+pub struct NodeIdMessageRouter<G: Deref<Target = NetworkGraph<L>>, L: XXX, ES: Deref>
 where
 	L::Target: Logger,
 	ES::Target: EntropySource,
@@ -765,7 +765,7 @@ where
 	entropy_source: ES,
 }
 
-impl<G: Deref<Target = NetworkGraph<L>>, L: Deref, ES: Deref> NodeIdMessageRouter<G, L, ES>
+impl<G: Deref<Target = NetworkGraph<L>>, L: XXX, ES: Deref> NodeIdMessageRouter<G, L, ES>
 where
 	L::Target: Logger,
 	ES::Target: EntropySource,
@@ -776,7 +776,7 @@ where
 	}
 }
 
-impl<G: Deref<Target = NetworkGraph<L>>, L: Deref, ES: Deref> MessageRouter
+impl<G: Deref<Target = NetworkGraph<L>>, L: XXX, ES: Deref> MessageRouter
 	for NodeIdMessageRouter<G, L, ES>
 where
 	L::Target: Logger,
@@ -1140,7 +1140,7 @@ where
 ///
 /// Returns either the next layer of the onion for forwarding or the decrypted content for the
 /// receiver.
-pub fn peel_onion_message<NS: Deref, L: Deref, CMH: Deref>(
+pub fn peel_onion_message<NS: Deref, L: XXX, CMH: Deref>(
 	msg: &OnionMessage, secp_ctx: &Secp256k1<secp256k1::All>, node_signer: NS, logger: L,
 	custom_handler: CMH,
 ) -> Result<PeeledOnion<<<CMH>::Target as CustomOnionMessageHandler>::CustomMessage>, ()>
@@ -1365,7 +1365,7 @@ macro_rules! drop_handled_events_and_abort {
 impl<
 		ES: Deref,
 		NS: Deref,
-		L: Deref,
+		L: XXX,
 		NL: Deref,
 		MR: Deref,
 		OMH: Deref,
@@ -2009,7 +2009,7 @@ fn outbound_buffer_full(
 impl<
 		ES: Deref,
 		NS: Deref,
-		L: Deref,
+		L: XXX,
 		NL: Deref,
 		MR: Deref,
 		OMH: Deref,
@@ -2130,7 +2130,7 @@ where
 impl<
 		ES: Deref,
 		NS: Deref,
-		L: Deref,
+		L: XXX,
 		NL: Deref,
 		MR: Deref,
 		OMH: Deref,
@@ -2202,7 +2202,7 @@ where
 impl<
 		ES: Deref,
 		NS: Deref,
-		L: Deref,
+		L: XXX,
 		NL: Deref,
 		MR: Deref,
 		OMH: Deref,

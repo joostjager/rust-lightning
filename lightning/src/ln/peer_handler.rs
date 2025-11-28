@@ -976,7 +976,7 @@ pub trait APeerManager {
 	type OMT: OnionMessageHandler + ?Sized;
 	type OM: Deref<Target = Self::OMT>;
 	type LT: Logger + ?Sized;
-	type L: Deref<Target = Self::LT>;
+	type L: XXX<Target = Self::LT>;
 	type CMHT: CustomMessageHandler + ?Sized;
 	type CMH: Deref<Target = Self::CMHT>;
 	type NST: NodeSigner + ?Sized;
@@ -1003,7 +1003,7 @@ impl<
 		CM: Deref,
 		RM: Deref,
 		OM: Deref,
-		L: Deref,
+		L: XXX,
 		CMH: Deref,
 		NS: Deref,
 		SM: Deref,
@@ -1061,7 +1061,7 @@ pub struct PeerManager<
 	CM: Deref,
 	RM: Deref,
 	OM: Deref,
-	L: Deref,
+	L: XXX,
 	CMH: Deref,
 	NS: Deref,
 	SM: Deref,
@@ -1150,7 +1150,7 @@ macro_rules! encode_msg {
 	}};
 }
 
-impl<Descriptor: SocketDescriptor, CM: Deref, OM: Deref, L: Deref, NS: Deref, SM: Deref>
+impl<Descriptor: SocketDescriptor, CM: Deref, OM: Deref, L: XXX, NS: Deref, SM: Deref>
 	PeerManager<Descriptor, CM, IgnoringMessageHandler, OM, L, IgnoringMessageHandler, NS, SM>
 where
 	CM::Target: ChannelMessageHandler,
@@ -1193,7 +1193,7 @@ where
 	}
 }
 
-impl<Descriptor: SocketDescriptor, RM: Deref, L: Deref, NS: Deref>
+impl<Descriptor: SocketDescriptor, RM: Deref, L: XXX, NS: Deref>
 	PeerManager<
 		Descriptor,
 		ErroringMessageHandler,
@@ -1295,7 +1295,7 @@ impl<
 		CM: Deref,
 		RM: Deref,
 		OM: Deref,
-		L: Deref,
+		L: XXX,
 		CMH: Deref,
 		NS: Deref,
 		SM: Deref,

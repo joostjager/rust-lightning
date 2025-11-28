@@ -479,7 +479,7 @@ impl ReadableArgs<u64> for FixedPenaltyScorer {
 /// [`liquidity_offset_half_life`]: ProbabilisticScoringDecayParameters::liquidity_offset_half_life
 /// [`historical_liquidity_penalty_multiplier_msat`]: ProbabilisticScoringFeeParameters::historical_liquidity_penalty_multiplier_msat
 /// [`historical_liquidity_penalty_amount_multiplier_msat`]: ProbabilisticScoringFeeParameters::historical_liquidity_penalty_amount_multiplier_msat
-pub struct ProbabilisticScorer<G: Deref<Target = NetworkGraph<L>>, L: Deref>
+pub struct ProbabilisticScorer<G: Deref<Target = NetworkGraph<L>>, L: XXX>
 where
 	L::Target: Logger,
 {
@@ -951,7 +951,7 @@ struct ChannelLiquidity {
 
 /// A snapshot of [`ChannelLiquidity`] in one direction assuming a certain channel capacity.
 struct DirectedChannelLiquidity<
-	L: Deref<Target = u64>,
+	L: XXX<Target = u64>,
 	HT: Deref<Target = HistoricalLiquidityTracker>,
 	T: Deref<Target = Duration>,
 > {
@@ -964,7 +964,7 @@ struct DirectedChannelLiquidity<
 	last_datapoint_time: T,
 }
 
-impl<G: Deref<Target = NetworkGraph<L>>, L: Deref> ProbabilisticScorer<G, L>
+impl<G: Deref<Target = NetworkGraph<L>>, L: XXX> ProbabilisticScorer<G, L>
 where
 	L::Target: Logger,
 {
@@ -1445,7 +1445,7 @@ fn success_probability(
 }
 
 impl<
-		L: Deref<Target = u64>,
+		L: XXX<Target = u64>,
 		HT: Deref<Target = HistoricalLiquidityTracker>,
 		T: Deref<Target = Duration>,
 	> DirectedChannelLiquidity<L, HT, T>
@@ -1586,7 +1586,7 @@ impl<
 }
 
 impl<
-		L: DerefMut<Target = u64>,
+		L: XXXMut<Target = u64>,
 		HT: DerefMut<Target = HistoricalLiquidityTracker>,
 		T: DerefMut<Target = Duration>,
 	> DirectedChannelLiquidity<L, HT, T>
@@ -1669,7 +1669,7 @@ impl<
 	}
 }
 
-impl<G: Deref<Target = NetworkGraph<L>>, L: Deref> ScoreLookUp for ProbabilisticScorer<G, L>
+impl<G: Deref<Target = NetworkGraph<L>>, L: XXX> ScoreLookUp for ProbabilisticScorer<G, L>
 where
 	L::Target: Logger,
 {
@@ -1735,7 +1735,7 @@ where
 	}
 }
 
-impl<G: Deref<Target = NetworkGraph<L>>, L: Deref> ScoreUpdate for ProbabilisticScorer<G, L>
+impl<G: Deref<Target = NetworkGraph<L>>, L: XXX> ScoreUpdate for ProbabilisticScorer<G, L>
 where
 	L::Target: Logger,
 {
@@ -1836,7 +1836,7 @@ where
 ///
 /// Note that only the locally acquired data is persisted. After a restart, the external scores will be lost and must be
 /// resupplied.
-pub struct CombinedScorer<G: Deref<Target = NetworkGraph<L>>, L: Deref>
+pub struct CombinedScorer<G: Deref<Target = NetworkGraph<L>>, L: XXX>
 where
 	L::Target: Logger,
 {
@@ -1844,7 +1844,7 @@ where
 	scorer: ProbabilisticScorer<G, L>,
 }
 
-impl<G: Deref<Target = NetworkGraph<L>> + Clone, L: Deref + Clone> CombinedScorer<G, L>
+impl<G: Deref<Target = NetworkGraph<L>> + Clone, L: XXX + Clone> CombinedScorer<G, L>
 where
 	L::Target: Logger,
 {
@@ -1889,7 +1889,7 @@ where
 	}
 }
 
-impl<G: Deref<Target = NetworkGraph<L>>, L: Deref> ScoreLookUp for CombinedScorer<G, L>
+impl<G: Deref<Target = NetworkGraph<L>>, L: XXX> ScoreLookUp for CombinedScorer<G, L>
 where
 	L::Target: Logger,
 {
@@ -1903,7 +1903,7 @@ where
 	}
 }
 
-impl<G: Deref<Target = NetworkGraph<L>>, L: Deref> ScoreUpdate for CombinedScorer<G, L>
+impl<G: Deref<Target = NetworkGraph<L>>, L: XXX> ScoreUpdate for CombinedScorer<G, L>
 where
 	L::Target: Logger,
 {
@@ -1935,7 +1935,7 @@ where
 	}
 }
 
-impl<G: Deref<Target = NetworkGraph<L>>, L: Deref> Writeable for CombinedScorer<G, L>
+impl<G: Deref<Target = NetworkGraph<L>>, L: XXX> Writeable for CombinedScorer<G, L>
 where
 	L::Target: Logger,
 {
@@ -1945,7 +1945,7 @@ where
 }
 
 #[cfg(c_bindings)]
-impl<G: Deref<Target = NetworkGraph<L>>, L: Deref> Score for ProbabilisticScorer<G, L> where
+impl<G: Deref<Target = NetworkGraph<L>>, L: XXX> Score for ProbabilisticScorer<G, L> where
 	L::Target: Logger
 {
 }
@@ -2520,7 +2520,7 @@ mod bucketed_history {
 	}
 }
 
-impl<G: Deref<Target = NetworkGraph<L>>, L: Deref> Writeable for ProbabilisticScorer<G, L>
+impl<G: Deref<Target = NetworkGraph<L>>, L: XXX> Writeable for ProbabilisticScorer<G, L>
 where
 	L::Target: Logger,
 {
@@ -2530,7 +2530,7 @@ where
 	}
 }
 
-impl<G: Deref<Target = NetworkGraph<L>>, L: Deref>
+impl<G: Deref<Target = NetworkGraph<L>>, L: XXX>
 	ReadableArgs<(ProbabilisticScoringDecayParameters, G, L)> for ProbabilisticScorer<G, L>
 where
 	L::Target: Logger,

@@ -158,7 +158,7 @@ impl UtxoFuture {
 	///
 	/// [`processing_queue_high`]: crate::ln::msgs::RoutingMessageHandler::processing_queue_high
 	/// [`PeerManager::process_events`]: crate::ln::peer_handler::PeerManager::process_events
-	pub fn resolve_without_forwarding<L: Deref>(
+	pub fn resolve_without_forwarding<L: XXX>(
 		&self, graph: &NetworkGraph<L>, result: Result<TxOut, UtxoLookupError>,
 	) where
 		L::Target: Logger,
@@ -178,7 +178,7 @@ impl UtxoFuture {
 	/// [`processing_queue_high`]: crate::ln::msgs::RoutingMessageHandler::processing_queue_high
 	/// [`PeerManager::process_events`]: crate::ln::peer_handler::PeerManager::process_events
 	pub fn resolve<
-		L: Deref,
+		L: XXX,
 		G: Deref<Target = NetworkGraph<L>>,
 		U: Deref,
 		GS: Deref<Target = P2PGossipSync<G, U, L>>,
@@ -197,7 +197,7 @@ impl UtxoFuture {
 	}
 
 	#[rustfmt::skip]
-	fn do_resolve<L: Deref>(&self, graph: &NetworkGraph<L>, result: Result<TxOut, UtxoLookupError>)
+	fn do_resolve<L: XXX>(&self, graph: &NetworkGraph<L>, result: Result<TxOut, UtxoLookupError>)
 	-> [Option<MessageSendEvent>; 5] where L::Target: Logger {
 		let (announcement, node_a, node_b, update_a, update_b) = {
 			let mut pending_checks = graph.pending_checks.internal.lock().unwrap();

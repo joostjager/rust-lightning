@@ -433,7 +433,7 @@ pub trait WalletSource {
 ///
 /// This is not exported to bindings users as async is only supported in Rust.
 // Note that updates to documentation on this struct should be copied to the synchronous version.
-pub struct Wallet<W: Deref + MaybeSync + MaybeSend, L: Deref + MaybeSync + MaybeSend>
+pub struct Wallet<W: Deref + MaybeSync + MaybeSend, L: XXX + MaybeSync + MaybeSend>
 where
 	W::Target: WalletSource + MaybeSend,
 	L::Target: Logger + MaybeSend,
@@ -446,7 +446,7 @@ where
 	locked_utxos: Mutex<HashMap<OutPoint, ClaimId>>,
 }
 
-impl<W: Deref + MaybeSync + MaybeSend, L: Deref + MaybeSync + MaybeSend> Wallet<W, L>
+impl<W: Deref + MaybeSync + MaybeSend, L: XXX + MaybeSync + MaybeSend> Wallet<W, L>
 where
 	W::Target: WalletSource + MaybeSend,
 	L::Target: Logger + MaybeSend,
@@ -608,7 +608,7 @@ where
 	}
 }
 
-impl<W: Deref + MaybeSync + MaybeSend, L: Deref + MaybeSync + MaybeSend> CoinSelectionSource
+impl<W: Deref + MaybeSync + MaybeSend, L: XXX + MaybeSync + MaybeSend> CoinSelectionSource
 	for Wallet<W, L>
 where
 	W::Target: WalletSource + MaybeSend + MaybeSync,
@@ -683,7 +683,7 @@ where
 ///
 /// [`Event::BumpTransaction`]: crate::events::Event::BumpTransaction
 // Note that updates to documentation on this struct should be copied to the synchronous version.
-pub struct BumpTransactionEventHandler<B: Deref, C: Deref, SP: Deref, L: Deref>
+pub struct BumpTransactionEventHandler<B: Deref, C: Deref, SP: Deref, L: XXX>
 where
 	B::Target: BroadcasterInterface,
 	C::Target: CoinSelectionSource,
@@ -697,7 +697,7 @@ where
 	secp: Secp256k1<secp256k1::All>,
 }
 
-impl<B: Deref, C: Deref, SP: Deref, L: Deref> BumpTransactionEventHandler<B, C, SP, L>
+impl<B: Deref, C: Deref, SP: Deref, L: XXX> BumpTransactionEventHandler<B, C, SP, L>
 where
 	B::Target: BroadcasterInterface,
 	C::Target: CoinSelectionSource,
