@@ -37,8 +37,7 @@ use crate::sign::{
 };
 use crate::sync::Mutex;
 use crate::util::async_poll::{AsyncResult, MaybeSend, MaybeSync};
-use crate::util::logger::{Logger, LoggerTarget};
-
+use crate::util::logger::{Logger, LoggerPtr};
 use bitcoin::amount::Amount;
 use bitcoin::consensus::Encodable;
 use bitcoin::constants::WITNESS_SCALE_FACTOR;
@@ -433,10 +432,8 @@ pub trait WalletSource {
 ///
 /// This is not exported to bindings users as async is only supported in Rust.
 // Note that updates to documentation on this struct should be copied to the synchronous version.
-pub struct Wallet<
-	W: Deref + MaybeSync + MaybeSend,
-	L: Deref<Target = LoggerTarget> + MaybeSync + MaybeSend,
-> where
+pub struct Wallet<W: Deref + MaybeSync + MaybeSend, L: LoggerPtr>
+where
 	W::Target: WalletSource + MaybeSend,
 {
 	source: W,
@@ -447,8 +444,7 @@ pub struct Wallet<
 	locked_utxos: Mutex<HashMap<OutPoint, ClaimId>>,
 }
 
-impl<W: Deref + MaybeSync + MaybeSend, L: Deref<Target = LoggerTarget> + MaybeSync + MaybeSend>
-	Wallet<W, L>
+impl<W: Deref + MaybeSync + MaybeSend, L: LoggerPtr> Wallet<W, L>
 where
 	W::Target: WalletSource + MaybeSend,
 {
@@ -609,8 +605,7 @@ where
 	}
 }
 
-impl<W: Deref + MaybeSync + MaybeSend, L: Deref<Target = LoggerTarget> + MaybeSync + MaybeSend>
-	CoinSelectionSource for Wallet<W, L>
+impl<W: Deref + MaybeSync + MaybeSend, L: LoggerPtr> CoinSelectionSource for Wallet<W, L>
 where
 	W::Target: WalletSource + MaybeSend + MaybeSync,
 {
@@ -683,12 +678,8 @@ where
 ///
 /// [`Event::BumpTransaction`]: crate::events::Event::BumpTransaction
 // Note that updates to documentation on this struct should be copied to the synchronous version.
-pub struct BumpTransactionEventHandler<
-	B: Deref,
-	C: Deref,
-	SP: Deref,
-	L: Deref<Target = LoggerTarget>,
-> where
+pub struct BumpTransactionEventHandler<B: Deref, C: Deref, SP: Deref, L: LoggerPtr>
+where
 	B::Target: BroadcasterInterface,
 	C::Target: CoinSelectionSource,
 	SP::Target: SignerProvider,
@@ -700,8 +691,7 @@ pub struct BumpTransactionEventHandler<
 	secp: Secp256k1<secp256k1::All>,
 }
 
-impl<B: Deref, C: Deref, SP: Deref, L: Deref<Target = LoggerTarget>>
-	BumpTransactionEventHandler<B, C, SP, L>
+impl<B: Deref, C: Deref, SP: Deref, L: LoggerPtr> BumpTransactionEventHandler<B, C, SP, L>
 where
 	B::Target: BroadcasterInterface,
 	C::Target: CoinSelectionSource,
@@ -1263,6 +1253,7 @@ mod tests {
 	use crate::ln::channel::ANCHOR_OUTPUT_VALUE_SATOSHI;
 	use crate::sign::KeysManager;
 	use crate::types::features::ChannelTypeFeatures;
+	use crate::util::logger::LoggerTarget;
 	use crate::util::ser::Readable;
 	use crate::util::test_utils::{TestBroadcaster, TestLogger};
 
@@ -1360,12 +1351,7 @@ mod tests {
 		};
 		let signer = KeysManager::new(&[42; 32], 42, 42, true);
 		let logger = TestLogger::new();
-		let handler = BumpTransactionEventHandlerSync::new(
-			&broadcaster,
-			&source,
-			&signer,
-			&logger as &LoggerTarget,
-		);
+		let handler = BumpTransactionEventHandlerSync::new(&broadcaster, &source, &signer, &logger);
 
 		let mut transaction_parameters = ChannelTransactionParameters::test_dummy(42_000_000);
 		transaction_parameters.channel_type_features =

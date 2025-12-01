@@ -34,7 +34,7 @@ use crate::routing::gossip::{NetworkGraph, P2PGossipSync};
 use crate::routing::test_utils::{add_channel, add_or_update_node};
 use crate::sign::{NodeSigner, Recipient};
 use crate::types::features::{ChannelFeatures, InitFeatures};
-use crate::util::logger::{Logger, LoggerTarget};
+use crate::util::logger::{Logger, LoggerPtr, LoggerTarget};
 use crate::util::ser::{FixedLengthReader, LengthReadable, Writeable, Writer};
 use crate::util::test_utils::{TestChainSource, TestKeysInterface, TestLogger, TestNodeSigner};
 

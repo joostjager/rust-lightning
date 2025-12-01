@@ -21,10 +21,9 @@ use bitcoin::hex::DisplayHex;
 
 use crate::ln::chan_utils::make_funding_redeemscript_from_slices;
 use crate::ln::msgs::{self, ErrorAction, LightningError, MessageSendEvent};
-use crate::routing::gossip::{NetworkGraph, NodeId, P2PGossipSync};
-use crate::util::logger::{Level, Logger, LoggerTarget};
-
 use crate::prelude::*;
+use crate::routing::gossip::{NetworkGraph, NodeId, P2PGossipSync};
+use crate::util::logger::{Level, Logger, LoggerPtr};
 
 use crate::sync::{LockTestExt, Mutex};
 use alloc::sync::{Arc, Weak};
@@ -158,7 +157,7 @@ impl UtxoFuture {
 	///
 	/// [`processing_queue_high`]: crate::ln::msgs::RoutingMessageHandler::processing_queue_high
 	/// [`PeerManager::process_events`]: crate::ln::peer_handler::PeerManager::process_events
-	pub fn resolve_without_forwarding<L: Deref<Target = LoggerTarget>>(
+	pub fn resolve_without_forwarding<L: LoggerPtr>(
 		&self, graph: &NetworkGraph<L>, result: Result<TxOut, UtxoLookupError>,
 	) {
 		self.do_resolve(graph, result);
@@ -176,7 +175,7 @@ impl UtxoFuture {
 	/// [`processing_queue_high`]: crate::ln::msgs::RoutingMessageHandler::processing_queue_high
 	/// [`PeerManager::process_events`]: crate::ln::peer_handler::PeerManager::process_events
 	pub fn resolve<
-		L: Deref<Target = LoggerTarget>,
+		L: LoggerPtr,
 		G: Deref<Target = NetworkGraph<L>>,
 		U: Deref,
 		GS: Deref<Target = P2PGossipSync<G, U, L>>,
@@ -194,7 +193,7 @@ impl UtxoFuture {
 	}
 
 	#[rustfmt::skip]
-	fn do_resolve<L: Deref<Target = LoggerTarget>>(&self, graph: &NetworkGraph<L>, result: Result<TxOut, UtxoLookupError>)
+	fn do_resolve<L: LoggerPtr>(&self, graph: &NetworkGraph<L>, result: Result<TxOut, UtxoLookupError>)
 	-> [Option<MessageSendEvent>; 5]  {
 		let (announcement, node_a, node_b, update_a, update_b) = {
 			let mut pending_checks = graph.pending_checks.internal.lock().unwrap();
@@ -584,6 +583,7 @@ impl PendingChecks {
 mod tests {
 	use super::*;
 	use crate::routing::gossip::tests::*;
+	use crate::util::logger::LoggerTarget;
 	use crate::util::test_utils::{TestChainSource, TestLogger};
 
 	use bitcoin::amount::Amount;

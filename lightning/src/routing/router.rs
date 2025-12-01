@@ -34,7 +34,7 @@ use crate::types::features::{
 	BlindedHopFeatures, Bolt11InvoiceFeatures, Bolt12InvoiceFeatures, ChannelFeatures, NodeFeatures,
 };
 use crate::types::payment::{PaymentHash, PaymentPreimage};
-use crate::util::logger::{Logger, LoggerTarget};
+use crate::util::logger::{Logger, LoggerPtr};
 use crate::util::ser::{Readable, ReadableArgs, Writeable, Writer};
 
 use crate::io;
@@ -57,7 +57,7 @@ pub use lightning_types::routing::{RouteHint, RouteHintHop};
 /// payment, and thus an `Err` is returned.
 pub struct DefaultRouter<
 	G: Deref<Target = NetworkGraph<L>>,
-	L: Deref<Target = LoggerTarget>,
+	L: LoggerPtr,
 	ES: Deref,
 	S: Deref,
 	SP: Sized,
@@ -75,7 +75,7 @@ pub struct DefaultRouter<
 
 impl<
 		G: Deref<Target = NetworkGraph<L>>,
-		L: Deref<Target = LoggerTarget>,
+		L: LoggerPtr,
 		ES: Deref,
 		S: Deref,
 		SP: Sized,
@@ -95,7 +95,7 @@ where
 
 impl<
 		G: Deref<Target = NetworkGraph<L>>,
-		L: Deref<Target = LoggerTarget>,
+		L: LoggerPtr,
 		ES: Deref,
 		S: Deref,
 		SP: Sized,
@@ -1942,7 +1942,7 @@ impl<'a> NodeCounters<'a> {
 /// Calculates the introduction point for each blinded path in the given [`PaymentParameters`], if
 /// they can be found.
 #[rustfmt::skip]
-fn calculate_blinded_path_intro_points<'a, L: Deref<Target = LoggerTarget>>(
+fn calculate_blinded_path_intro_points<'a, L: LoggerPtr>(
 	payment_params: &PaymentParameters, node_counters: &'a NodeCounters,
 	network_graph: &ReadOnlyNetworkGraph, logger: &L, our_node_id: NodeId,
 	first_hop_targets: &HashMap<NodeId, (Vec<&ChannelDetails>, u32)>,
@@ -2448,7 +2448,7 @@ fn sort_first_hop_channels(
 /// [`Event::PaymentPathFailed`]: crate::events::Event::PaymentPathFailed
 /// [`NetworkGraph`]: crate::routing::gossip::NetworkGraph
 #[rustfmt::skip]
-pub fn find_route<L: Deref<Target = LoggerTarget>, GL: Deref<Target = LoggerTarget>, S: ScoreLookUp>(
+pub fn find_route<L: LoggerPtr, GL: LoggerPtr, S: ScoreLookUp>(
 	our_node_pubkey: &PublicKey, route_params: &RouteParameters,
 	network_graph: &NetworkGraph<GL>, first_hops: Option<&[&ChannelDetails]>, logger: L,
 	scorer: &S, score_params: &S::ScoreParams, random_seed_bytes: &[u8; 32]
@@ -2462,7 +2462,7 @@ pub fn find_route<L: Deref<Target = LoggerTarget>, GL: Deref<Target = LoggerTarg
 }
 
 #[rustfmt::skip]
-pub(crate) fn get_route<L: Deref<Target = LoggerTarget>, S: ScoreLookUp>(
+pub(crate) fn get_route<L: LoggerPtr, S: ScoreLookUp>(
 	our_node_pubkey: &PublicKey, route_params: &RouteParameters, network_graph: &ReadOnlyNetworkGraph,
 	first_hops: Option<&[&ChannelDetails]>, logger: L, scorer: &S, score_params: &S::ScoreParams,
 	_random_seed_bytes: &[u8; 32]
@@ -3851,7 +3851,7 @@ fn add_random_cltv_offset(route: &mut Route, payment_params: &PaymentParameters,
 ///
 /// Re-uses logic from `find_route`, so the restrictions described there also apply here.
 #[rustfmt::skip]
-pub fn build_route_from_hops<L: Deref<Target = LoggerTarget>, GL: Deref<Target = LoggerTarget>>(
+pub fn build_route_from_hops<L: LoggerPtr, GL: LoggerPtr>(
 	our_node_pubkey: &PublicKey, hops: &[PublicKey], route_params: &RouteParameters,
 	network_graph: &NetworkGraph<GL>, logger: L, random_seed_bytes: &[u8; 32]
 ) -> Result<Route, &'static str>
@@ -3864,7 +3864,7 @@ pub fn build_route_from_hops<L: Deref<Target = LoggerTarget>, GL: Deref<Target =
 }
 
 #[rustfmt::skip]
-fn build_route_from_hops_internal<L: Deref<Target = LoggerTarget>>(
+fn build_route_from_hops_internal<L: LoggerPtr>(
 	our_node_pubkey: &PublicKey, hops: &[PublicKey], route_params: &RouteParameters,
 	network_graph: &ReadOnlyNetworkGraph, logger: L, random_seed_bytes: &[u8; 32],
 ) -> Result<Route, &'static str>  {
@@ -9393,6 +9393,7 @@ pub(crate) mod bench_utils {
 	use crate::routing::scoring::{ProbabilisticScorer, ScoreUpdate};
 	use crate::sync::Arc;
 	use crate::util::config::UserConfig;
+	use crate::util::logger::LoggerTarget;
 	use crate::util::test_utils::TestLogger;
 
 	/// Tries to open a network graph file, or panics with a URL to fetch it.

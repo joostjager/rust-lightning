@@ -55,7 +55,7 @@ use crate::util::config::UserConfig;
 use crate::util::dyn_signer::{
 	DynKeysInterface, DynKeysInterfaceTrait, DynPhantomKeysInterface, DynSigner,
 };
-use crate::util::logger::{Logger, LoggerTarget, Record};
+use crate::util::logger::{Logger, LoggerPtr, LoggerTarget, Record};
 #[cfg(feature = "std")]
 use crate::util::mut_global::MutGlobal;
 use crate::util::persist::{KVStore, KVStoreSync, MonitorName};

@@ -35,7 +35,7 @@ use crate::ln::types::ChannelId;
 use crate::sign::{ecdsa::EcdsaChannelSigner, EntropySource, SignerProvider};
 use crate::sync::Mutex;
 use crate::util::async_poll::{dummy_waker, AsyncResult, MaybeSend, MaybeSync};
-use crate::util::logger::{Logger, LoggerTarget};
+use crate::util::logger::{Logger, LoggerPtr};
 use crate::util::native_async::FutureSpawner;
 use crate::util::ser::{Readable, ReadableArgs, Writeable};
 use crate::util::wakers::Notifier;
@@ -586,7 +586,7 @@ fn poll_sync_future<F: Future>(future: F) -> F::Output {
 /// [`MonitorUpdatingPersister::cleanup_stale_updates`] function.
 pub struct MonitorUpdatingPersister<
 	K: Deref,
-	L: Deref<Target = LoggerTarget>,
+	L: LoggerPtr,
 	ES: Deref,
 	SP: Deref,
 	BI: Deref,
@@ -600,7 +600,7 @@ where
 	BI::Target: BroadcasterInterface,
 	FE::Target: FeeEstimator;
 
-impl<K: Deref, L: Deref<Target = LoggerTarget>, ES: Deref, SP: Deref, BI: Deref, FE: Deref>
+impl<K: Deref, L: LoggerPtr, ES: Deref, SP: Deref, BI: Deref, FE: Deref>
 	MonitorUpdatingPersister<K, L, ES, SP, BI, FE>
 where
 	K::Target: KVStoreSync,
@@ -703,7 +703,7 @@ where
 impl<
 		ChannelSigner: EcdsaChannelSigner,
 		K: Deref,
-		L: Deref<Target = LoggerTarget>,
+		L: LoggerPtr,
 		ES: Deref,
 		SP: Deref,
 		BI: Deref,
@@ -789,7 +789,7 @@ where
 pub struct MonitorUpdatingPersisterAsync<
 	K: Deref,
 	S: FutureSpawner,
-	L: Deref<Target = LoggerTarget>,
+	L: LoggerPtr,
 	ES: Deref,
 	SP: Deref,
 	BI: Deref,
@@ -806,7 +806,7 @@ where
 struct MonitorUpdatingPersisterAsyncInner<
 	K: Deref,
 	S: FutureSpawner,
-	L: Deref<Target = LoggerTarget>,
+	L: LoggerPtr,
 	ES: Deref,
 	SP: Deref,
 	BI: Deref,
@@ -830,15 +830,8 @@ struct MonitorUpdatingPersisterAsyncInner<
 	fee_estimator: FE,
 }
 
-impl<
-		K: Deref,
-		S: FutureSpawner,
-		L: Deref<Target = LoggerTarget>,
-		ES: Deref,
-		SP: Deref,
-		BI: Deref,
-		FE: Deref,
-	> MonitorUpdatingPersisterAsync<K, S, L, ES, SP, BI, FE>
+impl<K: Deref, S: FutureSpawner, L: LoggerPtr, ES: Deref, SP: Deref, BI: Deref, FE: Deref>
+	MonitorUpdatingPersisterAsync<K, S, L, ES, SP, BI, FE>
 where
 	K::Target: KVStore,
 
@@ -932,7 +925,7 @@ where
 impl<
 		K: Deref + MaybeSend + MaybeSync + 'static,
 		S: FutureSpawner,
-		L: Deref<Target = LoggerTarget> + MaybeSend + MaybeSync + 'static,
+		L: LoggerPtr + 'static,
 		ES: Deref + MaybeSend + MaybeSync + 'static,
 		SP: Deref + MaybeSend + MaybeSync + 'static,
 		BI: Deref + MaybeSend + MaybeSync + 'static,
@@ -1018,15 +1011,8 @@ where
 	}
 }
 
-impl<
-		K: Deref,
-		S: FutureSpawner,
-		L: Deref<Target = LoggerTarget>,
-		ES: Deref,
-		SP: Deref,
-		BI: Deref,
-		FE: Deref,
-	> MonitorUpdatingPersisterAsyncInner<K, S, L, ES, SP, BI, FE>
+impl<K: Deref, S: FutureSpawner, L: LoggerPtr, ES: Deref, SP: Deref, BI: Deref, FE: Deref>
+	MonitorUpdatingPersisterAsyncInner<K, S, L, ES, SP, BI, FE>
 where
 	K::Target: KVStore,
 
@@ -1529,6 +1515,7 @@ mod tests {
 	use crate::ln::functional_test_utils::*;
 	use crate::ln::msgs::BaseMessageHandler;
 	use crate::sync::Arc;
+	use crate::util::logger::LoggerTarget;
 	use crate::util::test_channel_signer::TestChannelSigner;
 	use crate::util::test_utils::{self, TestStore};
 	use crate::{check_added_monitors, check_closed_broadcast};

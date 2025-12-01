@@ -12,8 +12,7 @@
 use crate::routing::gossip::{NetworkGraph, NodeAlias, P2PGossipSync};
 use crate::types::features::{ChannelFeatures, NodeFeatures};
 use crate::ln::msgs::{ChannelAnnouncement, ChannelUpdate, MAX_VALUE_MSAT, NodeAnnouncement, RoutingMessageHandler, SocketAddress, UnsignedChannelAnnouncement, UnsignedChannelUpdate, UnsignedNodeAnnouncement};
-use crate::util::logger::LoggerTarget;
-use crate::util::test_utils;
+use crate::util::logger::{LoggerPtr, LoggerTarget};use crate::util::test_utils;
 use crate::util::ser::Writeable;
 
 use bitcoin::constants::ChainHash;

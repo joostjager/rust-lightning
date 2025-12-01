@@ -18,8 +18,7 @@ use crate::chain::ClaimId;
 use crate::prelude::*;
 use crate::sign::SignerProvider;
 use crate::util::async_poll::{dummy_waker, AsyncResult, MaybeSend, MaybeSync};
-use crate::util::logger::{Logger, LoggerTarget};
-
+use crate::util::logger::{Logger, LoggerPtr};
 use bitcoin::{Psbt, ScriptBuf, Transaction, TxOut};
 
 use super::BumpTransactionEvent;
@@ -93,17 +92,14 @@ where
 ///
 /// For an asynchronous version of this wrapper, see [`Wallet`].
 // Note that updates to documentation on this struct should be copied to the asynchronous version.
-pub struct WalletSync<
-	W: Deref + MaybeSync + MaybeSend,
-	L: Deref<Target = LoggerTarget> + MaybeSync + MaybeSend,
-> where
+pub struct WalletSync<W: Deref + MaybeSync + MaybeSend, L: LoggerPtr>
+where
 	W::Target: WalletSourceSync + MaybeSend,
 {
 	wallet: Wallet<WalletSourceSyncWrapper<W>, L>,
 }
 
-impl<W: Deref + MaybeSync + MaybeSend, L: Deref<Target = LoggerTarget> + MaybeSync + MaybeSend>
-	WalletSync<W, L>
+impl<W: Deref + MaybeSync + MaybeSend, L: LoggerPtr> WalletSync<W, L>
 where
 	W::Target: WalletSourceSync + MaybeSend,
 {
@@ -113,8 +109,7 @@ where
 	}
 }
 
-impl<W: Deref + MaybeSync + MaybeSend, L: Deref<Target = LoggerTarget> + MaybeSync + MaybeSend>
-	CoinSelectionSourceSync for WalletSync<W, L>
+impl<W: Deref + MaybeSync + MaybeSend, L: LoggerPtr> CoinSelectionSourceSync for WalletSync<W, L>
 where
 	W::Target: WalletSourceSync + MaybeSend + MaybeSync,
 {
@@ -262,7 +257,7 @@ pub struct BumpTransactionEventHandlerSync<
 	B: Deref,
 	C: Deref,
 	SP: Deref,
-	L: Deref<Target = LoggerTarget>,
+	L: LoggerPtr,
 > where
 	B::Target: BroadcasterInterface,
 	C::Target: CoinSelectionSourceSync,
@@ -272,7 +267,7 @@ pub struct BumpTransactionEventHandlerSync<
 		BumpTransactionEventHandler<B, CoinSelectionSourceSyncWrapper<C>, SP, L>,
 }
 
-impl<B: Deref, C: Deref, SP: Deref, L: Deref<Target = LoggerTarget>>
+impl<B: Deref, C: Deref, SP: Deref, L: LoggerPtr>
 	BumpTransactionEventHandlerSync<B, C, SP, L>
 where
 	B::Target: BroadcasterInterface,

@@ -60,8 +60,7 @@ use crate::routing::router::Router;
 use crate::sign::{EntropySource, ReceiveAuthKey};
 use crate::sync::{Mutex, RwLock};
 use crate::types::payment::{PaymentHash, PaymentSecret};
-use crate::util::logger::{Logger, LoggerTarget};
-use crate::util::ser::Writeable;
+use crate::util::logger::{Logger, LoggerPtr};use crate::util::ser::Writeable;
 
 #[cfg(feature = "dnssec")]
 use {
@@ -74,7 +73,7 @@ use {
 ///
 /// [`OffersMessageFlow`] is parameterized by a [`MessageRouter`], which is responsible
 /// for finding message paths when initiating and retrying onion messages.
-pub struct OffersMessageFlow<MR: Deref, L: Deref<Target = LoggerTarget>>
+pub struct OffersMessageFlow<MR: Deref, L: LoggerPtr>
 where
 	MR::Target: MessageRouter,
 {
@@ -106,7 +105,7 @@ where
 	logger: L,
 }
 
-impl<MR: Deref, L: Deref<Target = LoggerTarget>> OffersMessageFlow<MR, L>
+impl<MR: Deref, L: LoggerPtr> OffersMessageFlow<MR, L>
 where
 	MR::Target: MessageRouter,
 {
@@ -264,7 +263,7 @@ const DEFAULT_ASYNC_RECEIVE_OFFER_EXPIRY: Duration = Duration::from_secs(365 * 2
 pub(crate) const TEST_DEFAULT_ASYNC_RECEIVE_OFFER_EXPIRY: Duration =
 	DEFAULT_ASYNC_RECEIVE_OFFER_EXPIRY;
 
-impl<MR: Deref, L: Deref<Target = LoggerTarget>> OffersMessageFlow<MR, L>
+impl<MR: Deref, L: LoggerPtr> OffersMessageFlow<MR, L>
 where
 	MR::Target: MessageRouter,
 {
@@ -433,7 +432,7 @@ pub enum HeldHtlcReplyPath {
 	},
 }
 
-impl<MR: Deref, L: Deref<Target = LoggerTarget>> OffersMessageFlow<MR, L>
+impl<MR: Deref, L: LoggerPtr> OffersMessageFlow<MR, L>
 where
 	MR::Target: MessageRouter,
 {

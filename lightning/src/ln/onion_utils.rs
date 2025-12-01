@@ -22,7 +22,7 @@ use crate::sign::{NodeSigner, Recipient};
 use crate::types::features::{ChannelFeatures, NodeFeatures};
 use crate::types::payment::{PaymentHash, PaymentPreimage};
 use crate::util::errors::APIError;
-use crate::util::logger::{Logger, LoggerTarget};
+use crate::util::logger::{Logger, LoggerPtr};
 use crate::util::ser::{
 	LengthCalculatingWriter, Readable, ReadableArgs, VecWriter, Writeable, Writer,
 };
@@ -985,7 +985,7 @@ pub use self::fuzzy_onion_utils::*;
 #[cfg(not(fuzzing))]
 pub(crate) use self::fuzzy_onion_utils::*;
 
-pub fn process_onion_failure<T: secp256k1::Signing, L: Deref<Target = LoggerTarget>>(
+pub fn process_onion_failure<T: secp256k1::Signing, L: LoggerPtr>(
 	secp_ctx: &Secp256k1<T>, logger: &L, htlc_source: &HTLCSource,
 	encrypted_packet: OnionErrorPacket,
 ) -> DecodedOnionFailure {
@@ -999,7 +999,7 @@ pub fn process_onion_failure<T: secp256k1::Signing, L: Deref<Target = LoggerTarg
 
 /// Process failure we got back from upstream on a payment we sent (implying htlc_source is an
 /// OutboundRoute).
-fn process_onion_failure_inner<T: secp256k1::Signing, L: Deref<Target = LoggerTarget>>(
+fn process_onion_failure_inner<T: secp256k1::Signing, L: LoggerPtr>(
 	secp_ctx: &Secp256k1<T>, logger: &L, path: &Path, session_priv: &SecretKey,
 	trampoline_session_priv_override: Option<SecretKey>, mut encrypted_packet: OnionErrorPacket,
 ) -> DecodedOnionFailure {
@@ -1444,7 +1444,7 @@ fn process_onion_failure_inner<T: secp256k1::Signing, L: Deref<Target = LoggerTa
 }
 
 /// Decodes the attribution data that we got back from upstream on a payment we sent.
-pub fn decode_fulfill_attribution_data<T: secp256k1::Signing, L: Deref<Target = LoggerTarget>>(
+pub fn decode_fulfill_attribution_data<T: secp256k1::Signing, L: LoggerPtr>(
 	secp_ctx: &Secp256k1<T>, logger: &L, path: &Path, outer_session_priv: &SecretKey,
 	mut attribution_data: AttributionData,
 ) -> Vec<u32> {
@@ -2088,7 +2088,7 @@ impl HTLCFailReason {
 		}
 	}
 
-	pub(super) fn decode_onion_failure<T: secp256k1::Signing, L: Deref<Target = LoggerTarget>>(
+	pub(super) fn decode_onion_failure<T: secp256k1::Signing, L: LoggerPtr>(
 		&self, secp_ctx: &Secp256k1<T>, logger: &L, htlc_source: &HTLCSource,
 	) -> DecodedOnionFailure {
 		match self.0 {

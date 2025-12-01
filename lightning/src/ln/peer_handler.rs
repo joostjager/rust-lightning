@@ -47,7 +47,7 @@ use crate::sign::{NodeSigner, Recipient};
 use crate::types::features::{InitFeatures, NodeFeatures};
 use crate::types::string::PrintableString;
 use crate::util::atomic_counter::AtomicCounter;
-use crate::util::logger::{Level, Logger, LoggerTarget, WithContext};
+use crate::util::logger::{Level, Logger, LoggerPtr, WithContext};
 use crate::util::ser::{VecWriter, Writeable, Writer};
 
 #[allow(unused_imports)]
@@ -975,7 +975,7 @@ pub trait APeerManager {
 	type RM: Deref<Target = Self::RMT>;
 	type OMT: OnionMessageHandler + ?Sized;
 	type OM: Deref<Target = Self::OMT>;
-	type L: Deref<Target = LoggerTarget>;
+	type L: LoggerPtr;
 	type CMHT: CustomMessageHandler + ?Sized;
 	type CMH: Deref<Target = Self::CMHT>;
 	type NST: NodeSigner + ?Sized;
@@ -1002,7 +1002,7 @@ impl<
 		CM: Deref,
 		RM: Deref,
 		OM: Deref,
-		L: Deref<Target = LoggerTarget>,
+		L: LoggerPtr,
 		CMH: Deref,
 		NS: Deref,
 		SM: Deref,
@@ -1059,7 +1059,7 @@ pub struct PeerManager<
 	CM: Deref,
 	RM: Deref,
 	OM: Deref,
-	L: Deref<Target = LoggerTarget>,
+	L: LoggerPtr,
 	CMH: Deref,
 	NS: Deref,
 	SM: Deref,
@@ -1148,14 +1148,8 @@ macro_rules! encode_msg {
 	}};
 }
 
-impl<
-		Descriptor: SocketDescriptor,
-		CM: Deref,
-		OM: Deref,
-		L: Deref<Target = LoggerTarget>,
-		NS: Deref,
-		SM: Deref,
-	> PeerManager<Descriptor, CM, IgnoringMessageHandler, OM, L, IgnoringMessageHandler, NS, SM>
+impl<Descriptor: SocketDescriptor, CM: Deref, OM: Deref, L: LoggerPtr, NS: Deref, SM: Deref>
+	PeerManager<Descriptor, CM, IgnoringMessageHandler, OM, L, IgnoringMessageHandler, NS, SM>
 where
 	CM::Target: ChannelMessageHandler,
 	OM::Target: OnionMessageHandler,
@@ -1197,7 +1191,7 @@ where
 	}
 }
 
-impl<Descriptor: SocketDescriptor, RM: Deref, L: Deref<Target = LoggerTarget>, NS: Deref>
+impl<Descriptor: SocketDescriptor, RM: Deref, L: LoggerPtr, NS: Deref>
 	PeerManager<
 		Descriptor,
 		ErroringMessageHandler,
@@ -1299,7 +1293,7 @@ impl<
 		CM: Deref,
 		RM: Deref,
 		OM: Deref,
-		L: Deref<Target = LoggerTarget>,
+		L: LoggerPtr,
 		CMH: Deref,
 		NS: Deref,
 		SM: Deref,
@@ -3712,6 +3706,7 @@ mod tests {
 	use crate::ln::{msgs, wire};
 	use crate::sign::{NodeSigner, Recipient};
 	use crate::types::features::{InitFeatures, NodeFeatures};
+	use crate::util::logger::LoggerTarget;
 	use crate::util::test_utils;
 
 	use bitcoin::constants::ChainHash;

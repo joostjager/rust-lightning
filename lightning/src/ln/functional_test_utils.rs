@@ -45,7 +45,7 @@ use crate::types::features::ChannelTypeFeatures;
 use crate::types::features::InitFeatures;
 use crate::types::payment::{PaymentHash, PaymentPreimage, PaymentSecret};
 use crate::util::config::{MaxDustHTLCExposure, UserConfig};
-use crate::util::logger::{Logger, LoggerTarget};
+use crate::util::logger::{Logger, LoggerPtr, LoggerTarget};
 use crate::util::scid_utils;
 use crate::util::ser::{ReadableArgs, Writeable};
 use crate::util::test_channel_signer::SignerOp;
