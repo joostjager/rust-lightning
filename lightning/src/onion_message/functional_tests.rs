@@ -34,6 +34,7 @@ use crate::routing::gossip::{NetworkGraph, P2PGossipSync};
 use crate::routing::test_utils::{add_channel, add_or_update_node};
 use crate::sign::{NodeSigner, Recipient};
 use crate::types::features::{ChannelFeatures, InitFeatures};
+use crate::util::logger::{Logger, LoggerTarget};
 use crate::util::ser::{FixedLengthReader, LengthReadable, Writeable, Writer};
 use crate::util::test_utils::{TestChainSource, TestKeysInterface, TestLogger, TestNodeSigner};
 
@@ -49,8 +50,8 @@ use core::ops::Deref;
 
 use crate::prelude::*;
 
-type NetGraph = NetworkGraph<Arc<TestLogger>>;
-type MessageRouter = DefaultMessageRouter<Arc<NetGraph>, Arc<TestLogger>, Arc<TestKeysInterface>>;
+type NetGraph = NetworkGraph<Arc<LoggerTarget>>;
+type MessageRouter = DefaultMessageRouter<Arc<NetGraph>, Arc<LoggerTarget>, Arc<TestKeysInterface>>;
 
 struct MessengerNode {
 	node_id: PublicKey,
@@ -59,7 +60,7 @@ struct MessengerNode {
 	messenger: OnionMessenger<
 		Arc<TestKeysInterface>,
 		Arc<TestNodeSigner>,
-		Arc<TestLogger>,
+		Arc<LoggerTarget>,
 		Arc<EmptyNodeIdLookUp>,
 		Arc<MessageRouter>,
 		Arc<TestOffersMessageHandler>,
@@ -68,7 +69,7 @@ struct MessengerNode {
 		Arc<TestCustomMessageHandler>,
 	>,
 	custom_message_handler: Arc<TestCustomMessageHandler>,
-	gossip_sync: Arc<P2PGossipSync<Arc<NetGraph>, Arc<TestChainSource>, Arc<TestLogger>>>,
+	gossip_sync: Arc<P2PGossipSync<Arc<NetGraph>, Arc<TestChainSource>, Arc<LoggerTarget>>>,
 }
 
 impl Drop for MessengerNode {
@@ -292,8 +293,15 @@ impl MessengerCfg {
 
 fn create_nodes_using_cfgs(cfgs: Vec<MessengerCfg>) -> Vec<MessengerNode> {
 	let gossip_logger = Arc::new(TestLogger::with_id("gossip".to_string()));
-	let network_graph = Arc::new(NetworkGraph::new(Network::Testnet, Arc::clone(&gossip_logger)));
-	let gossip_sync = Arc::new(P2PGossipSync::new(Arc::clone(&network_graph), None, gossip_logger));
+	let network_graph = Arc::new(NetworkGraph::new(
+		Network::Testnet,
+		Arc::clone(&gossip_logger) as Arc<LoggerTarget>,
+	));
+	let gossip_sync = Arc::new(P2PGossipSync::new(
+		Arc::clone(&network_graph),
+		None,
+		gossip_logger as Arc<LoggerTarget>,
+	));
 
 	let mut nodes = Vec::new();
 	for (i, cfg) in cfgs.into_iter().enumerate() {
@@ -315,7 +323,7 @@ fn create_nodes_using_cfgs(cfgs: Vec<MessengerCfg>) -> Vec<MessengerNode> {
 			OnionMessenger::new_with_offline_peer_interception(
 				Arc::clone(&entropy_source),
 				Arc::clone(&node_signer),
-				logger,
+				logger as Arc<LoggerTarget>,
 				node_id_lookup,
 				Arc::new(message_router),
 				offers_message_handler,
@@ -327,7 +335,7 @@ fn create_nodes_using_cfgs(cfgs: Vec<MessengerCfg>) -> Vec<MessengerNode> {
 			OnionMessenger::new(
 				Arc::clone(&entropy_source),
 				Arc::clone(&node_signer),
-				logger,
+				logger as Arc<LoggerTarget>,
 				node_id_lookup,
 				Arc::new(message_router),
 				offers_message_handler,

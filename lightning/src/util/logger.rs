@@ -290,6 +290,9 @@ pub trait Logger {
 
 pub type LoggerTarget = dyn Logger + MaybeSend + MaybeSync;
 
+pub trait LoggerPtr: Deref<Target = LoggerTarget> + MaybeSend + MaybeSync {}
+impl<T> LoggerPtr for T where T: Deref<Target = LoggerTarget> + MaybeSend + MaybeSync {}
+
 /// Adds relevant context to a [`Record`] before passing it to the wrapped [`Logger`].
 ///
 /// This is not exported to bindings users as lifetimes are problematic and there's little reason

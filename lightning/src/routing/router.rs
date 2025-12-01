@@ -9444,8 +9444,8 @@ pub(crate) mod bench_utils {
 		logger: &TestLogger,
 	) -> Result<
 		(
-			Arc<NetworkGraph<&TestLogger>>,
-			ProbabilisticScorer<Arc<NetworkGraph<&TestLogger>>, &TestLogger>,
+			Arc<NetworkGraph<&LoggerTarget>>,
+			ProbabilisticScorer<Arc<NetworkGraph<&LoggerTarget>>, &LoggerTarget>,
 		),
 		&'static str,
 	> {
@@ -9515,7 +9515,7 @@ pub(crate) mod bench_utils {
 	}
 
 	#[rustfmt::skip]
-	pub(crate) fn generate_test_routes<S: ScoreLookUp + ScoreUpdate>(graph: &NetworkGraph<&TestLogger>, scorer: &mut S,
+	pub(crate) fn generate_test_routes<S: ScoreLookUp + ScoreUpdate>(graph: &NetworkGraph<&LoggerTarget>, scorer: &mut S,
 		score_params: &S::ScoreParams, features: Bolt11InvoiceFeatures, mut seed: u64,
 		starting_amount: u64, route_count: usize,
 	) -> Vec<(ChannelDetails, PaymentParameters, u64)> {
@@ -9658,7 +9658,7 @@ pub mod benches {
 
 	#[rustfmt::skip]
 	fn generate_routes<S: ScoreLookUp + ScoreUpdate>(
-		bench: &mut Criterion, graph: &NetworkGraph<&TestLogger>, mut scorer: S,
+		bench: &mut Criterion, graph: &NetworkGraph<&LoggerTarget>, mut scorer: S,
 		score_params: &S::ScoreParams, features: Bolt11InvoiceFeatures, starting_amount: u64,
 		bench_name: &'static str,
 	) {
@@ -9672,7 +9672,7 @@ pub mod benches {
 	#[inline(never)]
 	#[rustfmt::skip]
 	fn do_route_bench<S: ScoreLookUp + ScoreUpdate>(
-		bench: &mut Criterion, graph: &NetworkGraph<&TestLogger>, scorer: S,
+		bench: &mut Criterion, graph: &NetworkGraph<&LoggerTarget>, scorer: S,
 		score_params: &S::ScoreParams, bench_name: &'static str,
 		route_endpoints: Vec<(ChannelDetails, PaymentParameters, u64)>,
 	) {

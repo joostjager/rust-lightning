@@ -591,7 +591,7 @@ mod tests {
 
 	use core::sync::atomic::Ordering;
 
-	fn get_network() -> (TestChainSource, NetworkGraph<Box<TestLogger>>) {
+	fn get_network() -> (TestChainSource, NetworkGraph<Box<LoggerTarget>>) {
 		let logger = Box::new(TestLogger::new());
 		let chain_source = TestChainSource::new(bitcoin::Network::Testnet);
 		let network_graph = NetworkGraph::new(bitcoin::Network::Testnet, logger);
@@ -601,7 +601,7 @@ mod tests {
 
 	#[rustfmt::skip]
 	fn get_test_objects() -> (msgs::ChannelAnnouncement, TestChainSource,
-		NetworkGraph<Box<TestLogger>>, bitcoin::ScriptBuf, msgs::NodeAnnouncement,
+		NetworkGraph<Box<LoggerTarget>>, bitcoin::ScriptBuf, msgs::NodeAnnouncement,
 		msgs::NodeAnnouncement, msgs::ChannelUpdate, msgs::ChannelUpdate, msgs::ChannelUpdate)
 	{
 		let secp_ctx = Secp256k1::new();

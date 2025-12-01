@@ -29,9 +29,6 @@ use bitcoin::hash_types::{BlockHash, Txid};
 use bitcoin::hashes::sha256::Hash as Sha256;
 use bitcoin::hashes::Hash;
 
-use bitcoin::ecdsa::Signature as BitcoinSignature;
-use bitcoin::secp256k1::{self, ecdsa::Signature, PublicKey, Secp256k1, SecretKey};
-
 use crate::chain;
 use crate::chain::chaininterface::{
 	BroadcasterInterface, ConfirmationTarget, FeeEstimator, LowerBoundedFeeEstimator,
@@ -65,13 +62,16 @@ use crate::sign::{
 };
 use crate::types::features::ChannelTypeFeatures;
 use crate::types::payment::{PaymentHash, PaymentPreimage};
+use crate::util::async_poll::{MaybeSend, MaybeSync};
 use crate::util::byte_utils;
-use crate::util::logger::{Logger, LoggerTarget, Record};
+use crate::util::logger::{Logger, LoggerPtr, LoggerTarget, Record};
 use crate::util::persist::MonitorName;
 use crate::util::ser::{
 	MaybeReadable, Readable, ReadableArgs, RequiredWrapper, UpgradableRequired, Writeable, Writer,
 	U48,
 };
+use bitcoin::ecdsa::Signature as BitcoinSignature;
+use bitcoin::secp256k1::{self, ecdsa::Signature, PublicKey, Secp256k1, SecretKey};
 
 #[allow(unused_imports)]
 use crate::prelude::*;
@@ -1825,14 +1825,16 @@ macro_rules! _process_events_body {
 }
 pub(super) use _process_events_body as process_events_body;
 
-pub(crate) struct WithChannelMonitor<'a, L: Deref<Target = LoggerTarget>> {
+pub(crate) struct WithChannelMonitor<'a, L: LoggerPtr> {
 	logger: &'a L,
 	peer_id: Option<PublicKey>,
 	channel_id: Option<ChannelId>,
 	payment_hash: Option<PaymentHash>,
 }
 
-impl<'a, L: Deref<Target = LoggerTarget>> Logger for WithChannelMonitor<'a, L> {
+impl<'a, L: Deref<Target = LoggerTarget> + MaybeSend + MaybeSync> Logger
+	for WithChannelMonitor<'a, L>
+{
 	fn log(&self, mut record: Record) {
 		record.peer_id = self.peer_id;
 		record.channel_id = self.channel_id;
@@ -1841,7 +1843,7 @@ impl<'a, L: Deref<Target = LoggerTarget>> Logger for WithChannelMonitor<'a, L> {
 	}
 }
 
-impl<'a, L: Deref<Target = LoggerTarget>> WithChannelMonitor<'a, L> {
+impl<'a, L: Deref<Target = LoggerTarget> + MaybeSend + MaybeSync> WithChannelMonitor<'a, L> {
 	pub(crate) fn from<S: EcdsaChannelSigner>(
 		logger: &'a L, monitor: &ChannelMonitor<S>, payment_hash: Option<PaymentHash>,
 	) -> Self {
@@ -3813,7 +3815,7 @@ impl<Signer: EcdsaChannelSigner> ChannelMonitorImpl<Signer> {
 	///
 	/// Note that this is often called multiple times for the same payment and must be idempotent.
 	#[rustfmt::skip]
-	fn provide_payment_preimage<B: Deref, F: Deref, L: Deref<Target = LoggerTarget>>(
+	fn provide_payment_preimage<B: Deref, F: Deref, L: LoggerPtr>(
 		&mut self, payment_hash: &PaymentHash, payment_preimage: &PaymentPreimage,
 		payment_info: &Option<PaymentClaimDetails>, broadcaster: &B,
 		fee_estimator: &LowerBoundedFeeEstimator<F>, logger: &WithChannelMonitor<L>)
@@ -5482,7 +5484,8 @@ impl<Signer: EcdsaChannelSigner> ChannelMonitorImpl<Signer> {
 					// different funding transaction.
 					let new_holder_commitment_txid =
 						alternative_funding.current_holder_commitment_tx.trust().txid();
-					self.cancel_prev_commitment_claims(&logger, &new_holder_commitment_txid);
+					let x = logger as &LoggerTarget;
+					self.cancel_prev_commitment_claims(&(logger as &LoggerTarget), &new_holder_commitment_txid);
 
 					// We either attempted to broadcast a holder commitment, or saw one confirm
 					// onchain, so broadcast the new holder commitment for the confirmed funding to
@@ -5566,7 +5569,7 @@ impl<Signer: EcdsaChannelSigner> ChannelMonitorImpl<Signer> {
 					// Now that we've detected a confirmed commitment transaction, attempt to cancel
 					// pending claims for any commitments that were previously confirmed such that
 					// we don't continue claiming inputs that no longer exist.
-					self.cancel_prev_commitment_claims(&logger, &txid);
+					self.cancel_prev_commitment_claims(&(logger as &LoggerTarget), &txid);
 				}
 			}
 			if tx.input.len() >= 1 {

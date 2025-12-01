@@ -45,7 +45,7 @@ use crate::types::features::ChannelTypeFeatures;
 use crate::types::features::InitFeatures;
 use crate::types::payment::{PaymentHash, PaymentPreimage, PaymentSecret};
 use crate::util::config::{MaxDustHTLCExposure, UserConfig};
-use crate::util::logger::Logger;
+use crate::util::logger::{Logger, LoggerTarget};
 use crate::util::scid_utils;
 use crate::util::ser::{ReadableArgs, Writeable};
 use crate::util::test_channel_signer::SignerOp;
@@ -504,7 +504,7 @@ pub struct NodeCfg<'a> {
 	pub chain_monitor: test_utils::TestChainMonitor<'a>,
 	pub keys_manager: &'a test_utils::TestKeysInterface,
 	pub logger: &'a test_utils::TestLogger,
-	pub network_graph: Arc<NetworkGraph<&'a test_utils::TestLogger>>,
+	pub network_graph: Arc<NetworkGraph<&'a LoggerTarget>>,
 	pub node_seed: [u8; 32],
 	pub override_init_features: Rc<RefCell<Option<InitFeatures>>>,
 }
@@ -518,7 +518,7 @@ pub type TestChannelManager<'node_cfg, 'chan_mon_cfg> = ChannelManager<
 	&'chan_mon_cfg test_utils::TestFeeEstimator,
 	&'node_cfg test_utils::TestRouter<'chan_mon_cfg>,
 	&'node_cfg test_utils::TestMessageRouter<'chan_mon_cfg>,
-	&'chan_mon_cfg test_utils::TestLogger,
+	&'chan_mon_cfg LoggerTarget,
 >;
 
 #[cfg(not(feature = "dnssec"))]
@@ -538,7 +538,7 @@ type TestOnionMessenger<'chan_man, 'node_cfg, 'chan_mon_cfg> = OnionMessenger<
 type TestOnionMessenger<'chan_man, 'node_cfg, 'chan_mon_cfg> = OnionMessenger<
 	DedicatedEntropy,
 	&'node_cfg test_utils::TestKeysInterface,
-	&'chan_mon_cfg test_utils::TestLogger,
+	&'chan_mon_cfg LoggerTarget,
 	&'chan_man TestChannelManager<'node_cfg, 'chan_mon_cfg>,
 	&'node_cfg test_utils::TestMessageRouter<'chan_mon_cfg>,
 	&'chan_man TestChannelManager<'node_cfg, 'chan_mon_cfg>,
@@ -570,25 +570,25 @@ pub struct Node<'chan_man, 'node_cfg: 'chan_man, 'chan_mon_cfg: 'node_cfg> {
 	pub keys_manager: &'chan_mon_cfg test_utils::TestKeysInterface,
 	pub node: &'chan_man TestChannelManager<'node_cfg, 'chan_mon_cfg>,
 	pub onion_messenger: TestOnionMessenger<'chan_man, 'node_cfg, 'chan_mon_cfg>,
-	pub network_graph: &'node_cfg NetworkGraph<&'chan_mon_cfg test_utils::TestLogger>,
+	pub network_graph: &'node_cfg NetworkGraph<&'chan_mon_cfg LoggerTarget>,
 	pub gossip_sync: P2PGossipSync<
-		&'node_cfg NetworkGraph<&'chan_mon_cfg test_utils::TestLogger>,
+		&'node_cfg NetworkGraph<&'chan_mon_cfg LoggerTarget>,
 		&'chan_mon_cfg test_utils::TestChainSource,
-		&'chan_mon_cfg test_utils::TestLogger,
+		&'chan_mon_cfg LoggerTarget,
 	>,
 	pub node_seed: [u8; 32],
 	pub network_payment_count: Rc<RefCell<u8>>,
 	pub network_chan_count: Rc<RefCell<u32>>,
-	pub logger: &'chan_mon_cfg test_utils::TestLogger,
+	pub logger: &'chan_mon_cfg TestLogger,
 	pub blocks: Arc<Mutex<Vec<(Block, u32)>>>,
 	pub connect_style: Rc<RefCell<ConnectStyle>>,
 	pub override_init_features: Rc<RefCell<Option<InitFeatures>>>,
 	pub wallet_source: Arc<test_utils::TestWalletSource>,
 	pub bump_tx_handler: BumpTransactionEventHandlerSync<
 		&'chan_mon_cfg test_utils::TestBroadcaster,
-		Arc<WalletSync<Arc<test_utils::TestWalletSource>, &'chan_mon_cfg test_utils::TestLogger>>,
+		Arc<WalletSync<Arc<test_utils::TestWalletSource>, &'chan_mon_cfg LoggerTarget>>,
 		&'chan_mon_cfg test_utils::TestKeysInterface,
-		&'chan_mon_cfg test_utils::TestLogger,
+		&'chan_mon_cfg LoggerTarget,
 	>,
 }
 
@@ -804,8 +804,11 @@ impl<'a, 'b, 'c> Drop for Node<'a, 'b, 'c> {
 			let network_graph = {
 				let mut w = test_utils::TestVecWriter(Vec::new());
 				self.network_graph.write(&mut w).unwrap();
-				let network_graph_deser =
-					<NetworkGraph<_>>::read(&mut io::Cursor::new(&w.0), self.logger).unwrap();
+				let network_graph_deser = <NetworkGraph<_>>::read(
+					&mut io::Cursor::new(&w.0),
+					self.logger as &LoggerTarget,
+				)
+				.unwrap();
 				assert!(network_graph_deser == *self.network_graph);
 				let gossip_sync =
 					P2PGossipSync::new(&network_graph_deser, Some(self.chain_source), self.logger);
@@ -885,7 +888,7 @@ impl<'a, 'b, 'c> Drop for Node<'a, 'b, 'c> {
 						&test_utils::TestFeeEstimator,
 						&test_utils::TestRouter,
 						&test_utils::TestMessageRouter,
-						&test_utils::TestLogger,
+						&LoggerTarget,
 					>,
 				)>::read(
 					&mut io::Cursor::new(w.0),
@@ -897,7 +900,7 @@ impl<'a, 'b, 'c> Drop for Node<'a, 'b, 'c> {
 						fee_estimator: &test_utils::TestFeeEstimator::new(253),
 						router: &test_utils::TestRouter::new(
 							Arc::clone(&network_graph),
-							&self.logger,
+							self.logger as &LoggerTarget,
 							&scorer,
 						),
 						message_router: &test_utils::TestMessageRouter::new_default(
@@ -906,7 +909,7 @@ impl<'a, 'b, 'c> Drop for Node<'a, 'b, 'c> {
 						),
 						chain_monitor: self.chain_monitor,
 						tx_broadcaster: &broadcaster,
-						logger: &self.logger,
+						logger: self.logger as &LoggerTarget,
 						channel_monitors,
 					},
 				)
@@ -2796,7 +2799,7 @@ pub fn get_route(send_node: &Node, route_params: &RouteParameters) -> Result<Rou
 		route_params,
 		&send_node.network_graph.read_only(),
 		Some(&first_hops.iter().collect::<Vec<_>>()),
-		send_node.logger,
+		send_node.logger as &LoggerTarget,
 		&scorer,
 		&Default::default(),
 		&random_seed_bytes,
@@ -2813,7 +2816,7 @@ pub fn find_route(send_node: &Node, route_params: &RouteParameters) -> Result<Ro
 		route_params,
 		&send_node.network_graph,
 		Some(&send_node.node.list_usable_channels().iter().collect::<Vec<_>>()),
-		send_node.logger,
+		send_node.logger as &LoggerTarget,
 		&scorer,
 		&Default::default(),
 		&random_seed_bytes,
@@ -4375,7 +4378,7 @@ fn create_node_cfgs_internal<'a, F>(
 ) -> Vec<NodeCfg<'a>>
 where
 	F: Fn(
-		Arc<NetworkGraph<&'a TestLogger>>,
+		Arc<NetworkGraph<&'a LoggerTarget>>,
 		&'a TestKeysInterface,
 	) -> test_utils::TestMessageRouter<'a>,
 {
@@ -4383,7 +4386,8 @@ where
 
 	for i in 0..node_count {
 		let cfg = &chanmon_cfgs[i];
-		let network_graph = Arc::new(NetworkGraph::new(Network::Testnet, &cfg.logger));
+		let network_graph =
+			Arc::new(NetworkGraph::new(Network::Testnet, &cfg.logger as &LoggerTarget));
 		let chain_monitor = test_utils::TestChainMonitor::new(
 			Some(&cfg.chain_source),
 			&cfg.tx_broadcaster,
@@ -4493,7 +4497,7 @@ pub fn create_node_chanmgrs<'a, 'b>(
 		&'b test_utils::TestFeeEstimator,
 		&'a test_utils::TestRouter<'b>,
 		&'a test_utils::TestMessageRouter<'b>,
-		&'b test_utils::TestLogger,
+		&'b LoggerTarget,
 	>,
 > {
 	let mut chanmgrs = Vec::new();
@@ -4507,7 +4511,7 @@ pub fn create_node_chanmgrs<'a, 'b>(
 			cfgs[i].tx_broadcaster,
 			&cfgs[i].router,
 			&cfgs[i].message_router,
-			cfgs[i].logger,
+			cfgs[i].logger as &LoggerTarget,
 			cfgs[i].keys_manager,
 			cfgs[i].keys_manager,
 			cfgs[i].keys_manager,
@@ -4537,7 +4541,7 @@ pub fn create_network<'a, 'b: 'a, 'c: 'b>(
 			&'c test_utils::TestFeeEstimator,
 			&'c test_utils::TestRouter,
 			&'c test_utils::TestMessageRouter,
-			&'c test_utils::TestLogger,
+			&'c LoggerTarget,
 		>,
 	>,
 ) -> Vec<Node<'a, 'b, 'c>> {
@@ -4552,7 +4556,7 @@ pub fn create_network<'a, 'b: 'a, 'c: 'b>(
 		let onion_messenger = OnionMessenger::new_with_offline_peer_interception(
 			dedicated_entropy,
 			cfgs[i].keys_manager,
-			cfgs[i].logger,
+			cfgs[i].logger as &LoggerTarget,
 			&chan_mgrs[i],
 			&cfgs[i].message_router,
 			&chan_mgrs[i],
@@ -4576,7 +4580,8 @@ pub fn create_network<'a, 'b: 'a, 'c: 'b>(
 		let wallet_source = Arc::new(test_utils::TestWalletSource::new(
 			SecretKey::from_slice(&[i as u8 + 1; 32]).unwrap(),
 		));
-		let wallet = Arc::new(WalletSync::new(Arc::clone(&wallet_source), cfgs[i].logger));
+		let wallet =
+			Arc::new(WalletSync::new(Arc::clone(&wallet_source), cfgs[i].logger as &LoggerTarget));
 		nodes.push(Node {
 			chain_source: cfgs[i].chain_source,
 			tx_broadcaster: cfgs[i].tx_broadcaster,

@@ -1852,7 +1852,7 @@ mod tests {
 		let kv_store_0 = TestStore::new(false);
 		let persister_0 = MonitorUpdatingPersister::new(
 			&kv_store_0,
-			&chanmon_cfgs[0].logger,
+			&chanmon_cfgs[0].logger as &LoggerTarget,
 			test_max_pending_updates,
 			&chanmon_cfgs[0].keys_manager,
 			&chanmon_cfgs[0].keys_manager,
@@ -1862,7 +1862,7 @@ mod tests {
 		let kv_store_1 = TestStore::new(false);
 		let persister_1 = MonitorUpdatingPersister::new(
 			&kv_store_1,
-			&chanmon_cfgs[1].logger,
+			&chanmon_cfgs[1].logger as &LoggerTarget,
 			test_max_pending_updates,
 			&chanmon_cfgs[1].keys_manager,
 			&chanmon_cfgs[1].keys_manager,

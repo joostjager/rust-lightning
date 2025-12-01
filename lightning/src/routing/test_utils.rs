@@ -12,6 +12,7 @@
 use crate::routing::gossip::{NetworkGraph, NodeAlias, P2PGossipSync};
 use crate::types::features::{ChannelFeatures, NodeFeatures};
 use crate::ln::msgs::{ChannelAnnouncement, ChannelUpdate, MAX_VALUE_MSAT, NodeAnnouncement, RoutingMessageHandler, SocketAddress, UnsignedChannelAnnouncement, UnsignedChannelUpdate, UnsignedNodeAnnouncement};
+use crate::util::logger::LoggerTarget;
 use crate::util::test_utils;
 use crate::util::ser::Writeable;
 
@@ -59,7 +60,7 @@ pub(crate) fn channel_announcement(
 
 // Using the same keys for LN and BTC ids
 pub(crate) fn add_channel(
-	gossip_sync: &P2PGossipSync<Arc<NetworkGraph<Arc<test_utils::TestLogger>>>, Arc<test_utils::TestChainSource>, Arc<test_utils::TestLogger>>,
+	gossip_sync: &P2PGossipSync<Arc<NetworkGraph<Arc<LoggerTarget>>>, Arc<test_utils::TestChainSource>, Arc<LoggerTarget>>,
 	secp_ctx: &Secp256k1<All>, node_1_privkey: &SecretKey, node_2_privkey: &SecretKey, features: ChannelFeatures, short_channel_id: u64
 ) {
 	let valid_announcement =
@@ -72,7 +73,7 @@ pub(crate) fn add_channel(
 }
 
 pub(crate) fn add_or_update_node(
-	gossip_sync: &P2PGossipSync<Arc<NetworkGraph<Arc<test_utils::TestLogger>>>, Arc<test_utils::TestChainSource>, Arc<test_utils::TestLogger>>,
+	gossip_sync: &P2PGossipSync<Arc<NetworkGraph<Arc<LoggerTarget>>>, Arc<test_utils::TestChainSource>, Arc<LoggerTarget>>,
 	secp_ctx: &Secp256k1<All>, node_privkey: &SecretKey, features: NodeFeatures, timestamp: u32
 ) {
 	let node_pubkey = PublicKey::from_secret_key(&secp_ctx, node_privkey);
@@ -100,7 +101,7 @@ pub(crate) fn add_or_update_node(
 }
 
 pub(crate) fn update_channel(
-	gossip_sync: &P2PGossipSync<Arc<NetworkGraph<Arc<test_utils::TestLogger>>>, Arc<test_utils::TestChainSource>, Arc<test_utils::TestLogger>>,
+	gossip_sync: &P2PGossipSync<Arc<NetworkGraph<Arc<LoggerTarget>>>, Arc<test_utils::TestChainSource>, Arc<LoggerTarget>>,
 	secp_ctx: &Secp256k1<All>, node_privkey: &SecretKey, update: UnsignedChannelUpdate
 ) {
 	let node_pubkey = PublicKey::from_secret_key(&secp_ctx, node_privkey);
@@ -145,9 +146,9 @@ pub(super) fn id_to_feature_flags(id: u8) -> Vec<u8> {
 }
 
 pub(super) fn build_line_graph() -> (
-	Secp256k1<All>, sync::Arc<NetworkGraph<Arc<test_utils::TestLogger>>>,
-	P2PGossipSync<sync::Arc<NetworkGraph<Arc<test_utils::TestLogger>>>, sync::Arc<test_utils::TestChainSource>, sync::Arc<test_utils::TestLogger>>,
-	sync::Arc<test_utils::TestChainSource>, sync::Arc<test_utils::TestLogger>,
+	Secp256k1<All>, sync::Arc<NetworkGraph<Arc<LoggerTarget>>>,
+	P2PGossipSync<sync::Arc<NetworkGraph<Arc<LoggerTarget>>>, sync::Arc<test_utils::TestChainSource>, sync::Arc<LoggerTarget>>,
+	sync::Arc<test_utils::TestChainSource>, sync::Arc<LoggerTarget>,
 ) {
 	let secp_ctx = Secp256k1::new();
 	let logger = Arc::new(test_utils::TestLogger::new());
@@ -199,10 +200,10 @@ pub(super) fn build_line_graph() -> (
 
 pub(super) fn build_graph() -> (
 	Secp256k1<All>,
-	sync::Arc<NetworkGraph<Arc<test_utils::TestLogger>>>,
-	P2PGossipSync<sync::Arc<NetworkGraph<Arc<test_utils::TestLogger>>>, sync::Arc<test_utils::TestChainSource>, sync::Arc<test_utils::TestLogger>>,
+	sync::Arc<NetworkGraph<Arc<LoggerTarget>>>,
+	P2PGossipSync<sync::Arc<NetworkGraph<Arc<LoggerTarget>>>, sync::Arc<test_utils::TestChainSource>, sync::Arc<LoggerTarget>>,
 	sync::Arc<test_utils::TestChainSource>,
-	sync::Arc<test_utils::TestLogger>,
+	sync::Arc<LoggerTarget>,
 ) {
 	let secp_ctx = Secp256k1::new();
 	let logger = Arc::new(test_utils::TestLogger::new());

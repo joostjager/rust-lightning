@@ -2631,6 +2631,7 @@ mod tests {
 	use crate::routing::scoring::{
 		ChannelLiquidities, ChannelUsage, CombinedScorer, ScoreLookUp, ScoreUpdate,
 	};
+	use crate::util::logger::{Logger, LoggerTarget};
 	use crate::util::ser::{ReadableArgs, Writeable};
 	use crate::util::test_utils::{self, TestLogger};
 
@@ -2693,7 +2694,7 @@ mod tests {
 		NodeId::from_pubkey(&recipient_pubkey())
 	}
 
-	fn network_graph(logger: &TestLogger) -> NetworkGraph<&TestLogger> {
+	fn network_graph(logger: &TestLogger) -> NetworkGraph<&LoggerTarget> {
 		let mut network_graph = NetworkGraph::new(Network::Testnet, logger);
 		add_channel(&mut network_graph, 42, source_privkey(), target_privkey());
 		add_channel(&mut network_graph, 43, target_privkey(), recipient_privkey());
@@ -2703,7 +2704,7 @@ mod tests {
 
 	#[rustfmt::skip]
 	fn add_channel(
-		network_graph: &mut NetworkGraph<&TestLogger>, short_channel_id: u64, node_1_key: SecretKey,
+		network_graph: &mut NetworkGraph<&LoggerTarget>, short_channel_id: u64, node_1_key: SecretKey,
 		node_2_key: SecretKey
 	) {
 		let genesis_hash = ChainHash::using_genesis_block(Network::Testnet);
@@ -2736,8 +2737,8 @@ mod tests {
 	}
 
 	fn update_channel(
-		network_graph: &mut NetworkGraph<&TestLogger>, short_channel_id: u64, node_key: SecretKey,
-		channel_flags: u8, htlc_maximum_msat: u64, timestamp: u32,
+		network_graph: &mut NetworkGraph<&LoggerTarget>, short_channel_id: u64,
+		node_key: SecretKey, channel_flags: u8, htlc_maximum_msat: u64, timestamp: u32,
 	) {
 		let genesis_hash = ChainHash::using_genesis_block(Network::Testnet);
 		let secp_ctx = Secp256k1::new();

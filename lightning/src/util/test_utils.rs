@@ -55,7 +55,7 @@ use crate::util::config::UserConfig;
 use crate::util::dyn_signer::{
 	DynKeysInterface, DynKeysInterfaceTrait, DynPhantomKeysInterface, DynSigner,
 };
-use crate::util::logger::{Logger, Record};
+use crate::util::logger::{Logger, LoggerTarget, Record};
 #[cfg(feature = "std")]
 use crate::util::mut_global::MutGlobal;
 use crate::util::persist::{KVStore, KVStoreSync, MonitorName};
@@ -167,14 +167,14 @@ impl chaininterface::FeeEstimator for TestFeeEstimator {
 
 pub struct TestRouter<'a> {
 	pub router: DefaultRouter<
-		Arc<NetworkGraph<&'a TestLogger>>,
-		&'a TestLogger,
+		Arc<NetworkGraph<&'a LoggerTarget>>,
+		&'a LoggerTarget,
 		Arc<RandomBytes>,
 		&'a RwLock<TestScorer>,
 		(),
 		TestScorer,
 	>,
-	pub network_graph: Arc<NetworkGraph<&'a TestLogger>>,
+	pub network_graph: Arc<NetworkGraph<&'a LoggerTarget>>,
 	pub next_routes: Mutex<VecDeque<(RouteParameters, Option<Result<Route, &'static str>>)>>,
 	pub next_blinded_payment_paths: Mutex<Vec<BlindedPaymentPath>>,
 	pub scorer: &'a RwLock<TestScorer>,
@@ -182,7 +182,7 @@ pub struct TestRouter<'a> {
 
 impl<'a> TestRouter<'a> {
 	pub fn new(
-		network_graph: Arc<NetworkGraph<&'a TestLogger>>, logger: &'a TestLogger,
+		network_graph: Arc<NetworkGraph<&'a LoggerTarget>>, logger: &'a LoggerTarget,
 		scorer: &'a RwLock<TestScorer>,
 	) -> Self {
 		let entropy_source = Arc::new(RandomBytes::new([42; 32]));
@@ -349,15 +349,15 @@ impl<'a> Drop for TestRouter<'a> {
 pub enum TestMessageRouterInternal<'a> {
 	Default(
 		DefaultMessageRouter<
-			Arc<NetworkGraph<&'a TestLogger>>,
-			&'a TestLogger,
+			Arc<NetworkGraph<&'a LoggerTarget>>,
+			&'a LoggerTarget,
 			&'a TestKeysInterface,
 		>,
 	),
 	NodeId(
 		NodeIdMessageRouter<
-			Arc<NetworkGraph<&'a TestLogger>>,
-			&'a TestLogger,
+			Arc<NetworkGraph<&'a LoggerTarget>>,
+			&'a LoggerTarget,
 			&'a TestKeysInterface,
 		>,
 	),
@@ -370,7 +370,7 @@ pub struct TestMessageRouter<'a> {
 
 impl<'a> TestMessageRouter<'a> {
 	pub fn new_default(
-		network_graph: Arc<NetworkGraph<&'a TestLogger>>, entropy_source: &'a TestKeysInterface,
+		network_graph: Arc<NetworkGraph<&LoggerTarget>>, entropy_source: &'a TestKeysInterface,
 	) -> Self {
 		Self {
 			inner: TestMessageRouterInternal::Default(DefaultMessageRouter::new(
@@ -382,7 +382,7 @@ impl<'a> TestMessageRouter<'a> {
 	}
 
 	pub fn new_node_id_router(
-		network_graph: Arc<NetworkGraph<&'a TestLogger>>, entropy_source: &'a TestKeysInterface,
+		network_graph: Arc<NetworkGraph<&LoggerTarget>>, entropy_source: &'a TestKeysInterface,
 	) -> Self {
 		Self {
 			inner: TestMessageRouterInternal::NodeId(NodeIdMessageRouter::new(
@@ -503,7 +503,7 @@ pub struct TestChainMonitor<'a> {
 		&'a TestChainSource,
 		&'a dyn SyncBroadcaster,
 		&'a TestFeeEstimator,
-		&'a TestLogger,
+		&'a LoggerTarget,
 		&'a dyn SyncPersist,
 		&'a TestKeysInterface,
 	>,

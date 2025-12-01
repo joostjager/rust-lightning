@@ -3951,7 +3951,7 @@ mod tests {
 		&'a test_utils::TestChannelMessageHandler,
 		&'a test_utils::TestRoutingMessageHandler,
 		IgnoringMessageHandler,
-		&'a test_utils::TestLogger,
+		&'a LoggerTarget,
 		&'a TestCustomMessageHandler,
 		&'a test_utils::TestNodeSigner,
 		&'a TestBaseMsgHandler,

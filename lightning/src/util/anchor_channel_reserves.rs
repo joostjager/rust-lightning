@@ -32,6 +32,7 @@ use crate::sign::ecdsa::EcdsaChannelSigner;
 use crate::sign::EntropySource;
 use crate::types::features::ChannelTypeFeatures;
 use crate::util::logger::Logger;
+use crate::util::logger::LoggerTarget;
 use bitcoin::constants::WITNESS_SCALE_FACTOR;
 use bitcoin::Amount;
 use bitcoin::FeeRate;
@@ -275,7 +276,7 @@ pub fn can_support_additional_anchor_channel<
 	FilterRef: Deref,
 	BroadcasterRef: Deref,
 	EstimatorRef: Deref,
-	LoggerRef: Deref,
+	LoggerRef: Deref<Target = LoggerTarget>,
 	PersistRef: Deref,
 	EntropySourceRef: Deref,
 	ChainMonitorRef: Deref<

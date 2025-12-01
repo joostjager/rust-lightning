@@ -2734,6 +2734,7 @@ pub(crate) mod tests {
 	#[cfg(feature = "std")]
 	use crate::types::features::InitFeatures;
 	use crate::util::config::UserConfig;
+	use crate::util::logger::LoggerTarget;
 	use crate::util::scid_utils::scid_from_parts;
 	use crate::util::ser::{Hostname, LengthReadable, Readable, ReadableArgs, Writeable};
 	use crate::util::test_utils;
@@ -2757,19 +2758,19 @@ pub(crate) mod tests {
 	use crate::sync::Arc;
 	use bitcoin::secp256k1;
 
-	fn create_network_graph() -> NetworkGraph<Arc<test_utils::TestLogger>> {
+	fn create_network_graph() -> NetworkGraph<Arc<LoggerTarget>> {
 		let logger = Arc::new(test_utils::TestLogger::new());
 		NetworkGraph::new(Network::Testnet, logger)
 	}
 
 	fn create_gossip_sync(
-		network_graph: &NetworkGraph<Arc<test_utils::TestLogger>>,
+		network_graph: &NetworkGraph<Arc<LoggerTarget>>,
 	) -> (
 		Secp256k1<All>,
 		P2PGossipSync<
-			&NetworkGraph<Arc<test_utils::TestLogger>>,
+			&NetworkGraph<Arc<LoggerTarget>>,
 			Arc<test_utils::TestChainSource>,
-			Arc<test_utils::TestLogger>,
+			Arc<LoggerTarget>,
 		>,
 	) {
 		let secp_ctx = Secp256k1::new();
@@ -4091,9 +4092,9 @@ pub(crate) mod tests {
 
 	fn do_handling_query_channel_range(
 		gossip_sync: &P2PGossipSync<
-			&NetworkGraph<Arc<test_utils::TestLogger>>,
+			&NetworkGraph<Arc<LoggerTarget>>,
 			Arc<test_utils::TestChainSource>,
-			Arc<test_utils::TestLogger>,
+			Arc<LoggerTarget>,
 		>,
 		test_node_id: &PublicKey, msg: QueryChannelRange, expected_ok: bool,
 		expected_replies: Vec<ReplyChannelRange>,
