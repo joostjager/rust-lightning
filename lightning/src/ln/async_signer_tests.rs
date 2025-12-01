@@ -25,7 +25,7 @@ use crate::ln::msgs::{BaseMessageHandler, ChannelMessageHandler, ErrorAction, Me
 use crate::ln::{functional_test_utils::*, msgs};
 use crate::sign::ecdsa::EcdsaChannelSigner;
 use crate::sign::SignerProvider;
-use crate::util::logger::Logger;
+use crate::util::logger::{Logger, LoggerTarget};
 use crate::util::test_channel_signer::SignerOp;
 
 #[test]
@@ -1051,7 +1051,7 @@ fn do_test_async_holder_signatures(keyed_anchors: bool, p2a_anchor: bool, remote
 		get_monitor!(nodes[0], chan_id).signer_unblocked(
 			nodes[0].tx_broadcaster,
 			nodes[0].fee_estimator,
-			&nodes[0].logger,
+			&(nodes[0].logger as &LoggerTarget),
 		);
 	}
 	if keyed_anchors || p2a_anchor {
@@ -1122,7 +1122,7 @@ fn do_test_async_holder_signatures(keyed_anchors: bool, p2a_anchor: bool, remote
 	get_monitor!(nodes[0], chan_id).signer_unblocked(
 		nodes[0].tx_broadcaster,
 		nodes[0].fee_estimator,
-		&nodes[0].logger,
+		&(nodes[0].logger as &LoggerTarget),
 	);
 
 	if (keyed_anchors || p2a_anchor) && !remote_commitment {

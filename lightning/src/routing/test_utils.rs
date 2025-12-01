@@ -207,8 +207,8 @@ pub(super) fn build_graph() -> (
 	let secp_ctx = Secp256k1::new();
 	let logger = Arc::new(test_utils::TestLogger::new());
 	let chain_monitor = Arc::new(test_utils::TestChainSource::new(Network::Testnet));
-	let network_graph = Arc::new(NetworkGraph::new(Network::Testnet, Arc::clone(&logger)));
-	let gossip_sync = P2PGossipSync::new(Arc::clone(&network_graph), None, Arc::clone(&logger));
+	let network_graph = Arc::new(NetworkGraph::new(Network::Testnet, Arc::clone(&logger) as Arc<LoggerTarget>));
+	let gossip_sync = P2PGossipSync::new(Arc::clone(&network_graph), None, Arc::clone(&logger) as Arc<LoggerTarget>);
 	// Build network from our_id to node6:
 	//
 	//        -1(1)2-  node0  -1(3)2-

@@ -5478,8 +5478,7 @@ impl<Signer: EcdsaChannelSigner> ChannelMonitorImpl<Signer> {
 					// different funding transaction.
 					let new_holder_commitment_txid =
 						alternative_funding.current_holder_commitment_tx.trust().txid();
-					let x = logger as L;
-					self.cancel_prev_commitment_claims(&logger as &LoggerPtr, &new_holder_commitment_txid);
+					self.cancel_prev_commitment_claims(&(logger as &LoggerTarget), &new_holder_commitment_txid);
 
 					// We either attempted to broadcast a holder commitment, or saw one confirm
 					// onchain, so broadcast the new holder commitment for the confirmed funding to
@@ -5520,7 +5519,7 @@ impl<Signer: EcdsaChannelSigner> ChannelMonitorImpl<Signer> {
 
 					// Is it a commitment transaction?
 					if (tx.input[0].sequence.0 >> 8*3) as u8 == 0x80 && (tx.lock_time.to_consensus_u32() >> 8*3) as u8 == 0x20 {
-						if let Some((mut new_outpoints, new_outputs)) = self.check_spend_holder_transaction(txid, &tx, height, &block_hash, &logger) {
+						if let Some((mut new_outpoints, new_outputs)) = self.check_spend_holder_transaction(txid, &tx, height, &block_hash, &(logger as &LoggerTarget)) {
 							if !new_outputs.1.is_empty() {
 								watch_outputs.push(new_outputs);
 							}
@@ -5535,7 +5534,7 @@ impl<Signer: EcdsaChannelSigner> ChannelMonitorImpl<Signer> {
 							watch_outputs.push((txid, new_watch_outputs));
 
 							let (mut new_outpoints, counterparty_output_idx_sats) =
-								self.check_spend_counterparty_transaction(txid, &tx, height, &block_hash, &logger);
+								self.check_spend_counterparty_transaction(txid, &tx, height, &block_hash, &(logger as &LoggerTarget));
 							commitment_tx_to_counterparty_output = counterparty_output_idx_sats;
 
 							claimable_outpoints.append(&mut new_outpoints);
@@ -5563,7 +5562,7 @@ impl<Signer: EcdsaChannelSigner> ChannelMonitorImpl<Signer> {
 					// Now that we've detected a confirmed commitment transaction, attempt to cancel
 					// pending claims for any commitments that were previously confirmed such that
 					// we don't continue claiming inputs that no longer exist.
-					self.cancel_prev_commitment_claims(&logger, &txid);
+					self.cancel_prev_commitment_claims(&(logger as &LoggerTarget), &txid);
 				}
 			}
 			if tx.input.len() >= 1 {
@@ -5574,7 +5573,7 @@ impl<Signer: EcdsaChannelSigner> ChannelMonitorImpl<Signer> {
 					let commitment_txid = tx_input.previous_output.txid;
 					if let Some(&commitment_number) = self.counterparty_commitment_txn_on_chain.get(&commitment_txid) {
 						let (mut new_outpoints, new_outputs_option) = self.check_spend_counterparty_htlc(
-							&tx, commitment_number, &commitment_txid, height, &logger
+							&tx, commitment_number, &commitment_txid, height, &(logger as &LoggerTarget)
 						);
 						claimable_outpoints.append(&mut new_outpoints);
 						if let Some(new_outputs) = new_outputs_option {
@@ -5870,7 +5869,7 @@ impl<Signer: EcdsaChannelSigner> ChannelMonitorImpl<Signer> {
 					// different funding transaction.
 					let new_holder_commitment_txid =
 						self.funding.current_holder_commitment_tx.trust().txid();
-					self.cancel_prev_commitment_claims(&logger, &new_holder_commitment_txid);
+					self.cancel_prev_commitment_claims(&(logger as &LoggerTarget), &new_holder_commitment_txid);
 
 					should_broadcast_commitment = true;
 				}
@@ -5932,7 +5931,7 @@ impl<Signer: EcdsaChannelSigner> ChannelMonitorImpl<Signer> {
 					// different funding transaction.
 					let new_holder_commitment_txid =
 						self.funding.current_holder_commitment_tx.trust().txid();
-					self.cancel_prev_commitment_claims(&logger, &new_holder_commitment_txid);
+					self.cancel_prev_commitment_claims(&(logger as &LoggerTarget), &new_holder_commitment_txid);
 
 					should_broadcast_commitment = true;
 				}
@@ -6885,7 +6884,7 @@ mod tests {
 	use crate::sync::Arc;
 	use crate::types::features::ChannelTypeFeatures;
 	use crate::types::payment::{PaymentHash, PaymentPreimage};
-	use crate::util::logger::Logger;
+	use crate::util::logger::{Logger, LoggerPtr, LoggerTarget};
 	use crate::util::ser::{ReadableArgs, Writeable};
 	use crate::util::test_utils::{TestBroadcaster, TestFeeEstimator, TestLogger};
 	use crate::{
@@ -6972,7 +6971,7 @@ mod tests {
 
 		let broadcaster = TestBroadcaster::with_blocks(Arc::clone(&nodes[1].blocks));
 		assert!(
-			pre_update_monitor.update_monitor(&replay_update, &&broadcaster, &&chanmon_cfgs[1].fee_estimator, &nodes[1].logger)
+			pre_update_monitor.update_monitor(&replay_update, &&broadcaster, &&chanmon_cfgs[1].fee_estimator, &(nodes[1].logger as &LoggerTarget))
 			.is_err());
 
 		// Even though we error'd on the first update, we should still have generated an HTLC claim
@@ -7002,7 +7001,7 @@ mod tests {
 	#[rustfmt::skip]
 	fn test_prune_preimages() {
 		let secp_ctx = Secp256k1::new();
-		let logger = Arc::new(TestLogger::new());
+		let logger = Arc::new(TestLogger::new()) as Arc<LoggerTarget>;
 		let broadcaster = Arc::new(TestBroadcaster::new(Network::Testnet));
 		let fee_estimator = TestFeeEstimator::new(253);
 
@@ -7362,7 +7361,7 @@ mod tests {
 
 		let chan_id = monitor.inner.lock().unwrap().channel_id();
 		let payment_hash = PaymentHash([1; 32]);
-		let context_logger = WithChannelMonitor::from(&logger, &monitor, Some(payment_hash));
+		let context_logger = WithChannelMonitor::from(&(logger as Arc<LoggerTarget>), &monitor, Some(payment_hash));
 		log_error!(context_logger, "This is an error");
 		log_warn!(context_logger, "This is an error");
 		log_debug!(context_logger, "This is an error");

@@ -26,6 +26,7 @@ use crate::ln::msgs::{
 };
 use crate::ln::types::ChannelId;
 use crate::sign::NodeSigner;
+use crate::util::logger::LoggerTarget;
 use crate::util::native_async::FutureQueue;
 use crate::util::persist::{
 	MonitorName, MonitorUpdatingPersisterAsync, CHANNEL_MONITOR_PERSISTENCE_PRIMARY_NAMESPACE,
@@ -138,7 +139,7 @@ fn test_monitor_and_persister_update_fail() {
 			if let Ok(Some(update)) = channel.commitment_signed(
 				&updates.commitment_signed[0],
 				&feeest,
-				&node_cfgs[0].logger,
+				&(node_cfgs[0].logger as &LoggerTarget),
 			) {
 				// Check that the persister returns InProgress (and will never actually complete)
 				// as the monitor update errors.
@@ -4904,7 +4905,7 @@ fn native_async_persist() {
 	let native_async_persister = MonitorUpdatingPersisterAsync::new(
 		Arc::clone(&kv_store),
 		Arc::clone(&persist_futures),
-		Arc::clone(&logger),
+		Arc::clone(&logger) as Arc<LoggerTarget>,
 		42,
 		Arc::clone(&keys_manager),
 		Arc::clone(&keys_manager),
@@ -4915,7 +4916,7 @@ fn native_async_persist() {
 	let async_chain_monitor = ChainMonitor::new_async_beta(
 		Some(&chain_source),
 		tx_broadcaster,
-		logger,
+		logger as Arc<LoggerTarget>,
 		fee_estimator,
 		native_async_persister,
 		Arc::clone(&keys_manager),

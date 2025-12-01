@@ -2771,7 +2771,8 @@ pub(crate) mod tests {
 	) {
 		let secp_ctx = Secp256k1::new();
 		let logger = Arc::new(test_utils::TestLogger::new());
-		let gossip_sync = P2PGossipSync::new(network_graph, None, Arc::clone(&logger));
+		let gossip_sync =
+			P2PGossipSync::new(network_graph, None, Arc::clone(&logger) as Arc<LoggerTarget>);
 		(secp_ctx, gossip_sync)
 	}
 

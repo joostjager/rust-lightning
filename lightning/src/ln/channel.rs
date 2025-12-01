@@ -82,7 +82,8 @@ use crate::util::config::{
 	MaxDustHTLCExposure, UserConfig,
 };
 use crate::util::errors::APIError;
-use crate::util::logger::{Logger, LoggerPtr, Record, WithContext};use crate::util::scid_utils::{block_from_scid, scid_from_parts};
+use crate::util::logger::{Logger, LoggerPtr, LoggerTarget, Record, WithContext};
+use crate::util::scid_utils::{block_from_scid, scid_from_parts};
 use crate::util::ser::{Readable, ReadableArgs, RequiredWrapper, Writeable, Writer};
 
 use alloc::collections::{btree_map, BTreeMap};
@@ -1747,7 +1748,7 @@ where
 			ChannelPhase::UnfundedOutboundV1(chan) => {
 				let logger = WithChannelContext::from(logger, &chan.context, None);
 				chan.maybe_handle_error_without_close(
-					chain_hash, fee_estimator, &&logger, user_config, their_features,
+					chain_hash, fee_estimator, &(&logger as &LoggerTarget), user_config, their_features,
 				)
 					.map(|msg| Some(OpenChannelMessage::V1(msg)))
 			},
@@ -1983,7 +1984,7 @@ where
 		let result = if let ChannelPhase::UnfundedOutboundV1(chan) = phase {
 			let channel_state = chan.context.channel_state;
 			let logger = WithChannelContext::from(logger, &chan.context, None);
-			match chan.funding_signed(msg, best_block, signer_provider, &&logger) {
+			match chan.funding_signed(msg, best_block, signer_provider, &(&logger as &LoggerTarget)) {
 				Ok((chan, monitor)) => {
 					debug_assert!(matches!(chan.context.channel_state, ChannelState::AwaitingChannelReady(_)));
 					self.phase = ChannelPhase::Funded(chan);
@@ -2032,8 +2033,9 @@ where
 					.take()
 					.expect("PendingV2Channel::interactive_tx_constructor should be set");
 
-				let commitment_signed =
-					chan.context.get_initial_commitment_signed_v2(&chan.funding, &&logger);
+				let commitment_signed = chan
+					.context
+					.get_initial_commitment_signed_v2(&chan.funding, &(&logger as &LoggerTarget));
 				let commitment_signed = match commitment_signed {
 					Some(commitment_signed) => commitment_signed,
 					// TODO(dual_funding): Support async signing
@@ -2073,8 +2075,10 @@ where
 						.and_then(|(is_initiator, mut funding, interactive_tx_constructor)| {
 							funding.channel_transaction_parameters.funding_outpoint =
 								Some(funding_outpoint);
-							match chan.context.get_initial_commitment_signed_v2(&funding, &&logger)
-							{
+							match chan.context.get_initial_commitment_signed_v2(
+								&funding,
+								&(&logger as &LoggerTarget),
+							) {
 								Some(commitment_signed) => {
 									// Advance the state
 									pending_splice.funding_negotiation =
@@ -3389,7 +3393,7 @@ where
 		if open_channel_fields.htlc_minimum_msat >= full_channel_value_msat {
 			return Err(ChannelError::close(format!("Minimum htlc value ({}) was larger than full channel value ({})", open_channel_fields.htlc_minimum_msat, full_channel_value_msat)));
 		}
-		FundedChannel::<SP>::check_remote_fee(&channel_type, fee_estimator, open_channel_fields.commitment_feerate_sat_per_1000_weight, None, &&logger)?;
+		FundedChannel::<SP>::check_remote_fee(&channel_type, fee_estimator, open_channel_fields.commitment_feerate_sat_per_1000_weight, None, &(&logger as &LoggerTarget))?;
 
 		let max_counterparty_selected_contest_delay = u16::min(config.channel_handshake_limits.their_to_self_delay, MAX_LOCAL_BREAKDOWN_TIMEOUT);
 		if open_channel_fields.to_self_delay > max_counterparty_selected_contest_delay {
@@ -13693,7 +13697,7 @@ where
 			user_id,
 			config,
 			current_chain_height,
-			&&logger,
+			&(&logger as &LoggerTarget),
 			is_0conf,
 			0,
 
@@ -15700,6 +15704,7 @@ mod tests {
 	use crate::types::payment::{PaymentHash, PaymentPreimage};
 	use crate::util::config::UserConfig;
 	use crate::util::errors::APIError;
+	use crate::util::logger::LoggerTarget;
 	use crate::util::ser::{ReadableArgs, Writeable};
 	use crate::util::test_utils::{
 		self, OnGetShutdownScriptpubkey, TestFeeEstimator, TestKeysInterface, TestLogger,
@@ -15717,6 +15722,7 @@ mod tests {
 	use bitcoin::secp256k1::{PublicKey, SecretKey};
 	use bitcoin::transaction::{Transaction, TxOut, Version};
 	use bitcoin::{ScriptBuf, WPubkeyHash, WitnessProgram, WitnessVersion};
+	use dnssec_prover::rr::A;
 	use std::cmp;
 
 	#[test]
@@ -15831,7 +15837,7 @@ mod tests {
 			0,
 			42,
 			None,
-			&logger,
+			&logger as &LoggerTarget,
 		);
 		match res {
 			Err(APIError::IncompatibleShutdownScript { script }) => {
@@ -15858,12 +15864,12 @@ mod tests {
 
 		let node_a_node_id = PublicKey::from_secret_key(&secp_ctx, &SecretKey::from_slice(&[42; 32]).unwrap());
 		let config = UserConfig::default();
-		let mut node_a_chan = OutboundV1Channel::<&TestKeysInterface>::new(&bounded_fee_estimator, &&keys_provider, &&keys_provider, node_a_node_id, &channelmanager::provided_init_features(&config), 10000000, 100000, 42, &config, 0, 42, None, &logger).unwrap();
+		let mut node_a_chan = OutboundV1Channel::<&TestKeysInterface>::new(&bounded_fee_estimator, &&keys_provider, &&keys_provider, node_a_node_id, &channelmanager::provided_init_features(&config), 10000000, 100000, 42, &config, 0, 42, None, &logger as &LoggerTarget,).unwrap();
 
 		// Now change the fee so we can check that the fee in the open_channel message is the
 		// same as the old fee.
 		*fee_est.sat_per_kw.lock().unwrap() = 500;
-		let open_channel_msg = node_a_chan.get_open_channel(ChainHash::using_genesis_block(network), &&logger).unwrap();
+		let open_channel_msg = node_a_chan.get_open_channel(ChainHash::using_genesis_block(network), &(&logger as &LoggerTarget)).unwrap();
 		assert_eq!(open_channel_msg.common_fields.commitment_feerate_sat_per_1000_weight, original_fee);
 	}
 
@@ -15887,16 +15893,16 @@ mod tests {
 		// Create Node A's channel pointing to Node B's pubkey
 		let node_b_node_id = PublicKey::from_secret_key(&secp_ctx, &SecretKey::from_slice(&[42; 32]).unwrap());
 		let config = UserConfig::default();
-		let mut node_a_chan = OutboundV1Channel::<&TestKeysInterface>::new(&feeest, &&keys_provider, &&keys_provider, node_b_node_id, &channelmanager::provided_init_features(&config), 10000000, 100000, 42, &config, 0, 42, None, &logger).unwrap();
+		let mut node_a_chan = OutboundV1Channel::<&TestKeysInterface>::new(&feeest, &&keys_provider, &&keys_provider, node_b_node_id, &channelmanager::provided_init_features(&config), 10000000, 100000, 42, &config, 0, 42, None, &logger as &LoggerTarget).unwrap();
 
 		// Create Node B's channel by receiving Node A's open_channel message
 		// Make sure A's dust limit is as we expect.
-		let open_channel_msg = node_a_chan.get_open_channel(ChainHash::using_genesis_block(network), &&logger).unwrap();
+		let open_channel_msg = node_a_chan.get_open_channel(ChainHash::using_genesis_block(network), &(&logger as &LoggerTarget)).unwrap();
 		let node_b_node_id = PublicKey::from_secret_key(&secp_ctx, &SecretKey::from_slice(&[7; 32]).unwrap());
-		let mut node_b_chan = InboundV1Channel::<&TestKeysInterface>::new(&feeest, &&keys_provider, &&keys_provider, node_b_node_id, &channelmanager::provided_channel_type_features(&config), &channelmanager::provided_init_features(&config), &open_channel_msg, 7, &config, 0, &&logger, /*is_0conf=*/false).unwrap();
+		let mut node_b_chan = InboundV1Channel::<&TestKeysInterface>::new(&feeest, &&keys_provider, &&keys_provider, node_b_node_id, &channelmanager::provided_channel_type_features(&config), &channelmanager::provided_init_features(&config), &open_channel_msg, 7, &config, 0, &(&logger as &LoggerTarget), /*is_0conf=*/false).unwrap();
 
 		// Node B --> Node A: accept channel, explicitly setting B's dust limit.
-		let mut accept_channel_msg = node_b_chan.accept_inbound_channel(&&logger).unwrap();
+		let mut accept_channel_msg = node_b_chan.accept_inbound_channel(&(&logger as &LoggerTarget)).unwrap();
 		accept_channel_msg.common_fields.dust_limit_satoshis = 546;
 		node_a_chan.accept_channel(&accept_channel_msg, &config.channel_handshake_limits, &channelmanager::provided_init_features(&config)).unwrap();
 		node_a_chan.context.holder_dust_limit_satoshis = 1560;
@@ -15976,7 +15982,7 @@ mod tests {
 
 		let node_id = PublicKey::from_secret_key(&secp_ctx, &SecretKey::from_slice(&[42; 32]).unwrap());
 		let config = UserConfig::default();
-		let mut chan = OutboundV1Channel::<&TestKeysInterface>::new(&fee_est, &&keys_provider, &&keys_provider, node_id, &channelmanager::provided_init_features(&config), 10000000, 100000, 42, &config, 0, 42, None, &logger).unwrap();
+		let mut chan = OutboundV1Channel::<&TestKeysInterface>::new(&fee_est, &&keys_provider, &&keys_provider, node_id, &channelmanager::provided_init_features(&config), 10000000, 100000, 42, &config, 0, 42, None, &logger as &LoggerTarget).unwrap();
 
 		let commitment_tx_fee_0_htlcs = commit_tx_fee_sat(chan.context.feerate_per_kw, 0, chan.funding.get_channel_type()) * 1000;
 		let commitment_tx_fee_1_htlc = commit_tx_fee_sat(chan.context.feerate_per_kw, 1, chan.funding.get_channel_type()) * 1000;
@@ -16030,15 +16036,15 @@ mod tests {
 		// Create Node A's channel pointing to Node B's pubkey
 		let node_b_node_id = PublicKey::from_secret_key(&secp_ctx, &SecretKey::from_slice(&[42; 32]).unwrap());
 		let config = UserConfig::default();
-		let mut node_a_chan = OutboundV1Channel::<&TestKeysInterface>::new(&feeest, &&keys_provider, &&keys_provider, node_b_node_id, &channelmanager::provided_init_features(&config), 10000000, 100000, 42, &config, 0, 42, None, &logger).unwrap();
+		let mut node_a_chan = OutboundV1Channel::<&TestKeysInterface>::new(&feeest, &&keys_provider, &&keys_provider, node_b_node_id, &channelmanager::provided_init_features(&config), 10000000, 100000, 42, &config, 0, 42, None, &logger as &LoggerTarget).unwrap();
 
 		// Create Node B's channel by receiving Node A's open_channel message
-		let open_channel_msg = node_a_chan.get_open_channel(chain_hash, &&logger).unwrap();
+		let open_channel_msg = node_a_chan.get_open_channel(chain_hash, &(&logger as &LoggerTarget)).unwrap();
 		let node_b_node_id = PublicKey::from_secret_key(&secp_ctx, &SecretKey::from_slice(&[7; 32]).unwrap());
 		let mut node_b_chan = InboundV1Channel::<&TestKeysInterface>::new(&feeest, &&keys_provider, &&keys_provider, node_b_node_id, &channelmanager::provided_channel_type_features(&config), &channelmanager::provided_init_features(&config), &open_channel_msg, 7, &config, 0, &&logger, /*is_0conf=*/false).unwrap();
 
 		// Node B --> Node A: accept channel
-		let accept_channel_msg = node_b_chan.accept_inbound_channel(&&logger).unwrap();
+		let accept_channel_msg = node_b_chan.accept_inbound_channel(&(&logger as &LoggerTarget)).unwrap();
 		node_a_chan.accept_channel(&accept_channel_msg, &config.channel_handshake_limits, &channelmanager::provided_init_features(&config)).unwrap();
 
 		// Node A --> Node B: funding created
@@ -16056,8 +16062,8 @@ mod tests {
 
 		// Now disconnect the two nodes and check that the commitment point in
 		// Node B's channel_reestablish message is sane.
-		assert!(node_b_chan.remove_uncommitted_htlcs_and_mark_paused(&&logger).is_ok());
-		let msg = node_b_chan.get_channel_reestablish(&&logger);
+		assert!(node_b_chan.remove_uncommitted_htlcs_and_mark_paused(&(&logger as &LoggerTarget)).is_ok());
+		let msg = node_b_chan.get_channel_reestablish(&(&logger as &LoggerTarget));
 		assert_eq!(msg.next_local_commitment_number, 1); // now called next_commitment_number
 		assert_eq!(msg.next_remote_commitment_number, 0); // now called next_revocation_number
 		assert_eq!(msg.your_last_per_commitment_secret, [0; 32]);

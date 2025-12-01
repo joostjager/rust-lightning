@@ -1351,7 +1351,12 @@ mod tests {
 		};
 		let signer = KeysManager::new(&[42; 32], 42, 42, true);
 		let logger = TestLogger::new();
-		let handler = BumpTransactionEventHandlerSync::new(&broadcaster, &source, &signer, &logger);
+		let handler = BumpTransactionEventHandlerSync::new(
+			&broadcaster,
+			&source,
+			&signer,
+			&logger as &LoggerTarget,
+		);
 
 		let mut transaction_parameters = ChannelTransactionParameters::test_dummy(42_000_000);
 		transaction_parameters.channel_type_features =

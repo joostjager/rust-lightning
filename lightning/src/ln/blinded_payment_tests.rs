@@ -34,6 +34,7 @@ use crate::prelude::*;
 use crate::routing::router::{BlindedTail, Path, Payee, PaymentParameters, RouteHop, RouteParameters, TrampolineHop};
 use crate::sign::{NodeSigner, PeerStorageKey, ReceiveAuthKey, Recipient};
 use crate::util::config::UserConfig;
+use crate::util::logger::LoggerTarget;
 use crate::util::ser::{WithoutLength, Writeable};
 use crate::util::test_utils::{self, bytes_from_hex, secret_from_hex, pubkey_from_hex};
 use lightning_invoice::RawBolt11Invoice;
@@ -1624,7 +1625,7 @@ fn route_blinding_spec_test_vector() {
 	// < MIN_CLTV_EXPIRY_DELTA).
 	let (bob_peeled_onion, next_packet_details_opt) =
 		match onion_payment::decode_incoming_update_add_htlc_onion(
-			&bob_update_add, &bob_node_signer, &logger, &secp_ctx
+			&bob_update_add, &bob_node_signer, &logger as &LoggerTarget, &secp_ctx
 		) {
 			Ok(res) => res,
 			_ => panic!("Unexpected error")
@@ -1658,7 +1659,7 @@ fn route_blinding_spec_test_vector() {
 	let carol_node_signer = TestEcdhSigner { node_secret: carol_secret };
 	let (carol_peeled_onion, next_packet_details_opt) =
 		match onion_payment::decode_incoming_update_add_htlc_onion(
-			&carol_update_add, &carol_node_signer, &logger, &secp_ctx
+			&carol_update_add, &carol_node_signer, &logger as &LoggerTarget, &secp_ctx
 		) {
 			Ok(res) => res,
 			_ => panic!("Unexpected error")
@@ -1692,7 +1693,7 @@ fn route_blinding_spec_test_vector() {
 	let dave_node_signer = TestEcdhSigner { node_secret: dave_secret };
 	let (dave_peeled_onion, next_packet_details_opt) =
 		match onion_payment::decode_incoming_update_add_htlc_onion(
-			&dave_update_add, &dave_node_signer, &logger, &secp_ctx
+			&dave_update_add, &dave_node_signer, &logger as &LoggerTarget, &secp_ctx
 		) {
 			Ok(res) => res,
 			_ => panic!("Unexpected error")
@@ -1727,7 +1728,7 @@ fn route_blinding_spec_test_vector() {
 	// We can't decode the final payload because it contains a path_id and is missing some LDK
 	// specific fields.
 	match onion_payment::decode_incoming_update_add_htlc_onion(
-		&eve_update_add, &eve_node_signer, &logger, &secp_ctx
+		&eve_update_add, &eve_node_signer, &logger as &LoggerTarget, &secp_ctx
 	) {
 		Err((HTLCFailureMsg::Malformed(msg), _)) => assert_eq!(msg.failure_code,
 			LocalHTLCFailureReason::InvalidOnionBlinding.failure_code()),
@@ -1934,7 +1935,7 @@ fn test_trampoline_inbound_payment_decoding() {
 	let bob_node_signer = TestEcdhSigner { node_secret: bob_secret };
 
 	let (bob_peeled_onion, next_packet_details_opt) = onion_payment::decode_incoming_update_add_htlc_onion(
-		&bob_update_add, &bob_node_signer, &logger, &secp_ctx
+		&bob_update_add, &bob_node_signer, &logger as &LoggerTarget, &secp_ctx
 	).unwrap_or_else(|_| panic!());
 
 	let (carol_packet_bytes, carol_hmac) = if let onion_utils::Hop::Forward {
@@ -1954,7 +1955,7 @@ fn test_trampoline_inbound_payment_decoding() {
 
 	let carol_node_signer = TestEcdhSigner { node_secret: carol_secret };
 	let (carol_peeled_onion, _) = onion_payment::decode_incoming_update_add_htlc_onion(
-		&carol_update_add, &carol_node_signer, &logger, &secp_ctx
+		&carol_update_add, &carol_node_signer, &logger as &LoggerTarget, &secp_ctx
 	).unwrap_or_else(|_| panic!());
 
 	if let onion_utils::Hop::TrampolineForward { next_trampoline_hop_data, .. } = carol_peeled_onion {

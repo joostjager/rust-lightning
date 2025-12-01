@@ -124,7 +124,8 @@ use crate::types::payment::{PaymentHash, PaymentPreimage, PaymentSecret};
 use crate::types::string::UntrustedString;
 use crate::util::config::{ChannelConfig, ChannelConfigOverrides, ChannelConfigUpdate, UserConfig};
 use crate::util::errors::APIError;
-use crate::util::logger::{Level, Logger, LoggerPtr, WithContext};use crate::util::scid_utils::fake_scid;
+use crate::util::logger::{Level, Logger, LoggerPtr, LoggerTarget, WithContext};
+use crate::util::scid_utils::fake_scid;
 use crate::util::ser::{
 	BigSize, FixedLengthReader, LengthReadable, MaybeReadable, Readable, ReadableArgs, VecWriter,
 	WithoutLength, Writeable, Writer,
@@ -3358,7 +3359,7 @@ macro_rules! handle_monitor_update_completion {
 		}
 		let logger = WithChannelContext::from(&$self.logger, &$chan.context, None);
 		let updates = $chan.monitor_updating_restored(
-			&&logger,
+			&(&logger as &LoggerTarget),
 			&$self.node_signer,
 			$self.chain_hash,
 			&*$self.config.read().unwrap(),
@@ -4129,7 +4130,7 @@ where
 			}
 		};
 		let logger = WithChannelContext::from(&self.logger, &channel.context, None);
-		let res = channel.get_open_channel(self.chain_hash, &&logger);
+		let res = channel.get_open_channel(self.chain_hash, &(&logger as &LoggerTarget));
 
 		let temporary_channel_id = channel.context.channel_id();
 		match peer_state.channel_by_id.entry(temporary_channel_id) {
@@ -4760,7 +4761,7 @@ where
 						contribution,
 						funding_feerate_per_kw,
 						locktime,
-						&&logger,
+						&(&logger as &LoggerTarget),
 					)?;
 					if let Some(msg) = msg_opt {
 						peer_state.pending_msg_events.push(MessageSendEvent::SendStfu {
@@ -5301,7 +5302,7 @@ where
 							None,
 							hold_htlc_at_next_hop,
 							&self.fee_estimator,
-							&&logger,
+							&(&logger as &LoggerTarget),
 						);
 						match break_channel_entry!(self, peer_state, send_res, chan_entry) {
 							Some(monitor_update) => {
@@ -6076,7 +6077,7 @@ where
 		};
 
 		let logger = WithChannelContext::from(&self.logger, &chan.context, None);
-		let funding_res = chan.get_funding_created(funding_transaction, funding_txo, is_batch_funding, &&logger);
+		let funding_res = chan.get_funding_created(funding_transaction, funding_txo, is_batch_funding, &(&logger as &LoggerTarget));
 		let (mut chan, msg_opt) = match funding_res {
 			Ok(funding_msg) => (chan, funding_msg),
 			Err((mut chan, chan_err)) => {
@@ -6944,7 +6945,7 @@ where
 							&chan.context,
 							Some(update_add_htlc.payment_hash),
 						);
-						chan.can_accept_incoming_htlc(&self.fee_estimator, &logger)
+						chan.can_accept_incoming_htlc(&self.fee_estimator, &logger as &LoggerTarget)
 					},
 				) {
 					Some(Ok(_)) => {},
@@ -7495,7 +7496,7 @@ where
 						*skimmed_fee_msat,
 						next_blinding_point,
 						&self.fee_estimator,
-						&&logger,
+						&(&logger as &LoggerTarget),
 					) {
 						log_trace!(logger, "Failed to forward HTLC: {}", msg);
 
@@ -7536,7 +7537,14 @@ where
 					{
 						let logger = WithChannelContext::from(&self.logger, &chan.context, None);
 						log_trace!(logger, "Failing HTLC back to channel with short id {} (backward HTLC ID {}) after delay", short_chan_id, htlc_id);
-						Some((chan.queue_fail_htlc(htlc_id, err_packet.clone(), &&logger), htlc_id))
+						Some((
+							chan.queue_fail_htlc(
+								htlc_id,
+								err_packet.clone(),
+								&(&logger as &LoggerTarget),
+							),
+							htlc_id,
+						))
 					} else {
 						self.forwarding_channel_not_found(
 							core::iter::once(forward_info).chain(draining_pending_forwards),
@@ -7560,7 +7568,7 @@ where
 							htlc_id,
 							failure_code,
 							sha256_of_onion,
-							&&logger,
+							&(&logger as &LoggerTarget),
 						);
 						Some((res, htlc_id))
 					} else {
@@ -8044,7 +8052,7 @@ where
 		log_trace!(logger, "Channel qualifies for a feerate change from {} to {}.",
 			chan.context.get_feerate_sat_per_1000_weight(), new_feerate);
 
-		chan.queue_update_fee(new_feerate, &self.fee_estimator, &&logger);
+		chan.queue_update_fee(new_feerate, &self.fee_estimator, &(&logger as &LoggerTarget));
 		NotifyOption::DoPersist
 	}
 
@@ -8920,7 +8928,7 @@ where
 						payment_preimage,
 						payment_info,
 						attribution_data,
-						&&logger,
+						&(&logger as &LoggerTarget),
 					);
 
 					match fulfill_res {
@@ -9958,12 +9966,11 @@ This indicates a bug inside LDK. Please report this error at https://github.com/
 					})
 					.map(|mut channel| {
 						let logger = WithChannelContext::from(&self.logger, &channel.context, None);
-						let message_send_event =
-							channel.accept_inbound_channel(&&logger).map(|msg| {
-								MessageSendEvent::SendAcceptChannel {
-									node_id: *counterparty_node_id,
-									msg,
-								}
+						let message_send_event = channel
+							.accept_inbound_channel(&(&logger as &LoggerTarget))
+							.map(|msg| MessageSendEvent::SendAcceptChannel {
+								node_id: *counterparty_node_id,
+								msg,
 							});
 						(*temporary_channel_id, Channel::from(channel), message_send_event)
 					}),
@@ -10272,7 +10279,7 @@ This indicates a bug inside LDK. Please report this error at https://github.com/
 					&self.config.read().unwrap(), best_block_height, &self.logger, /*is_0conf=*/false
 				).map_err(|e| MsgHandleErrInternal::from_chan_no_close(e, msg.common_fields.temporary_channel_id))?;
 				let logger = WithChannelContext::from(&self.logger, &channel.context, None);
-				let message_send_event = channel.accept_inbound_channel(&&logger).map(|msg| {
+				let message_send_event = channel.accept_inbound_channel(&(&logger as &LoggerTarget)).map(|msg| {
 					MessageSendEvent::SendAcceptChannel {
 						node_id: *counterparty_node_id,
 						msg,
@@ -10369,7 +10376,7 @@ This indicates a bug inside LDK. Please report this error at https://github.com/
 			{
 				Some(Ok(inbound_chan)) => {
 					let logger = WithChannelContext::from(&self.logger, &inbound_chan.context, None);
-					match inbound_chan.funding_created(msg, best_block, &self.signer_provider, &&logger) {
+					match inbound_chan.funding_created(msg, best_block, &self.signer_provider, &(&logger as &LoggerTarget)) {
 						Ok(res) => res,
 						Err((inbound_chan, err)) => {
 							// We've already removed this inbound channel from the map in `PeerState`
@@ -10892,7 +10899,7 @@ This indicates a bug inside LDK. Please report this error at https://github.com/
 						self.chain_hash,
 						&self.config.read().unwrap(),
 						&self.best_block.read().unwrap(),
-						&&logger
+						&(&logger as &LoggerTarget)
 					);
 					let announcement_sigs_opt =
 						try_channel_entry!(self, peer_state, res, chan_entry);
@@ -11056,7 +11063,7 @@ This indicates a bug inside LDK. Please report this error at https://github.com/
 				hash_map::Entry::Occupied(mut chan_entry) => {
 					if let Some(chan) = chan_entry.get_mut().as_funded_mut() {
 						logger = WithChannelContext::from(&self.logger, &chan.context, None);
-						let res = chan.closing_signed(&self.fee_estimator, &msg, &&logger);
+						let res = chan.closing_signed(&self.fee_estimator, &msg, &(&logger as &LoggerTarget));
 						let (closing_signed, tx_shutdown_result) =
 							try_channel_entry!(self, peer_state, res, chan_entry);
 						debug_assert_eq!(tx_shutdown_result.is_some(), chan.is_shutdown());
@@ -11284,7 +11291,7 @@ This indicates a bug inside LDK. Please report this error at https://github.com/
 				let logger = WithChannelContext::from(&self.logger, &chan.context(), None);
 				let funding_txo = chan.funding().get_funding_txo();
 				let (monitor_opt, monitor_update_opt) = try_channel_entry!(
-					self, peer_state, chan.commitment_signed(msg, best_block, &self.signer_provider, &self.fee_estimator, &&logger),
+					self, peer_state, chan.commitment_signed(msg, best_block, &self.signer_provider, &self.fee_estimator, &(&logger as &LoggerTarget)),
 					chan_entry);
 
 				if let Some(chan) = chan.as_funded_mut() {
@@ -11329,7 +11336,7 @@ This indicates a bug inside LDK. Please report this error at https://github.com/
 				let funding_txo = chan.funding().get_funding_txo();
 				if let Some(chan) = chan.as_funded_mut() {
 					let monitor_update_opt = try_channel_entry!(
-						self, peer_state, chan.commitment_signed_batch(batch, &self.fee_estimator, &&logger), chan_entry
+						self, peer_state, chan.commitment_signed_batch(batch, &self.fee_estimator, &(&logger as &LoggerTarget)), chan_entry
 					);
 
 					if let Some(monitor_update) = monitor_update_opt {
@@ -11576,7 +11583,7 @@ This indicates a bug inside LDK. Please report this error at https://github.com/
 							&peer_state.actions_blocking_raa_monitor_updates, msg.channel_id,
 							*counterparty_node_id);
 						let (htlcs_to_fail, static_invoices, monitor_update_opt) = try_channel_entry!(self, peer_state,
-							chan.revoke_and_ack(&msg, &self.fee_estimator, &&logger, mon_update_blocked), chan_entry);
+							chan.revoke_and_ack(&msg, &self.fee_estimator, &(&logger as &LoggerTarget), mon_update_blocked), chan_entry);
 						if let Some(monitor_update) = monitor_update_opt {
 							let funding_txo = funding_txo_opt
 								.expect("Funding outpoint must have been set for RAA handling to succeed");
@@ -11614,7 +11621,7 @@ This indicates a bug inside LDK. Please report this error at https://github.com/
 			hash_map::Entry::Occupied(mut chan_entry) => {
 				if let Some(chan) = chan_entry.get_mut().as_funded_mut() {
 					let logger = WithChannelContext::from(&self.logger, &chan.context, None);
-					try_channel_entry!(self, peer_state, chan.update_fee(&self.fee_estimator, &msg, &&logger), chan_entry);
+					try_channel_entry!(self, peer_state, chan.update_fee(&self.fee_estimator, &msg, &(&logger as &LoggerTarget)), chan_entry);
 				} else {
 					return try_channel_entry!(self, peer_state, Err(ChannelError::close(
 						"Got an update_fee message for an unfunded channel!".into())), chan_entry);
@@ -11651,7 +11658,7 @@ This indicates a bug inside LDK. Please report this error at https://github.com/
 						&self.logger, Some(*counterparty_node_id), Some(msg.channel_id), None
 					);
 
-					let res = chan.stfu(&msg, &&logger);
+					let res = chan.stfu(&msg, &(&logger as &LoggerTarget));
 					let resp = try_channel_entry!(self, peer_state, res, chan_entry);
 					match resp {
 						None => Ok(false),
@@ -11805,7 +11812,7 @@ This indicates a bug inside LDK. Please report this error at https://github.com/
 						let outbound_scid_alias = chan.context.outbound_scid_alias();
 						let res = chan.channel_reestablish(
 							msg,
-							&&logger,
+							&(&logger as &LoggerTarget),
 							&self.node_signer,
 							self.chain_hash,
 							&self.config.read().unwrap(),
@@ -12014,7 +12021,7 @@ This indicates a bug inside LDK. Please report this error at https://github.com/
 						self.chain_hash,
 						&self.config.read().unwrap(),
 						self.best_block.read().unwrap().height,
-						&&logger,
+						&(&logger as &LoggerTarget),
 					);
 					let splice_promotion = try_channel_entry!(self, peer_state, result, chan_entry);
 					if let Some(splice_promotion) = splice_promotion {
@@ -12233,7 +12240,8 @@ This indicates a bug inside LDK. Please report this error at https://github.com/
 						let (monitor_opt, holding_cell_failed_htlcs) = chan
 							.maybe_free_holding_cell_htlcs(
 								&self.fee_estimator,
-								&&WithChannelContext::from(&self.logger, &chan.context, None),
+								&(&WithChannelContext::from(&self.logger, &chan.context, None)
+									as &LoggerTarget),
 							);
 						if !holding_cell_failed_htlcs.is_empty() {
 							failed_htlcs.push((
@@ -12289,7 +12297,7 @@ This indicates a bug inside LDK. Please report this error at https://github.com/
 			let logger = WithChannelContext::from(&self.logger, &chan.context(), None);
 			let node_id = chan.context().get_counterparty_node_id();
 			let cbp = |htlc_id| self.path_for_release_held_htlc(htlc_id, outbound_scid_alias, &channel_id, &node_id);
-			let msgs = chan.signer_maybe_unblocked(self.chain_hash, &&logger, cbp)?;
+			let msgs = chan.signer_maybe_unblocked(self.chain_hash, &(&logger as &LoggerTarget), cbp)?;
 			if let Some(msgs) = msgs {
 				if chan.context().is_connected() {
 					if let Some(msg) = msgs.open_channel {
@@ -12436,7 +12444,7 @@ This indicates a bug inside LDK. Please report this error at https://github.com/
 					match chan.as_funded_mut() {
 						Some(funded_chan) => {
 							let logger = WithChannelContext::from(&self.logger, &funded_chan.context, None);
-							match funded_chan.maybe_propose_closing_signed(&self.fee_estimator, &&logger) {
+							match funded_chan.maybe_propose_closing_signed(&self.fee_estimator, &(&logger as &LoggerTarget)) {
 								Ok((msg_opt, tx_shutdown_result_opt)) => {
 									if let Some(msg) = msg_opt {
 										has_update = true;
@@ -12489,7 +12497,7 @@ This indicates a bug inside LDK. Please report this error at https://github.com/
 					let logger = WithContext::from(
 						&self.logger, Some(*counterparty_node_id), Some(*channel_id), None
 					);
-					match funded_chan.try_send_stfu(&&logger) {
+					match funded_chan.try_send_stfu(&(&logger as &LoggerTarget)) {
 						Ok(None) => {},
 						Ok(Some(stfu)) => {
 							pending_msg_events.push(MessageSendEvent::SendStfu {
@@ -12535,7 +12543,7 @@ This indicates a bug inside LDK. Please report this error at https://github.com/
 							&self.logger, Some(*counterparty_node_id), Some(*channel_id), None
 						);
 
-						match chan.propose_quiescence(&&logger, QuiescentAction::DoNothing) {
+						match chan.propose_quiescence(&(&logger as &LoggerTarget), QuiescentAction::DoNothing) {
 							Ok(None) => {},
 							Ok(Some(stfu)) => {
 								peer_state.pending_msg_events.push(MessageSendEvent::SendStfu {
@@ -13802,7 +13810,7 @@ where
 					peer_state.channel_by_id.retain(|_, chan| {
 						let logger = WithChannelContext::from(&self.logger, &chan.context(), None);
 						let DisconnectResult { is_resumable, splice_funding_failed } =
-							chan.peer_disconnected_is_resumable(&&logger);
+							chan.peer_disconnected_is_resumable(&(&logger as &LoggerTarget));
 
 						if let Some(splice_funding_failed) = splice_funding_failed {
 							splice_failed_events.push(events::Event::SpliceFailed {
@@ -14008,7 +14016,9 @@ where
 
 				for (_, chan) in peer_state.channel_by_id.iter_mut() {
 					let logger = WithChannelContext::from(&self.logger, &chan.context(), None);
-					match chan.peer_connected_get_handshake(self.chain_hash, &&logger) {
+					match chan
+						.peer_connected_get_handshake(self.chain_hash, &(&logger as &LoggerTarget))
+					{
 						ReconnectionMsg::Reestablish(msg) => {
 							pending_msg_events.push(MessageSendEvent::SendChannelReestablish {
 								node_id: chan.context().get_counterparty_node_id(),
@@ -14194,7 +14204,7 @@ where
 				self.chain_hash,
 				&self.node_signer,
 				&self.config.read().unwrap(),
-				&&WithChannelContext::from(&self.logger, &channel.context, None),
+				&(&WithChannelContext::from(&self.logger, &channel.context, None) as &LoggerTarget),
 			)
 		});
 	}
@@ -14233,7 +14243,7 @@ where
 		let _persistence_guard =
 			PersistenceNotifierGuard::optionally_notify_skipping_background_events(
 				self, || -> NotifyOption { NotifyOption::DoPersist });
-		self.do_chain_event(Some(height), |channel| channel.transactions_confirmed(&block_hash, height, txdata, self.chain_hash, &self.node_signer, &self.config.read().unwrap(), &&WithChannelContext::from(&self.logger, &channel.context, None))
+		self.do_chain_event(Some(height), |channel| channel.transactions_confirmed(&block_hash, height, txdata, self.chain_hash, &self.node_signer, &self.config.read().unwrap(), &(&WithChannelContext::from(&self.logger, &channel.context, None) as &LoggerTarget))
 			.map(|(a, b)| (a, Vec::new(), b)));
 
 		let last_best_block_height = self.best_block.read().unwrap().height;
@@ -14246,7 +14256,7 @@ where
 					self.chain_hash,
 					&self.node_signer,
 					&self.config.read().unwrap(),
-					&&WithChannelContext::from(&self.logger, &channel.context, None),
+					&(&WithChannelContext::from(&self.logger, &channel.context, None) as &LoggerTarget),
 				)
 			};
 			self.do_chain_event(Some(last_best_block_height), do_update);
@@ -14315,7 +14325,7 @@ where
 				self.chain_hash,
 				&self.node_signer,
 				&self.config.read().unwrap(),
-				&&WithChannelContext::from(&self.logger, &channel.context, None),
+				&(&WithChannelContext::from(&self.logger, &channel.context, None) as &LoggerTarget),
 			)
 		});
 
@@ -14362,7 +14372,9 @@ where
 			);
 		self.do_chain_event(None, |channel| {
 			let logger = WithChannelContext::from(&self.logger, &channel.context, None);
-			channel.transaction_unconfirmed(txid, &&logger).map(|()| (None, Vec::new(), None))
+			channel
+				.transaction_unconfirmed(txid, &(&logger as &LoggerTarget))
+				.map(|()| (None, Vec::new(), None))
 		});
 	}
 }
@@ -18384,7 +18396,7 @@ where
 										.claim_htlc_while_disconnected_dropping_mon_update_legacy(
 											claimable_htlc.prev_hop.htlc_id,
 											payment_preimage,
-											&&logger,
+											&(&logger as &LoggerTarget),
 										);
 								}
 							}

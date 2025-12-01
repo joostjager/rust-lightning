@@ -31,6 +31,7 @@ use crate::util::config::{
 	ChannelConfigOverrides, ChannelConfigUpdate, ChannelHandshakeConfigUpdate, UserConfig,
 };
 use crate::util::errors::APIError;
+use crate::util::logger::LoggerTarget;
 use crate::util::test_utils::{self, TestLogger};
 
 use bitcoin::constants::ChainHash;
@@ -942,6 +943,8 @@ pub fn bolt2_open_channel_sane_dust_limit() {
 pub fn test_user_configurable_csv_delay() {
 	// We test our channel constructors yield errors when we pass them absurd csv delay
 
+	use crate::util::logger::LoggerTarget;
+
 	let mut low_our_to_self_config = UserConfig::default();
 	low_our_to_self_config.channel_handshake_config.our_to_self_delay = 6;
 	let mut high_their_to_self_config = UserConfig::default();
@@ -971,7 +974,7 @@ pub fn test_user_configurable_csv_delay() {
 		0,
 		42,
 		None,
-		&logger,
+		&logger as &LoggerTarget,
 	) {
 		match error {
 			APIError::APIMisuseError { err } => {
@@ -1002,7 +1005,7 @@ pub fn test_user_configurable_csv_delay() {
 		0,
 		&low_our_to_self_config,
 		0,
-		&nodes[0].logger,
+		&(nodes[0].logger as &LoggerTarget),
 		/*is_0conf=*/ false,
 	) {
 		match error {
@@ -1062,7 +1065,7 @@ pub fn test_user_configurable_csv_delay() {
 		0,
 		&high_their_to_self_config,
 		0,
-		&nodes[0].logger,
+		&(nodes[0].logger as &LoggerTarget),
 		/*is_0conf=*/ false,
 	) {
 		match error {
@@ -1567,9 +1570,14 @@ pub fn test_duplicate_chan_id() {
 
 		if let Some(mut chan) = channel.as_unfunded_outbound_v1_mut() {
 			let logger = test_utils::TestLogger::new();
-			chan.get_funding_created(tx.clone(), funding_outpoint, false, &&logger)
-				.map_err(|_| ())
-				.unwrap()
+			chan.get_funding_created(
+				tx.clone(),
+				funding_outpoint,
+				false,
+				&(&logger as &LoggerTarget),
+			)
+			.map_err(|_| ())
+			.unwrap()
 		} else {
 			panic!("Unexpected Channel phase")
 		}
@@ -2314,7 +2322,8 @@ pub fn test_funding_and_commitment_tx_confirm_same_block() {
 
 	let commitment_tx = {
 		let mon = get_monitor!(nodes[0], chan_id);
-		let mut txn = mon.unsafe_get_latest_holder_commitment_txn(&nodes[0].logger);
+		let mut txn =
+			mon.unsafe_get_latest_holder_commitment_txn(&(nodes[0].logger as &LoggerTarget));
 		assert_eq!(txn.len(), 1);
 		txn.pop().unwrap()
 	};
