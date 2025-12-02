@@ -400,3 +400,27 @@ pub fn xtest_inventory(_input: TokenStream) -> TokenStream {
 
 	TokenStream::from(expanded)
 }
+
+/// Adds a logging scope at the top of a method.
+#[proc_macro_attribute]
+pub fn log_scope(_attrs: TokenStream, meth: TokenStream) -> TokenStream {
+	let mut meth = if let Ok(parsed) = parse::<syn::ItemFn>(meth) {
+		parsed
+	} else {
+		return (quote! {
+			compile_error!("log_scope can only be set on methods")
+		})
+		.into();
+	};
+
+	let init_stmt1 = quote! {
+		let _logger_wrapper = crate::util::logger::LoggerWrapper(&self.logger);
+	};
+	let init_stmt2 = quote! {
+		let _logging_context = crate::util::logger::LoggerScope::new(&_logger_wrapper);
+	};
+
+	meth.block.stmts.insert(0, parse(init_stmt2.into()).unwrap());
+	meth.block.stmts.insert(0, parse(init_stmt1.into()).unwrap());
+	quote! { #meth }.into()
+}

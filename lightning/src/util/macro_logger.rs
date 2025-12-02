@@ -203,6 +203,18 @@ macro_rules! log_info {
 	)
 }
 
+/// Log at the `INFO` level using the thread-local logger.
+#[macro_export]
+macro_rules! log_info_tls {
+	($($arg:tt)+) => {
+		$crate::util::logger::TLS_LOGGER.with(|cell| {
+			if let Some(logger) = &*cell.borrow() {
+				log_info!(logger, $($arg)*);
+			}
+		})
+	};
+}
+
 /// Log at the `DEBUG` level.
 #[macro_export]
 macro_rules! log_debug {

@@ -15,6 +15,7 @@
 
 use bitcoin::secp256k1::PublicKey;
 
+use core::cell::RefCell;
 use core::cmp;
 use core::fmt;
 use core::fmt::Display;
@@ -384,14 +385,80 @@ impl<T: fmt::Display, I: core::iter::Iterator<Item = T> + Clone> fmt::Display fo
 	}
 }
 
+/// A wrapper to allow getting a dyn Logger from a deref type.
+pub struct LoggerWrapper<'a, L: Deref>(pub &'a L)
+where
+	L::Target: Logger;
+
+impl<'a, L: Deref> Logger for LoggerWrapper<'a, L>
+where
+	L::Target: Logger,
+{
+	fn log(&self, record: Record) {
+		self.0.log(record)
+	}
+}
+
+thread_local! {
+	pub(crate) static TLS_LOGGER: RefCell<Option<&'static dyn Logger>> = RefCell::new(None);
+}
+
+/// A scope which sets a thread-local logger for the duration of the scope.
+pub struct LoggerScope<'a> {
+	_marker: std::marker::PhantomData<&'a ()>,
+	no_drop: bool,
+}
+
+impl<'a> LoggerScope<'a> {
+	/// Creates a new `LoggerScope`, setting the given logger as the thread-local logger for the
+	/// duration of the scope.
+	pub fn new(logger: &'a dyn Logger) -> Self {
+		let mut no_drop = false;
+		TLS_LOGGER.with(|cell| {
+			let mut borrow = cell.borrow_mut();
+
+			// Prevent nested scopes
+			if borrow.is_some() {
+				no_drop = true;
+
+				return;
+			}
+
+			let logger_ref_static: &'static dyn Logger =
+				unsafe { std::mem::transmute::<&'a dyn Logger, &'static dyn Logger>(logger) };
+
+			*borrow = Some(logger_ref_static);
+		});
+		LoggerScope { _marker: std::marker::PhantomData, no_drop }
+	}
+}
+
+impl<'a> Drop for LoggerScope<'a> {
+	fn drop(&mut self) {
+		if self.no_drop {
+			return;
+		}
+		TLS_LOGGER.with(|cell| {
+			*cell.borrow_mut() = None;
+		});
+	}
+}
+
 #[cfg(test)]
 mod tests {
 	use crate::ln::types::ChannelId;
 	use crate::sync::Arc;
 	use crate::types::payment::PaymentHash;
-	use crate::util::logger::{Level, Logger, WithContext};
+	use crate::util::logger::{Level, Logger, LoggerScope, WithContext};
 	use crate::util::test_utils::TestLogger;
 	use bitcoin::secp256k1::{PublicKey, Secp256k1, SecretKey};
+
+	#[test]
+	fn logger_scope() {
+		let logger = TestLogger::new();
+		let _scope = LoggerScope::new(&logger);
+		log_info_tls!("Info")
+	}
 
 	#[test]
 	fn test_level_show() {
