@@ -22,6 +22,7 @@ use bitcoin::constants::ChainHash;
 use bitcoin::key::constants::SECRET_KEY_SIZE;
 use bitcoin::network::Network;
 use bitcoin::transaction::Transaction;
+use lightning_macros::log_scope;
 
 use bitcoin::hash_types::{BlockHash, Txid};
 use bitcoin::hashes::hmac::Hmac;
@@ -5442,10 +5443,13 @@ where
 	/// [`UpdateHTLCs`]: MessageSendEvent::UpdateHTLCs
 	/// [`PeerManager::process_events`]: crate::ln::peer_handler::PeerManager::process_events
 	/// [`ChannelMonitorUpdateStatus::InProgress`]: crate::chain::ChannelMonitorUpdateStatus::InProgress
+	#[log_scope]
 	pub fn send_payment(
 		&self, payment_hash: PaymentHash, recipient_onion: RecipientOnionFields,
 		payment_id: PaymentId, route_params: RouteParameters, retry_strategy: Retry,
 	) -> Result<(), RetryableSendFailure> {
+		log_info_tls!("Send payment (TLS)");
+
 		let best_block_height = self.best_block.read().unwrap().height;
 		let _persistence_guard = PersistenceNotifierGuard::notify_on_drop(self);
 		self.pending_outbound_payments.send_payment(
@@ -8876,7 +8880,8 @@ where
 		ComplFunc: FnOnce(
 			Option<u64>,
 			bool,
-		) -> (Option<MonitorUpdateCompletionAction>, Option<RAAMonitorUpdateBlockingAction>),
+		)
+			-> (Option<MonitorUpdateCompletionAction>, Option<RAAMonitorUpdateBlockingAction>),
 	>(
 		&self, prev_hop: HTLCPreviousHopData, payment_preimage: PaymentPreimage,
 		payment_info: Option<PaymentClaimDetails>, attribution_data: Option<AttributionData>,
@@ -8914,7 +8919,8 @@ where
 		ComplFunc: FnOnce(
 			Option<u64>,
 			bool,
-		) -> (Option<MonitorUpdateCompletionAction>, Option<RAAMonitorUpdateBlockingAction>),
+		)
+			-> (Option<MonitorUpdateCompletionAction>, Option<RAAMonitorUpdateBlockingAction>),
 	>(
 		&self, prev_hop: HTLCClaimSource, payment_preimage: PaymentPreimage,
 		payment_info: Option<PaymentClaimDetails>, attribution_data: Option<AttributionData>,
