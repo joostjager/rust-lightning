@@ -4575,8 +4575,7 @@ where
 		}
 
 		{
-			let mut pending_events = self.pending_events.lock().unwrap();
-			pending_events.push_back((events::Event::ChannelClosed {
+			let closed_event = (events::Event::ChannelClosed {
 				channel_id: shutdown_res.channel_id,
 				user_channel_id: shutdown_res.user_channel_id,
 				reason: shutdown_res.closure_reason,
@@ -4584,7 +4583,34 @@ where
 				channel_capacity_sats: Some(shutdown_res.channel_capacity_satoshis),
 				channel_funding_txo: shutdown_res.channel_funding_txo,
 				last_local_balance_msat: Some(shutdown_res.last_local_balance_msat),
-			}, None));
+			}, None);
+
+			let mut per_peer_state = self.per_peer_state.write().unwrap();
+			let mut peer_state_lock = per_peer_state.
+				get_mut(&shutdown_res.counterparty_node_id)
+				.expect("We must always have a peer entry for a peer with which we have channels")
+				.lock().unwrap();
+			let peer_state = &mut *peer_state_lock;
+			let channel = peer_state
+				.channel_by_id.get_mut(&shutdown_res.channel_id)
+				.expect("We should only be finishing the closure of a channel which existed");
+			let funded_chan = channel.as_funded_mut()
+				.expect("We should only be finishing the closure of a funded channel here");
+
+			let update_id = funded_chan.get_latest_unblocked_monitor_update_id();
+			let monitor_update_step = ChannelMonitorUpdateStep::EventGenerated {
+				event: closed_event.0.clone(),
+			};
+			let monitor_update = ChannelMonitorUpdate {
+				update_id,
+				updates: vec![monitor_update_step],
+				channel_id: Some(shutdown_res.channel_id),
+			};
+			handle_new_monitor_update!(self, funded_chan.funding.get_funding_txo().unwrap(),
+						monitor_update, peer_state_lock, peer_state, per_peer_state, funded_chan);
+
+			let mut pending_events = self.pending_events.lock().unwrap();
+			pending_events.push_back(closed_event);
 
 			if let Some(splice_funding_failed) = shutdown_res.splice_funding_failed.take() {
 				pending_events.push_back((events::Event::SpliceFailed {
