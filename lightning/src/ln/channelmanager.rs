@@ -7144,6 +7144,22 @@ where
 					next_packet_details_opt.map(|d| d.next_packet_pubkey),
 				) {
 					Ok(info) => {
+						let to_pending_add = |info| PendingAddHTLCInfo {
+							prev_outbound_scid_alias: incoming_scid_alias,
+							prev_counterparty_node_id: incoming_counterparty_node_id,
+							prev_funding_outpoint: incoming_funding_txo,
+							prev_channel_id: incoming_channel_id,
+							prev_htlc_id: update_add_htlc.htlc_id,
+							prev_user_channel_id: incoming_user_channel_id,
+							forward_info: info,
+						};
+						let intercept_id = || {
+							InterceptId::from_htlc_id_and_chan_id(
+								update_add_htlc.htlc_id,
+								&incoming_channel_id,
+								&incoming_counterparty_node_id,
+							)
+						};
 						let logger = WithContext::from(
 							&self.logger,
 							None,
@@ -7151,33 +7167,20 @@ where
 							Some(update_add_htlc.payment_hash),
 						);
 						if info.routing.should_hold_htlc() {
-							let intercept_id = InterceptId::from_htlc_id_and_chan_id(
-								update_add_htlc.htlc_id,
-								&incoming_channel_id,
-								&incoming_counterparty_node_id,
-							);
 							let mut held_htlcs = self.pending_intercepted_htlcs.lock().unwrap();
+							let intercept_id = intercept_id();
 							match held_htlcs.entry(intercept_id) {
 								hash_map::Entry::Vacant(entry) => {
 									log_debug!(
 										logger,
 										"Intercepted held HTLC with id {intercept_id}, holding until the recipient is online"
 									);
-									let pending_add = PendingAddHTLCInfo {
-										prev_outbound_scid_alias: incoming_scid_alias,
-										prev_counterparty_node_id: incoming_counterparty_node_id,
-										prev_funding_outpoint: incoming_funding_txo,
-										prev_channel_id: incoming_channel_id,
-										prev_htlc_id: update_add_htlc.htlc_id,
-										prev_user_channel_id: incoming_user_channel_id,
-										forward_info: info,
-									};
+									let pending_add = to_pending_add(info);
 									entry.insert(pending_add);
 								},
 								hash_map::Entry::Occupied(_) => {
 									debug_assert!(false, "Should never have two HTLCs with the same channel id and htlc id");
 									log_error!(logger, "Duplicate intercept id for HTLC");
-									debug_assert!(false, "Should never have two HTLCs with the same channel id and htlc id");
 									fail_htlc!(LocalHTLCFailureReason::TemporaryNodeFailure);
 								},
 							}
