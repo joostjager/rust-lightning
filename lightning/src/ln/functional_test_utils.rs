@@ -490,6 +490,7 @@ pub struct TestChanMonCfg {
 	pub fee_estimator: test_utils::TestFeeEstimator,
 	pub chain_source: test_utils::TestChainSource,
 	pub persister: test_utils::TestPersister,
+	pub kv_store: test_utils::TestStore,
 	pub logger: test_utils::TestLogger,
 	pub keys_manager: test_utils::TestKeysInterface,
 	pub scorer: RwLock<test_utils::TestScorer>,
@@ -503,6 +504,7 @@ pub struct NodeCfg<'a> {
 	pub message_router: test_utils::TestMessageRouter<'a>,
 	pub chain_monitor: test_utils::TestChainMonitor<'a>,
 	pub keys_manager: &'a test_utils::TestKeysInterface,
+	pub kv_store: &'a test_utils::TestStore,
 	pub logger: &'a test_utils::TestLogger,
 	pub network_graph: Arc<NetworkGraph<&'a test_utils::TestLogger>>,
 	pub node_seed: [u8; 32],
@@ -512,6 +514,7 @@ pub struct NodeCfg<'a> {
 pub type TestChannelManager<'node_cfg, 'chan_mon_cfg> = ChannelManager<
 	&'node_cfg TestChainMonitor<'chan_mon_cfg>,
 	&'chan_mon_cfg test_utils::TestBroadcaster,
+	&'chan_mon_cfg test_utils::TestStore,
 	&'node_cfg test_utils::TestKeysInterface,
 	&'node_cfg test_utils::TestKeysInterface,
 	&'node_cfg test_utils::TestKeysInterface,
@@ -568,6 +571,7 @@ pub struct Node<'chan_man, 'node_cfg: 'chan_man, 'chan_mon_cfg: 'node_cfg> {
 	pub message_router: &'node_cfg test_utils::TestMessageRouter<'chan_mon_cfg>,
 	pub chain_monitor: &'node_cfg test_utils::TestChainMonitor<'chan_mon_cfg>,
 	pub keys_manager: &'chan_mon_cfg test_utils::TestKeysInterface,
+	pub kv_store: &'chan_mon_cfg test_utils::TestStore,
 	pub node: &'chan_man TestChannelManager<'node_cfg, 'chan_mon_cfg>,
 	pub onion_messenger: TestOnionMessenger<'chan_man, 'node_cfg, 'chan_mon_cfg>,
 	pub network_graph: &'node_cfg NetworkGraph<&'chan_mon_cfg test_utils::TestLogger>,
@@ -737,6 +741,7 @@ pub trait NodeHolder {
 	) -> &ChannelManager<
 		<Self::CM as AChannelManager>::Watch,
 		<Self::CM as AChannelManager>::Broadcaster,
+		<Self::CM as AChannelManager>::KVStore,
 		<Self::CM as AChannelManager>::EntropySource,
 		<Self::CM as AChannelManager>::NodeSigner,
 		<Self::CM as AChannelManager>::SP,
@@ -754,6 +759,7 @@ impl<H: NodeHolder> NodeHolder for &H {
 	) -> &ChannelManager<
 		<Self::CM as AChannelManager>::Watch,
 		<Self::CM as AChannelManager>::Broadcaster,
+		<Self::CM as AChannelManager>::KVStore,
 		<Self::CM as AChannelManager>::EntropySource,
 		<Self::CM as AChannelManager>::NodeSigner,
 		<Self::CM as AChannelManager>::SP,
@@ -877,6 +883,7 @@ impl<'a, 'b, 'c> Drop for Node<'a, 'b, 'c> {
 				}
 
 				let scorer = RwLock::new(test_utils::TestScorer::new());
+				let kv_store = test_utils::TestStore::new(false);
 				let mut w = test_utils::TestVecWriter(Vec::new());
 				self.node.write(&mut w).unwrap();
 				<(
@@ -884,6 +891,7 @@ impl<'a, 'b, 'c> Drop for Node<'a, 'b, 'c> {
 					ChannelManager<
 						&test_utils::TestChainMonitor,
 						&test_utils::TestBroadcaster,
+						&test_utils::TestStore,
 						&test_utils::TestKeysInterface,
 						&test_utils::TestKeysInterface,
 						&test_utils::TestKeysInterface,
@@ -911,6 +919,7 @@ impl<'a, 'b, 'c> Drop for Node<'a, 'b, 'c> {
 						),
 						chain_monitor: self.chain_monitor,
 						tx_broadcaster: &broadcaster,
+						kv_store: &kv_store,
 						logger: &self.logger,
 						channel_monitors,
 						#[cfg(test)]
@@ -1346,6 +1355,7 @@ pub fn _reload_node<'a, 'b, 'c>(
 				message_router: node.message_router,
 				chain_monitor: node.chain_monitor,
 				tx_broadcaster: node.tx_broadcaster,
+				kv_store: node.kv_store,
 				logger: node.logger,
 				channel_monitors,
 				#[cfg(test)]
@@ -4522,6 +4532,7 @@ pub fn create_chanmon_cfgs_internal(
 		let chain_source = test_utils::TestChainSource::new(Network::Testnet);
 		let logger = test_utils::TestLogger::with_id(format!("node {}", i));
 		let persister = test_utils::TestPersister::new();
+		let kv_store = test_utils::TestStore::new(false);
 		let mut seed = [i as u8; 32];
 		if phantom {
 			// We would ideally randomize keys on every test run, but some tests fail in that case.
@@ -4553,6 +4564,7 @@ pub fn create_chanmon_cfgs_internal(
 			chain_source,
 			logger,
 			persister,
+			kv_store,
 			keys_manager,
 			scorer,
 		});
@@ -4602,6 +4614,7 @@ where
 			),
 			chain_monitor,
 			keys_manager: &cfg.keys_manager,
+			kv_store: &cfg.kv_store,
 			node_seed: seed,
 			network_graph,
 			override_init_features: Rc::new(RefCell::new(None)),
@@ -4679,6 +4692,7 @@ pub fn create_node_chanmgrs<'a, 'b>(
 	ChannelManager<
 		&'a TestChainMonitor<'b>,
 		&'b test_utils::TestBroadcaster,
+		&'b test_utils::TestStore,
 		&'a test_utils::TestKeysInterface,
 		&'a test_utils::TestKeysInterface,
 		&'a test_utils::TestKeysInterface,
@@ -4697,6 +4711,7 @@ pub fn create_node_chanmgrs<'a, 'b>(
 			cfgs[i].fee_estimator,
 			&cfgs[i].chain_monitor,
 			cfgs[i].tx_broadcaster,
+			cfgs[i].kv_store,
 			&cfgs[i].router,
 			&cfgs[i].message_router,
 			cfgs[i].logger,
@@ -4723,6 +4738,7 @@ pub fn create_network<'a, 'b: 'a, 'c: 'b>(
 		ChannelManager<
 			&'b TestChainMonitor<'c>,
 			&'c test_utils::TestBroadcaster,
+			&'c test_utils::TestStore,
 			&'b test_utils::TestKeysInterface,
 			&'b test_utils::TestKeysInterface,
 			&'b test_utils::TestKeysInterface,
@@ -4799,6 +4815,7 @@ pub fn create_network<'a, 'b: 'a, 'c: 'b>(
 			message_router: &cfgs[i].message_router,
 			chain_monitor: &cfgs[i].chain_monitor,
 			keys_manager: &cfgs[i].keys_manager,
+			kv_store: cfgs[i].kv_store,
 			node: &chan_mgrs[i],
 			network_graph: cfgs[i].network_graph.as_ref(),
 			gossip_sync,

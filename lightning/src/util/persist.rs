@@ -205,6 +205,32 @@ pub trait KVStoreSync {
 	}
 }
 
+impl<T: KVStoreSync + ?Sized> KVStoreSync for &T {
+	fn read(
+		&self, primary_namespace: &str, secondary_namespace: &str, key: &str,
+	) -> Result<Vec<u8>, io::Error> {
+		(**self).read(primary_namespace, secondary_namespace, key)
+	}
+	fn write(
+		&self, primary_namespace: &str, secondary_namespace: &str, key: &str, buf: Vec<u8>,
+	) -> Result<(), io::Error> {
+		(**self).write(primary_namespace, secondary_namespace, key, buf)
+	}
+	fn remove(
+		&self, primary_namespace: &str, secondary_namespace: &str, key: &str, lazy: bool,
+	) -> Result<(), io::Error> {
+		(**self).remove(primary_namespace, secondary_namespace, key, lazy)
+	}
+	fn list(
+		&self, primary_namespace: &str, secondary_namespace: &str,
+	) -> Result<Vec<String>, io::Error> {
+		(**self).list(primary_namespace, secondary_namespace)
+	}
+	fn commit(&self) -> Result<usize, io::Error> {
+		(**self).commit()
+	}
+}
+
 /// A wrapper around a [`KVStoreSync`] that implements the [`KVStore`] trait. It is not necessary to use this type
 /// directly.
 #[derive(Clone)]
