@@ -1,0 +1,2649 @@
+{
+  "source": {
+    "user": "lightningdevkit",
+    "repo": "rust-lightning",
+    "url": "https://github.com/lightningdevkit/rust-lightning"
+  },
+  "query": {
+    "page":  null,
+    "after": null
+  },
+  "dependents": [
+    {
+      "user": "thelyo",
+      "repo": "lightning",
+      "url": "https://github.com/thelyo/lightning",
+      "stars": 0,
+      "forks": 0
+    },
+    {
+      "user": "OpenAgentsInc",
+      "repo": "openagents",
+      "url": "https://github.com/OpenAgentsInc/openagents",
+      "stars": 341,
+      "forks": 40
+    },
+    {
+      "user": "Offchain-DEX",
+      "repo": "rapid-gossip-sync-server",
+      "url": "https://github.com/Offchain-DEX/rapid-gossip-sync-server",
+      "stars": 1,
+      "forks": 0
+    },
+    {
+      "user": "Offchain-DEX",
+      "repo": "rust-lightning",
+      "url": "https://github.com/Offchain-DEX/rust-lightning",
+      "stars": 1,
+      "forks": 0
+    },
+    {
+      "user": "vincenzopalazzo",
+      "repo": "lightning",
+      "url": "https://github.com/vincenzopalazzo/lightning",
+      "stars": 1,
+      "forks": 0
+    },
+    {
+      "user": "JohnDaWalka",
+      "repo": "lightning",
+      "url": "https://github.com/JohnDaWalka/lightning",
+      "stars": 1,
+      "forks": 0
+    },
+    {
+      "user": "Smallkbill1",
+      "repo": "lightning",
+      "url": "https://github.com/Smallkbill1/lightning",
+      "stars": 0,
+      "forks": 0
+    },
+    {
+      "user": "cashubtc",
+      "repo": "cdk",
+      "url": "https://github.com/cashubtc/cdk",
+      "stars": 197,
+      "forks": 111
+    },
+    {
+      "user": "psavelis",
+      "repo": "shadow-ot",
+      "url": "https://github.com/psavelis/shadow-ot",
+      "stars": 0,
+      "forks": 0
+    },
+    {
+      "user": "OTC15203",
+      "repo": "INNER-BIT",
+      "url": "https://github.com/OTC15203/INNER-BIT",
+      "stars": 0,
+      "forks": 0
+    },
+    {
+      "user": "stevenroose",
+      "repo": "hal",
+      "url": "https://github.com/stevenroose/hal",
+      "stars": 213,
+      "forks": 31
+    },
+    {
+      "user": "jharveyb",
+      "repo": "gossip_observer",
+      "url": "https://github.com/jharveyb/gossip_observer",
+      "stars": 10,
+      "forks": 1
+    },
+    {
+      "user": "cequals",
+      "repo": "lightning-liquidity",
+      "url": "https://github.com/cequals/lightning-liquidity",
+      "stars": 0,
+      "forks": 0
+    },
+    {
+      "user": "proto-at-block",
+      "repo": "bitkey",
+      "url": "https://github.com/proto-at-block/bitkey",
+      "stars": 198,
+      "forks": 31
+    },
+    {
+      "user": "Blockstream",
+      "repo": "lwk",
+      "url": "https://github.com/Blockstream/lwk",
+      "stars": 93,
+      "forks": 41
+    },
+    {
+      "user": "fanquake",
+      "repo": "lightning",
+      "url": "https://github.com/fanquake/lightning",
+      "stars": 1,
+      "forks": 0
+    },
+    {
+      "user": "cdecker",
+      "repo": "lightning",
+      "url": "https://github.com/cdecker/lightning",
+      "stars": 15,
+      "forks": 5
+    },
+    {
+      "user": "PortalTechnologiesInc",
+      "repo": "lib",
+      "url": "https://github.com/PortalTechnologiesInc/lib",
+      "stars": 20,
+      "forks": 5
+    },
+    {
+      "user": "breez",
+      "repo": "breez-sdk-liquid-flutter",
+      "url": "https://github.com/breez/breez-sdk-liquid-flutter",
+      "stars": 3,
+      "forks": 6
+    },
+    {
+      "user": "plastic-forks",
+      "repo": "nixpkgs",
+      "url": "https://github.com/plastic-forks/nixpkgs",
+      "stars": 0,
+      "forks": 0
+    },
+    {
+      "user": "nepet",
+      "repo": "lightning",
+      "url": "https://github.com/nepet/lightning",
+      "stars": 0,
+      "forks": 1
+    },
+    {
+      "user": "goodgollyholly",
+      "repo": "greenlight",
+      "url": "https://github.com/goodgollyholly/greenlight",
+      "stars": 0,
+      "forks": 0
+    },
+    {
+      "user": "americantweaker-png",
+      "repo": "ldk-sample",
+      "url": "https://github.com/americantweaker-png/ldk-sample",
+      "stars": 1,
+      "forks": 0
+    },
+    {
+      "user": "Groestlcoin",
+      "repo": "lightning",
+      "url": "https://github.com/Groestlcoin/lightning",
+      "stars": 0,
+      "forks": 2
+    },
+    {
+      "user": "PrivAtlas",
+      "repo": "lightning",
+      "url": "https://github.com/PrivAtlas/lightning",
+      "stars": 0,
+      "forks": 0
+    },
+    {
+      "user": "alandotcom",
+      "repo": "rust-lightning",
+      "url": "https://github.com/alandotcom/rust-lightning",
+      "stars": 0,
+      "forks": 0
+    },
+    {
+      "user": "ElementsProject",
+      "repo": "lightning",
+      "url": "https://github.com/ElementsProject/lightning",
+      "stars": 3030,
+      "forks": 975
+    },
+    {
+      "user": "kojira",
+      "repo": "nostr-chan",
+      "url": "https://github.com/kojira/nostr-chan",
+      "stars": 14,
+      "forks": 0
+    },
+    {
+      "user": "ark-bitcoin",
+      "repo": "bark",
+      "url": "https://github.com/ark-bitcoin/bark",
+      "stars": 21,
+      "forks": 6
+    },
+    {
+      "user": "bitcoincore-dev",
+      "repo": "bitcoinfuzz-v2",
+      "url": "https://github.com/bitcoincore-dev/bitcoinfuzz-v2",
+      "stars": 0,
+      "forks": 0
+    },
+    {
+      "user": "fedimint",
+      "repo": "ecash-app",
+      "url": "https://github.com/fedimint/ecash-app",
+      "stars": 26,
+      "forks": 9
+    },
+    {
+      "user": "BoltzExchange",
+      "repo": "boltz-backend",
+      "url": "https://github.com/BoltzExchange/boltz-backend",
+      "stars": 168,
+      "forks": 61
+    },
+    {
+      "user": "davidcaseria",
+      "repo": "cdk_flutter",
+      "url": "https://github.com/davidcaseria/cdk_flutter",
+      "stars": 13,
+      "forks": 1
+    },
+    {
+      "user": "thesimplekid",
+      "repo": "ln-regtest-rs",
+      "url": "https://github.com/thesimplekid/ln-regtest-rs",
+      "stars": 0,
+      "forks": 0
+    },
+    {
+      "user": "AtomicFinance",
+      "repo": "node-dlc",
+      "url": "https://github.com/AtomicFinance/node-dlc",
+      "stars": 17,
+      "forks": 11
+    },
+    {
+      "user": "walletd",
+      "repo": "walletd",
+      "url": "https://github.com/walletd/walletd",
+      "stars": 21,
+      "forks": 5
+    },
+    {
+      "user": "AKJUS",
+      "repo": "stable-channels",
+      "url": "https://github.com/AKJUS/stable-channels",
+      "stars": 1,
+      "forks": 0
+    },
+    {
+      "user": "jrakibi",
+      "repo": "skibidi-backend",
+      "url": "https://github.com/jrakibi/skibidi-backend",
+      "stars": 0,
+      "forks": 0
+    },
+    {
+      "user": "Conxian",
+      "repo": "Anya-core",
+      "url": "https://github.com/Conxian/Anya-core",
+      "stars": 0,
+      "forks": 1
+    },
+    {
+      "user": "getAlby",
+      "repo": "ldk-node",
+      "url": "https://github.com/getAlby/ldk-node",
+      "stars": 3,
+      "forks": 0
+    },
+    {
+      "user": "JssDWt",
+      "repo": "breez-sdk-spark",
+      "url": "https://github.com/JssDWt/breez-sdk-spark",
+      "stars": 0,
+      "forks": 0
+    },
+    {
+      "user": "lexe-app",
+      "repo": "lexe-public",
+      "url": "https://github.com/lexe-app/lexe-public",
+      "stars": 64,
+      "forks": 0
+    },
+    {
+      "user": "erickcestari",
+      "repo": "bolt12-offer-decoder",
+      "url": "https://github.com/erickcestari/bolt12-offer-decoder",
+      "stars": 1,
+      "forks": 0
+    },
+    {
+      "user": "GianGuaz256",
+      "repo": "UBA",
+      "url": "https://github.com/GianGuaz256/UBA",
+      "stars": 1,
+      "forks": 0
+    },
+    {
+      "user": "fedibtc",
+      "repo": "fedimint-observer",
+      "url": "https://github.com/fedibtc/fedimint-observer",
+      "stars": 0,
+      "forks": 0
+    },
+    {
+      "user": "bitcoinfuzz",
+      "repo": "bitcoinfuzz",
+      "url": "https://github.com/bitcoinfuzz/bitcoinfuzz",
+      "stars": 65,
+      "forks": 51
+    },
+    {
+      "user": "ernest-money",
+      "repo": "ernest-oracle",
+      "url": "https://github.com/ernest-money/ernest-oracle",
+      "stars": 0,
+      "forks": 0
+    },
+    {
+      "user": "breez",
+      "repo": "breez-sdk-ark",
+      "url": "https://github.com/breez/breez-sdk-ark",
+      "stars": 3,
+      "forks": 2
+    },
+    {
+      "user": "thesimplekid",
+      "repo": "cdk-gateway",
+      "url": "https://github.com/thesimplekid/cdk-gateway",
+      "stars": 1,
+      "forks": 0
+    },
+    {
+      "user": "elnosh",
+      "repo": "wic",
+      "url": "https://github.com/elnosh/wic",
+      "stars": 0,
+      "forks": 0
+    },
+    {
+      "user": "lightningvend",
+      "repo": "vendimint",
+      "url": "https://github.com/lightningvend/vendimint",
+      "stars": 1,
+      "forks": 0
+    },
+    {
+      "user": "ernest-money",
+      "repo": "squawkbox",
+      "url": "https://github.com/ernest-money/squawkbox",
+      "stars": 0,
+      "forks": 0
+    },
+    {
+      "user": "a-mpch",
+      "repo": "ldk-sample-playground",
+      "url": "https://github.com/a-mpch/ldk-sample-playground",
+      "stars": 0,
+      "forks": 0
+    },
+    {
+      "user": "tnull",
+      "repo": "ldk-node-liquidity-mutinynet",
+      "url": "https://github.com/tnull/ldk-node-liquidity-mutinynet",
+      "stars": 0,
+      "forks": 1
+    },
+    {
+      "user": "benthecarman",
+      "repo": "pleblab-ldk-node",
+      "url": "https://github.com/benthecarman/pleblab-ldk-node",
+      "stars": 2,
+      "forks": 1
+    },
+    {
+      "user": "AustinKelsay",
+      "repo": "rust-ldk-sample",
+      "url": "https://github.com/AustinKelsay/rust-ldk-sample",
+      "stars": 0,
+      "forks": 0
+    },
+    {
+      "user": "arturgontijo",
+      "repo": "batcher",
+      "url": "https://github.com/arturgontijo/batcher",
+      "stars": 1,
+      "forks": 0
+    },
+    {
+      "user": "m1sterc001guy",
+      "repo": "diocarbine",
+      "url": "https://github.com/m1sterc001guy/diocarbine",
+      "stars": 0,
+      "forks": 0
+    },
+    {
+      "user": "Yashgupta9330",
+      "repo": "bolt12-offer",
+      "url": "https://github.com/Yashgupta9330/bolt12-offer",
+      "stars": 0,
+      "forks": 0
+    },
+    {
+      "user": "fedimint",
+      "repo": "fedimint",
+      "url": "https://github.com/fedimint/fedimint",
+      "stars": 657,
+      "forks": 258
+    },
+    {
+      "user": "JssDWt",
+      "repo": "breez-sdk-regtest",
+      "url": "https://github.com/JssDWt/breez-sdk-regtest",
+      "stars": 0,
+      "forks": 2
+    },
+    {
+      "user": "SurajNaidu0",
+      "repo": "AtomicLightningExchange",
+      "url": "https://github.com/SurajNaidu0/AtomicLightningExchange",
+      "stars": 2,
+      "forks": 0
+    },
+    {
+      "user": "m1sterc001guy",
+      "repo": "ETLGateway",
+      "url": "https://github.com/m1sterc001guy/ETLGateway",
+      "stars": 0,
+      "forks": 0
+    },
+    {
+      "user": "rust-bitcoin",
+      "repo": "bitcoin-payment-instructions",
+      "url": "https://github.com/rust-bitcoin/bitcoin-payment-instructions",
+      "stars": 10,
+      "forks": 9
+    },
+    {
+      "user": "TheBlueMatt",
+      "repo": "libbtcwallet",
+      "url": "https://github.com/TheBlueMatt/libbtcwallet",
+      "stars": 0,
+      "forks": 1
+    },
+    {
+      "user": "toneloc",
+      "repo": "stable-channels-lsp",
+      "url": "https://github.com/toneloc/stable-channels-lsp",
+      "stars": 0,
+      "forks": 0
+    },
+    {
+      "user": "Beige-Coffee",
+      "repo": "programming-lightning-workshop",
+      "url": "https://github.com/Beige-Coffee/programming-lightning-workshop",
+      "stars": 1,
+      "forks": 0
+    },
+    {
+      "user": "michael1011",
+      "repo": "bolt12-client",
+      "url": "https://github.com/michael1011/bolt12-client",
+      "stars": 2,
+      "forks": 1
+    },
+    {
+      "user": "thesimplekid",
+      "repo": "cashu-lsp",
+      "url": "https://github.com/thesimplekid/cashu-lsp",
+      "stars": 0,
+      "forks": 0
+    },
+    {
+      "user": "Conxian",
+      "repo": "OPSource",
+      "url": "https://github.com/Conxian/OPSource",
+      "stars": 0,
+      "forks": 0
+    },
+    {
+      "user": "botshelomokoka",
+      "repo": "OPSource",
+      "url": "https://github.com/botshelomokoka/OPSource",
+      "stars": 0,
+      "forks": 0
+    },
+    {
+      "user": "dangeross",
+      "repo": "wasm-playground",
+      "url": "https://github.com/dangeross/wasm-playground",
+      "stars": 0,
+      "forks": 0
+    },
+    {
+      "user": "nervosnetwork",
+      "repo": "fiber-autopilot",
+      "url": "https://github.com/nervosnetwork/fiber-autopilot",
+      "stars": 0,
+      "forks": 1
+    },
+    {
+      "user": "Beige-Coffee",
+      "repo": "programming-lightning",
+      "url": "https://github.com/Beige-Coffee/programming-lightning",
+      "stars": 0,
+      "forks": 0
+    },
+    {
+      "user": "tvolk131",
+      "repo": "fedimint-dlc-client",
+      "url": "https://github.com/tvolk131/fedimint-dlc-client",
+      "stars": 2,
+      "forks": 0
+    },
+    {
+      "user": "SurajNaidu0",
+      "repo": "Atomic-Swap-Lightning-Node-with-Lightweight-Bitcoin-Wallet",
+      "url": "https://github.com/SurajNaidu0/Atomic-Swap-Lightning-Node-with-Lightweight-Bitcoin-Wallet",
+      "stars": 0,
+      "forks": 1
+    },
+    {
+      "user": "DhananjayPurohit",
+      "repo": "ngx_l402",
+      "url": "https://github.com/DhananjayPurohit/ngx_l402",
+      "stars": 46,
+      "forks": 4
+    },
+    {
+      "user": "tnull",
+      "repo": "ldk-node-rgs-bug-repro",
+      "url": "https://github.com/tnull/ldk-node-rgs-bug-repro",
+      "stars": 0,
+      "forks": 0
+    },
+    {
+      "user": "tvolk131",
+      "repo": "fedimint-lnv2-remote-client",
+      "url": "https://github.com/tvolk131/fedimint-lnv2-remote-client",
+      "stars": 0,
+      "forks": 0
+    },
+    {
+      "user": "PrivAtlas",
+      "repo": "zk-proof-rust",
+      "url": "https://github.com/PrivAtlas/zk-proof-rust",
+      "stars": 2,
+      "forks": 0
+    },
+    {
+      "user": "toneloc",
+      "repo": "egui",
+      "url": "https://github.com/toneloc/egui",
+      "stars": 0,
+      "forks": 0
+    },
+    {
+      "user": "bennyhodl",
+      "repo": "taproot-dlc",
+      "url": "https://github.com/bennyhodl/taproot-dlc",
+      "stars": 3,
+      "forks": 0
+    },
+    {
+      "user": "cequals",
+      "repo": "mutiny-node",
+      "url": "https://github.com/cequals/mutiny-node",
+      "stars": 0,
+      "forks": 0
+    },
+    {
+      "user": "lightningdevkit",
+      "repo": "ldk-server",
+      "url": "https://github.com/lightningdevkit/ldk-server",
+      "stars": 28,
+      "forks": 21
+    },
+    {
+      "user": "fedibtc",
+      "repo": "ldk-node",
+      "url": "https://github.com/fedibtc/ldk-node",
+      "stars": 0,
+      "forks": 0
+    },
+    {
+      "user": "ditsuke",
+      "repo": "nixpkgs-compat",
+      "url": "https://github.com/ditsuke/nixpkgs-compat",
+      "stars": 4,
+      "forks": 0
+    },
+    {
+      "user": "IBEXDWM",
+      "repo": "mutinynet-faucet-rs",
+      "url": "https://github.com/IBEXDWM/mutinynet-faucet-rs",
+      "stars": 0,
+      "forks": 0
+    },
+    {
+      "user": "edgelesssys",
+      "repo": "nixpkgs",
+      "url": "https://github.com/edgelesssys/nixpkgs",
+      "stars": 0,
+      "forks": 0
+    },
+    {
+      "user": "TheBlueMatt",
+      "repo": "ln-routing-replay",
+      "url": "https://github.com/TheBlueMatt/ln-routing-replay",
+      "stars": 0,
+      "forks": 0
+    },
+    {
+      "user": "bennyhodl",
+      "repo": "adopting-bitcoin-dlcdevkit-workshop",
+      "url": "https://github.com/bennyhodl/adopting-bitcoin-dlcdevkit-workshop",
+      "stars": 0,
+      "forks": 0
+    },
+    {
+      "user": "getAlby",
+      "repo": "hub-recovery",
+      "url": "https://github.com/getAlby/hub-recovery",
+      "stars": 6,
+      "forks": 2
+    },
+    {
+      "user": "m1sterc001guy",
+      "repo": "collab",
+      "url": "https://github.com/m1sterc001guy/collab",
+      "stars": 0,
+      "forks": 0
+    },
+    {
+      "user": "BoltzExchange",
+      "repo": "boltz-client",
+      "url": "https://github.com/BoltzExchange/boltz-client",
+      "stars": 76,
+      "forks": 16
+    },
+    {
+      "user": "Kodylow",
+      "repo": "fedimint-web-hermes",
+      "url": "https://github.com/Kodylow/fedimint-web-hermes",
+      "stars": 0,
+      "forks": 0
+    },
+    {
+      "user": "pineapplehunter",
+      "repo": "nixpkgs",
+      "url": "https://github.com/pineapplehunter/nixpkgs",
+      "stars": 0,
+      "forks": 0
+    },
+    {
+      "user": "keychat-io",
+      "repo": "bot-center",
+      "url": "https://github.com/keychat-io/bot-center",
+      "stars": 0,
+      "forks": 0
+    },
+    {
+      "user": "lightning-signer",
+      "repo": "validating-lightning-signer",
+      "url": "https://github.com/lightning-signer/validating-lightning-signer",
+      "stars": 14,
+      "forks": 3
+    },
+    {
+      "user": "mubarak23",
+      "repo": "smart_ln_wallet",
+      "url": "https://github.com/mubarak23/smart_ln_wallet",
+      "stars": 2,
+      "forks": 0
+    },
+    {
+      "user": "bu5hm4nn",
+      "repo": "gossip-slint",
+      "url": "https://github.com/bu5hm4nn/gossip-slint",
+      "stars": 0,
+      "forks": 0
+    },
+    {
+      "user": "toneloc",
+      "repo": "stable-channels",
+      "url": "https://github.com/toneloc/stable-channels",
+      "stars": 111,
+      "forks": 13
+    },
+    {
+      "user": "Kamillaova",
+      "repo": "nixpkgs-termux",
+      "url": "https://github.com/Kamillaova/nixpkgs-termux",
+      "stars": 1,
+      "forks": 0
+    },
+    {
+      "user": "cequals",
+      "repo": "rapid-gossip-sync-server",
+      "url": "https://github.com/cequals/rapid-gossip-sync-server",
+      "stars": 0,
+      "forks": 0
+    },
+    {
+      "user": "breez",
+      "repo": "swapd",
+      "url": "https://github.com/breez/swapd",
+      "stars": 1,
+      "forks": 1
+    },
+    {
+      "user": "BoltzExchange",
+      "repo": "bolt12-wasm",
+      "url": "https://github.com/BoltzExchange/bolt12-wasm",
+      "stars": 4,
+      "forks": 2
+    },
+    {
+      "user": "lilyinstarlight",
+      "repo": "nixpkgs",
+      "url": "https://github.com/lilyinstarlight/nixpkgs",
+      "stars": 0,
+      "forks": 0
+    },
+    {
+      "user": "DhananjayPurohit",
+      "repo": "l402_middleware",
+      "url": "https://github.com/DhananjayPurohit/l402_middleware",
+      "stars": 8,
+      "forks": 1
+    },
+    {
+      "user": "sbddesign",
+      "repo": "little",
+      "url": "https://github.com/sbddesign/little",
+      "stars": 3,
+      "forks": 1
+    },
+    {
+      "user": "yato-sketch",
+      "repo": "cash-by-invoice",
+      "url": "https://github.com/yato-sketch/cash-by-invoice",
+      "stars": 0,
+      "forks": 0
+    },
+    {
+      "user": "Horus-Org",
+      "repo": "docker-dlc",
+      "url": "https://github.com/Horus-Org/docker-dlc",
+      "stars": 2,
+      "forks": 0
+    },
+    {
+      "user": "dezren39",
+      "repo": "nixpkgs",
+      "url": "https://github.com/dezren39/nixpkgs",
+      "stars": 1,
+      "forks": 0
+    },
+    {
+      "user": "johncantrell97",
+      "repo": "sample-relay-node",
+      "url": "https://github.com/johncantrell97/sample-relay-node",
+      "stars": 0,
+      "forks": 0
+    },
+    {
+      "user": "johncantrell97",
+      "repo": "sample-relay",
+      "url": "https://github.com/johncantrell97/sample-relay",
+      "stars": 0,
+      "forks": 0
+    },
+    {
+      "user": "gudnuf",
+      "repo": "cashu-dlcstr-rs",
+      "url": "https://github.com/gudnuf/cashu-dlcstr-rs",
+      "stars": 3,
+      "forks": 0
+    },
+    {
+      "user": "sbddesign",
+      "repo": "2nodeschillin",
+      "url": "https://github.com/sbddesign/2nodeschillin",
+      "stars": 3,
+      "forks": 0
+    },
+    {
+      "user": "BoltzExchange",
+      "repo": "hold",
+      "url": "https://github.com/BoltzExchange/hold",
+      "stars": 10,
+      "forks": 2
+    },
+    {
+      "user": "w3irdrobot",
+      "repo": "hasmartyzappedtoday",
+      "url": "https://github.com/w3irdrobot/hasmartyzappedtoday",
+      "stars": 3,
+      "forks": 1
+    },
+    {
+      "user": "nanikamado",
+      "repo": "momostr",
+      "url": "https://github.com/nanikamado/momostr",
+      "stars": 21,
+      "forks": 3
+    },
+    {
+      "user": "smancill",
+      "repo": "nixpkgs",
+      "url": "https://github.com/smancill/nixpkgs",
+      "stars": 0,
+      "forks": 0
+    },
+    {
+      "user": "benthecarman",
+      "repo": "rld",
+      "url": "https://github.com/benthecarman/rld",
+      "stars": 5,
+      "forks": 1
+    },
+    {
+      "user": "IroncladDev",
+      "repo": "fedimint-desktop",
+      "url": "https://github.com/IroncladDev/fedimint-desktop",
+      "stars": 3,
+      "forks": 1
+    },
+    {
+      "user": "breez",
+      "repo": "breez-sdk-liquid-docs",
+      "url": "https://github.com/breez/breez-sdk-liquid-docs",
+      "stars": 5,
+      "forks": 6
+    },
+    {
+      "user": "fedibtc",
+      "repo": "fedimint",
+      "url": "https://github.com/fedibtc/fedimint",
+      "stars": 0,
+      "forks": 0
+    },
+    {
+      "user": "arangoml",
+      "repo": "phenolrs",
+      "url": "https://github.com/arangoml/phenolrs",
+      "stars": 1,
+      "forks": 1
+    },
+    {
+      "user": "keychat-io",
+      "repo": "keychat_rust_ffi_plugin",
+      "url": "https://github.com/keychat-io/keychat_rust_ffi_plugin",
+      "stars": 2,
+      "forks": 0
+    },
+    {
+      "user": "f321x",
+      "repo": "cashu-escrow-kit",
+      "url": "https://github.com/f321x/cashu-escrow-kit",
+      "stars": 14,
+      "forks": 2
+    },
+    {
+      "user": "cequals",
+      "repo": "ldk-node",
+      "url": "https://github.com/cequals/ldk-node",
+      "stars": 0,
+      "forks": 0
+    },
+    {
+      "user": "thesimplekid",
+      "repo": "cdk-tps",
+      "url": "https://github.com/thesimplekid/cdk-tps",
+      "stars": 0,
+      "forks": 0
+    },
+    {
+      "user": "rust-cashu",
+      "repo": "cdk",
+      "url": "https://github.com/rust-cashu/cdk",
+      "stars": 2,
+      "forks": 1
+    },
+    {
+      "user": "tnull",
+      "repo": "ldk-node-liquidity-poc-local-payer",
+      "url": "https://github.com/tnull/ldk-node-liquidity-poc-local-payer",
+      "stars": 0,
+      "forks": 1
+    },
+    {
+      "user": "tnull",
+      "repo": "ldk-node-liquidity-poc-local",
+      "url": "https://github.com/tnull/ldk-node-liquidity-poc-local",
+      "stars": 0,
+      "forks": 0
+    },
+    {
+      "user": "PrivAtlas",
+      "repo": "HashPool",
+      "url": "https://github.com/PrivAtlas/HashPool",
+      "stars": 10,
+      "forks": 4
+    },
+    {
+      "user": "mikedilger",
+      "repo": "relay-manager",
+      "url": "https://github.com/mikedilger/relay-manager",
+      "stars": 1,
+      "forks": 1
+    },
+    {
+      "user": "lescuer97",
+      "repo": "cdk_blind_sig_dleq_test",
+      "url": "https://github.com/lescuer97/cdk_blind_sig_dleq_test",
+      "stars": 0,
+      "forks": 0
+    },
+    {
+      "user": "breez",
+      "repo": "trampoline",
+      "url": "https://github.com/breez/trampoline",
+      "stars": 0,
+      "forks": 0
+    },
+    {
+      "user": "tnull",
+      "repo": "ldk-node-hack-server",
+      "url": "https://github.com/tnull/ldk-node-hack-server",
+      "stars": 0,
+      "forks": 4
+    },
+    {
+      "user": "tnull",
+      "repo": "ldk-node-hack",
+      "url": "https://github.com/tnull/ldk-node-hack",
+      "stars": 0,
+      "forks": 2
+    },
+    {
+      "user": "justin-malonson",
+      "repo": "fedimint",
+      "url": "https://github.com/justin-malonson/fedimint",
+      "stars": 0,
+      "forks": 0
+    },
+    {
+      "user": "thesimplekid",
+      "repo": "iced-cashu",
+      "url": "https://github.com/thesimplekid/iced-cashu",
+      "stars": 3,
+      "forks": 0
+    },
+    {
+      "user": "thesimplekid",
+      "repo": "cashu-tool",
+      "url": "https://github.com/thesimplekid/cashu-tool",
+      "stars": 1,
+      "forks": 0
+    },
+    {
+      "user": "tnull",
+      "repo": "ldk-node-offers-receive-test",
+      "url": "https://github.com/tnull/ldk-node-offers-receive-test",
+      "stars": 0,
+      "forks": 0
+    },
+    {
+      "user": "EthnTuttle",
+      "repo": "toast",
+      "url": "https://github.com/EthnTuttle/toast",
+      "stars": 0,
+      "forks": 0
+    },
+    {
+      "user": "Kodylow",
+      "repo": "coincaddies",
+      "url": "https://github.com/Kodylow/coincaddies",
+      "stars": 1,
+      "forks": 1
+    },
+    {
+      "user": "thesimplekid",
+      "repo": "x-cashu-search",
+      "url": "https://github.com/thesimplekid/x-cashu-search",
+      "stars": 1,
+      "forks": 0
+    },
+    {
+      "user": "breez",
+      "repo": "breez-sdk-liquid",
+      "url": "https://github.com/breez/breez-sdk-liquid",
+      "stars": 72,
+      "forks": 29
+    },
+    {
+      "user": "HarborWallet",
+      "repo": "harbor",
+      "url": "https://github.com/HarborWallet/harbor",
+      "stars": 177,
+      "forks": 27
+    },
+    {
+      "user": "mikedilger",
+      "repo": "relay-tester",
+      "url": "https://github.com/mikedilger/relay-tester",
+      "stars": 18,
+      "forks": 2
+    },
+    {
+      "user": "fwastring",
+      "repo": "fwpkgs",
+      "url": "https://github.com/fwastring/fwpkgs",
+      "stars": 0,
+      "forks": 0
+    },
+    {
+      "user": "bennyhodl",
+      "repo": "dlcdevkit",
+      "url": "https://github.com/bennyhodl/dlcdevkit",
+      "stars": 33,
+      "forks": 8
+    },
+    {
+      "user": "Kodylow",
+      "repo": "pnyxtr",
+      "url": "https://github.com/Kodylow/pnyxtr",
+      "stars": 2,
+      "forks": 0
+    },
+    {
+      "user": "bitcoin-numeraire",
+      "repo": "swissknife",
+      "url": "https://github.com/bitcoin-numeraire/swissknife",
+      "stars": 13,
+      "forks": 2
+    },
+    {
+      "user": "ok300",
+      "repo": "breez-sdk",
+      "url": "https://github.com/ok300/breez-sdk",
+      "stars": 0,
+      "forks": 0
+    },
+    {
+      "user": "harsh-ps-2003",
+      "repo": "escrow",
+      "url": "https://github.com/harsh-ps-2003/escrow",
+      "stars": 3,
+      "forks": 0
+    },
+    {
+      "user": "LN-Zap",
+      "repo": "lndk",
+      "url": "https://github.com/LN-Zap/lndk",
+      "stars": 0,
+      "forks": 0
+    },
+    {
+      "user": "Kodylow",
+      "repo": "matrixbots",
+      "url": "https://github.com/Kodylow/matrixbots",
+      "stars": 0,
+      "forks": 0
+    },
+    {
+      "user": "dunxen",
+      "repo": "pors",
+      "url": "https://github.com/dunxen/pors",
+      "stars": 0,
+      "forks": 0
+    },
+    {
+      "user": "stutxo",
+      "repo": "btcplusplus",
+      "url": "https://github.com/stutxo/btcplusplus",
+      "stars": 0,
+      "forks": 0
+    },
+    {
+      "user": "bennyhodl",
+      "repo": "dlcat",
+      "url": "https://github.com/bennyhodl/dlcat",
+      "stars": 5,
+      "forks": 4
+    },
+    {
+      "user": "Dochinds",
+      "repo": "rust-lightning",
+      "url": "https://github.com/Dochinds/rust-lightning",
+      "stars": 1,
+      "forks": 0
+    },
+    {
+      "user": "akitamiabtc",
+      "repo": "yuv-lightning",
+      "url": "https://github.com/akitamiabtc/yuv-lightning",
+      "stars": 5,
+      "forks": 0
+    },
+    {
+      "user": "RandyMcMillan",
+      "repo": "gnostr-connect",
+      "url": "https://github.com/RandyMcMillan/gnostr-connect",
+      "stars": 0,
+      "forks": 0
+    },
+    {
+      "user": "akitamiabtc",
+      "repo": "yuv-lightning-ldk-sample",
+      "url": "https://github.com/akitamiabtc/yuv-lightning-ldk-sample",
+      "stars": 1,
+      "forks": 0
+    },
+    {
+      "user": "lord2anil",
+      "repo": "fedimint-dummy",
+      "url": "https://github.com/lord2anil/fedimint-dummy",
+      "stars": 0,
+      "forks": 0
+    },
+    {
+      "user": "johncantrell97",
+      "repo": "lspsd",
+      "url": "https://github.com/johncantrell97/lspsd",
+      "stars": 0,
+      "forks": 0
+    },
+    {
+      "user": "sr-gi",
+      "repo": "attackln",
+      "url": "https://github.com/sr-gi/attackln",
+      "stars": 1,
+      "forks": 0
+    },
+    {
+      "user": "theivess",
+      "repo": "lnrod",
+      "url": "https://github.com/theivess/lnrod",
+      "stars": 0,
+      "forks": 0
+    },
+    {
+      "user": "Bitcoin-Deveopment",
+      "repo": "ldk-node-sample",
+      "url": "https://github.com/Bitcoin-Deveopment/ldk-node-sample",
+      "stars": 0,
+      "forks": 0
+    },
+    {
+      "user": "MutinyWallet",
+      "repo": "blinded-hermes",
+      "url": "https://github.com/MutinyWallet/blinded-hermes",
+      "stars": 6,
+      "forks": 4
+    },
+    {
+      "user": "tweag",
+      "repo": "nixpkgs",
+      "url": "https://github.com/tweag/nixpkgs",
+      "stars": 1,
+      "forks": 0
+    },
+    {
+      "user": "orbitalturtle",
+      "repo": "watchtower-tools",
+      "url": "https://github.com/orbitalturtle/watchtower-tools",
+      "stars": 0,
+      "forks": 0
+    },
+    {
+      "user": "daywalker90",
+      "repo": "qwert",
+      "url": "https://github.com/daywalker90/qwert",
+      "stars": 0,
+      "forks": 0
+    },
+    {
+      "user": "MostroP2P",
+      "repo": "mostro",
+      "url": "https://github.com/MostroP2P/mostro",
+      "stars": 266,
+      "forks": 42
+    },
+    {
+      "user": "elsirion",
+      "repo": "fedimint-observer",
+      "url": "https://github.com/elsirion/fedimint-observer",
+      "stars": 13,
+      "forks": 12
+    },
+    {
+      "user": "Jem256",
+      "repo": "tipjar",
+      "url": "https://github.com/Jem256/tipjar",
+      "stars": 0,
+      "forks": 0
+    },
+    {
+      "user": "tnull",
+      "repo": "ldk-node-om-support-counter",
+      "url": "https://github.com/tnull/ldk-node-om-support-counter",
+      "stars": 0,
+      "forks": 0
+    },
+    {
+      "user": "fedimint",
+      "repo": "fedimint-clientd",
+      "url": "https://github.com/fedimint/fedimint-clientd",
+      "stars": 12,
+      "forks": 13
+    },
+    {
+      "user": "benthecarman",
+      "repo": "ldk-node-cashu-mint",
+      "url": "https://github.com/benthecarman/ldk-node-cashu-mint",
+      "stars": 3,
+      "forks": 1
+    },
+    {
+      "user": "nervosnetwork",
+      "repo": "fiber",
+      "url": "https://github.com/nervosnetwork/fiber",
+      "stars": 44,
+      "forks": 16
+    },
+    {
+      "user": "mikedilger",
+      "repo": "nostr-probe",
+      "url": "https://github.com/mikedilger/nostr-probe",
+      "stars": 5,
+      "forks": 1
+    },
+    {
+      "user": "tsauvajon",
+      "repo": "lnurl_tests",
+      "url": "https://github.com/tsauvajon/lnurl_tests",
+      "stars": 0,
+      "forks": 0
+    },
+    {
+      "user": "andrei-21",
+      "repo": "liquid-address",
+      "url": "https://github.com/andrei-21/liquid-address",
+      "stars": 2,
+      "forks": 0
+    },
+    {
+      "user": "csmarc",
+      "repo": "FlashFund",
+      "url": "https://github.com/csmarc/FlashFund",
+      "stars": 1,
+      "forks": 0
+    },
+    {
+      "user": "Kodylow",
+      "repo": "Breez-SDK-Workshop",
+      "url": "https://github.com/Kodylow/Breez-SDK-Workshop",
+      "stars": 1,
+      "forks": 0
+    },
+    {
+      "user": "m1sterc001guy",
+      "repo": "roastr",
+      "url": "https://github.com/m1sterc001guy/roastr",
+      "stars": 18,
+      "forks": 4
+    },
+    {
+      "user": "nodetec",
+      "repo": "keystache",
+      "url": "https://github.com/nodetec/keystache",
+      "stars": 18,
+      "forks": 2
+    },
+    {
+      "user": "EthnTuttle",
+      "repo": "fedimint-prediction-market",
+      "url": "https://github.com/EthnTuttle/fedimint-prediction-market",
+      "stars": 0,
+      "forks": 0
+    },
+    {
+      "user": "jbesraa",
+      "repo": "mobile-wallet",
+      "url": "https://github.com/jbesraa/mobile-wallet",
+      "stars": 0,
+      "forks": 0
+    },
+    {
+      "user": "jbesraa",
+      "repo": "ldk-node-rpc",
+      "url": "https://github.com/jbesraa/ldk-node-rpc",
+      "stars": 1,
+      "forks": 1
+    },
+    {
+      "user": "ubbabeck",
+      "repo": "breez-sdk-docs",
+      "url": "https://github.com/ubbabeck/breez-sdk-docs",
+      "stars": 0,
+      "forks": 0
+    },
+    {
+      "user": "benthecarman",
+      "repo": "wasm-dvm",
+      "url": "https://github.com/benthecarman/wasm-dvm",
+      "stars": 6,
+      "forks": 1
+    },
+    {
+      "user": "Kodylow",
+      "repo": "teachimint",
+      "url": "https://github.com/Kodylow/teachimint",
+      "stars": 0,
+      "forks": 1
+    },
+    {
+      "user": "MutinyWallet",
+      "repo": "note-duel",
+      "url": "https://github.com/MutinyWallet/note-duel",
+      "stars": 6,
+      "forks": 1
+    },
+    {
+      "user": "cequals",
+      "repo": "rust-lightning",
+      "url": "https://github.com/cequals/rust-lightning",
+      "stars": 0,
+      "forks": 0
+    },
+    {
+      "user": "psyberfly",
+      "repo": "swappy",
+      "url": "https://github.com/psyberfly/swappy",
+      "stars": 5,
+      "forks": 0
+    },
+    {
+      "user": "MutinyWallet",
+      "repo": "note-duel-backend",
+      "url": "https://github.com/MutinyWallet/note-duel-backend",
+      "stars": 1,
+      "forks": 0
+    },
+    {
+      "user": "Kodylow",
+      "repo": "multimint",
+      "url": "https://github.com/Kodylow/multimint",
+      "stars": 1,
+      "forks": 1
+    },
+    {
+      "user": "RGB-WG",
+      "repo": "rgb-node",
+      "url": "https://github.com/RGB-WG/rgb-node",
+      "stars": 151,
+      "forks": 42
+    },
+    {
+      "user": "RGB-Tools",
+      "repo": "rgb-lightning-sample",
+      "url": "https://github.com/RGB-Tools/rgb-lightning-sample",
+      "stars": 47,
+      "forks": 10
+    },
+    {
+      "user": "civkit",
+      "repo": "orage",
+      "url": "https://github.com/civkit/orage",
+      "stars": 16,
+      "forks": 1
+    },
+    {
+      "user": "Kodylow",
+      "repo": "fedimint-http",
+      "url": "https://github.com/Kodylow/fedimint-http",
+      "stars": 10,
+      "forks": 12
+    },
+    {
+      "user": "vincenzopalazzo",
+      "repo": "lampo.rs",
+      "url": "https://github.com/vincenzopalazzo/lampo.rs",
+      "stars": 60,
+      "forks": 25
+    },
+    {
+      "user": "Kodylow",
+      "repo": "bullpen-old",
+      "url": "https://github.com/Kodylow/bullpen-old",
+      "stars": 0,
+      "forks": 0
+    },
+    {
+      "user": "BitRGB",
+      "repo": "rgb-lightning-node",
+      "url": "https://github.com/BitRGB/rgb-lightning-node",
+      "stars": 3,
+      "forks": 1
+    },
+    {
+      "user": "thesimplekid",
+      "repo": "crabstash",
+      "url": "https://github.com/thesimplekid/crabstash",
+      "stars": 4,
+      "forks": 0
+    },
+    {
+      "user": "SatoshiPortal",
+      "repo": "boltz-rust",
+      "url": "https://github.com/SatoshiPortal/boltz-rust",
+      "stars": 39,
+      "forks": 21
+    },
+    {
+      "user": "AustinKelsay",
+      "repo": "ldk-node-example",
+      "url": "https://github.com/AustinKelsay/ldk-node-example",
+      "stars": 0,
+      "forks": 0
+    },
+    {
+      "user": "imaginator",
+      "repo": "lightning-kld",
+      "url": "https://github.com/imaginator/lightning-kld",
+      "stars": 0,
+      "forks": 0
+    },
+    {
+      "user": "torogozpay",
+      "repo": "api-lightning",
+      "url": "https://github.com/torogozpay/api-lightning",
+      "stars": 1,
+      "forks": 0
+    },
+    {
+      "user": "EthnTuttle",
+      "repo": "FROSTr-mint",
+      "url": "https://github.com/EthnTuttle/FROSTr-mint",
+      "stars": 0,
+      "forks": 0
+    },
+    {
+      "user": "motxx",
+      "repo": "warikan-sats-backend",
+      "url": "https://github.com/motxx/warikan-sats-backend",
+      "stars": 0,
+      "forks": 0
+    },
+    {
+      "user": "stakwork",
+      "repo": "sphinx-swarm",
+      "url": "https://github.com/stakwork/sphinx-swarm",
+      "stars": 9,
+      "forks": 5
+    },
+    {
+      "user": "optout21",
+      "repo": "ldk-node-sample",
+      "url": "https://github.com/optout21/ldk-node-sample",
+      "stars": 8,
+      "forks": 2
+    },
+    {
+      "user": "duguowei1000",
+      "repo": "fedi_dev",
+      "url": "https://github.com/duguowei1000/fedi_dev",
+      "stars": 0,
+      "forks": 0
+    },
+    {
+      "user": "breez",
+      "repo": "breez-sdk-docs",
+      "url": "https://github.com/breez/breez-sdk-docs",
+      "stars": 4,
+      "forks": 7
+    },
+    {
+      "user": "Kodylow",
+      "repo": "botimint",
+      "url": "https://github.com/Kodylow/botimint",
+      "stars": 0,
+      "forks": 0
+    },
+    {
+      "user": "RGB-Tools",
+      "repo": "rgb-node",
+      "url": "https://github.com/RGB-Tools/rgb-node",
+      "stars": 0,
+      "forks": 0
+    },
+    {
+      "user": "SachinMeier",
+      "repo": "looper",
+      "url": "https://github.com/SachinMeier/looper",
+      "stars": 2,
+      "forks": 1
+    },
+    {
+      "user": "bennyhodl",
+      "repo": "benln",
+      "url": "https://github.com/bennyhodl/benln",
+      "stars": 0,
+      "forks": 0
+    },
+    {
+      "user": "Resolvr-io",
+      "repo": "escrow",
+      "url": "https://github.com/Resolvr-io/escrow",
+      "stars": 6,
+      "forks": 4
+    },
+    {
+      "user": "mikedilger",
+      "repo": "chorus",
+      "url": "https://github.com/mikedilger/chorus",
+      "stars": 78,
+      "forks": 17
+    },
+    {
+      "user": "MutinyWallet",
+      "repo": "mutiny-data-recovery",
+      "url": "https://github.com/MutinyWallet/mutiny-data-recovery",
+      "stars": 2,
+      "forks": 0
+    },
+    {
+      "user": "cicciord",
+      "repo": "breez_sdk_3hour_workshop",
+      "url": "https://github.com/cicciord/breez_sdk_3hour_workshop",
+      "stars": 0,
+      "forks": 0
+    },
+    {
+      "user": "bennyhodl",
+      "repo": "bitender",
+      "url": "https://github.com/bennyhodl/bitender",
+      "stars": 1,
+      "forks": 0
+    },
+    {
+      "user": "JssDWt",
+      "repo": "breez_sdk_3hour_workshop",
+      "url": "https://github.com/JssDWt/breez_sdk_3hour_workshop",
+      "stars": 0,
+      "forks": 0
+    },
+    {
+      "user": "breez",
+      "repo": "breez-sdk-examples",
+      "url": "https://github.com/breez/breez-sdk-examples",
+      "stars": 0,
+      "forks": 0
+    },
+    {
+      "user": "bennyhodl",
+      "repo": "kormir",
+      "url": "https://github.com/bennyhodl/kormir",
+      "stars": 7,
+      "forks": 4
+    },
+    {
+      "user": "mikedilger",
+      "repo": "relay-rank",
+      "url": "https://github.com/mikedilger/relay-rank",
+      "stars": 1,
+      "forks": 0
+    },
+    {
+      "user": "jbesraa",
+      "repo": "ldk-node-desktop",
+      "url": "https://github.com/jbesraa/ldk-node-desktop",
+      "stars": 4,
+      "forks": 1
+    },
+    {
+      "user": "get10101",
+      "repo": "10101-PoC",
+      "url": "https://github.com/get10101/10101-PoC",
+      "stars": 16,
+      "forks": 2
+    },
+    {
+      "user": "fiksn",
+      "repo": "gossiper",
+      "url": "https://github.com/fiksn/gossiper",
+      "stars": 5,
+      "forks": 2
+    },
+    {
+      "user": "Kodylow",
+      "repo": "matador",
+      "url": "https://github.com/Kodylow/matador",
+      "stars": 8,
+      "forks": 5
+    },
+    {
+      "user": "alecchendev",
+      "repo": "saturday-wallet",
+      "url": "https://github.com/alecchendev/saturday-wallet",
+      "stars": 0,
+      "forks": 0
+    },
+    {
+      "user": "bennyhodl",
+      "repo": "benln-custom",
+      "url": "https://github.com/bennyhodl/benln-custom",
+      "stars": 0,
+      "forks": 0
+    },
+    {
+      "user": "bitcoin-dev-project",
+      "repo": "sim-ln",
+      "url": "https://github.com/bitcoin-dev-project/sim-ln",
+      "stars": 78,
+      "forks": 38
+    },
+    {
+      "user": "RGB-Tools",
+      "repo": "rgb-lightning-node",
+      "url": "https://github.com/RGB-Tools/rgb-lightning-node",
+      "stars": 35,
+      "forks": 33
+    },
+    {
+      "user": "elsirion",
+      "repo": "webimint-rs",
+      "url": "https://github.com/elsirion/webimint-rs",
+      "stars": 20,
+      "forks": 10
+    },
+    {
+      "user": "thesimplekid",
+      "repo": "cashcrab-pos",
+      "url": "https://github.com/thesimplekid/cashcrab-pos",
+      "stars": 0,
+      "forks": 0
+    },
+    {
+      "user": "lnd3v",
+      "repo": "greenlight_sign_verify",
+      "url": "https://github.com/lnd3v/greenlight_sign_verify",
+      "stars": 0,
+      "forks": 0
+    },
+    {
+      "user": "42Pupusas",
+      "repo": "RoadRunner",
+      "url": "https://github.com/42Pupusas/RoadRunner",
+      "stars": 4,
+      "forks": 1
+    },
+    {
+      "user": "maxpolizzo",
+      "repo": "rust-dlc",
+      "url": "https://github.com/maxpolizzo/rust-dlc",
+      "stars": 0,
+      "forks": 0
+    },
+    {
+      "user": "benthecarman",
+      "repo": "nwc-proxy",
+      "url": "https://github.com/benthecarman/nwc-proxy",
+      "stars": 0,
+      "forks": 0
+    },
+    {
+      "user": "benthecarman",
+      "repo": "lnurl-server",
+      "url": "https://github.com/benthecarman/lnurl-server",
+      "stars": 9,
+      "forks": 7
+    },
+    {
+      "user": "benthecarman",
+      "repo": "zapple-pay-backend",
+      "url": "https://github.com/benthecarman/zapple-pay-backend",
+      "stars": 15,
+      "forks": 2
+    },
+    {
+      "user": "mikedilger",
+      "repo": "nostr-bins",
+      "url": "https://github.com/mikedilger/nostr-bins",
+      "stars": 2,
+      "forks": 1
+    },
+    {
+      "user": "V0nMis3s",
+      "repo": "rgb-minting-service",
+      "url": "https://github.com/V0nMis3s/rgb-minting-service",
+      "stars": 6,
+      "forks": 0
+    },
+    {
+      "user": "MutinyWallet",
+      "repo": "mutinynet-faucet-rs",
+      "url": "https://github.com/MutinyWallet/mutinynet-faucet-rs",
+      "stars": 2,
+      "forks": 5
+    },
+    {
+      "user": "LukasBahrenberg",
+      "repo": "rgb-minting-service",
+      "url": "https://github.com/LukasBahrenberg/rgb-minting-service",
+      "stars": 0,
+      "forks": 0
+    },
+    {
+      "user": "thesimplekid",
+      "repo": "cashu-lnurl",
+      "url": "https://github.com/thesimplekid/cashu-lnurl",
+      "stars": 13,
+      "forks": 1
+    },
+    {
+      "user": "mikedilger",
+      "repo": "gossip",
+      "url": "https://github.com/mikedilger/gossip",
+      "stars": 830,
+      "forks": 92
+    },
+    {
+      "user": "daywalker90",
+      "repo": "lightning",
+      "url": "https://github.com/daywalker90/lightning",
+      "stars": 1,
+      "forks": 0
+    },
+    {
+      "user": "elsirion",
+      "repo": "altpay",
+      "url": "https://github.com/elsirion/altpay",
+      "stars": 0,
+      "forks": 0
+    },
+    {
+      "user": "ffaex",
+      "repo": "altpay",
+      "url": "https://github.com/ffaex/altpay",
+      "stars": 1,
+      "forks": 1
+    },
+    {
+      "user": "thesimplekid",
+      "repo": "cashcrab",
+      "url": "https://github.com/thesimplekid/cashcrab",
+      "stars": 21,
+      "forks": 2
+    },
+    {
+      "user": "benthecarman",
+      "repo": "nostr-wallet-connect-lnd",
+      "url": "https://github.com/benthecarman/nostr-wallet-connect-lnd",
+      "stars": 23,
+      "forks": 9
+    },
+    {
+      "user": "tnull",
+      "repo": "ldk-node-jumpstart",
+      "url": "https://github.com/tnull/ldk-node-jumpstart",
+      "stars": 0,
+      "forks": 0
+    },
+    {
+      "user": "dlc-markets",
+      "repo": "pythia",
+      "url": "https://github.com/dlc-markets/pythia",
+      "stars": 3,
+      "forks": 0
+    },
+    {
+      "user": "tnull",
+      "repo": "minifaucet",
+      "url": "https://github.com/tnull/minifaucet",
+      "stars": 1,
+      "forks": 1
+    },
+    {
+      "user": "ValuedMammal",
+      "repo": "waila-cli",
+      "url": "https://github.com/ValuedMammal/waila-cli",
+      "stars": 3,
+      "forks": 0
+    },
+    {
+      "user": "LtbLightning",
+      "repo": "ldk-node-flutter",
+      "url": "https://github.com/LtbLightning/ldk-node-flutter",
+      "stars": 46,
+      "forks": 14
+    },
+    {
+      "user": "thesimplekid",
+      "repo": "cln-nostr-wallet-connect",
+      "url": "https://github.com/thesimplekid/cln-nostr-wallet-connect",
+      "stars": 15,
+      "forks": 0
+    },
+    {
+      "user": "johncantrell97",
+      "repo": "programming-lightning",
+      "url": "https://github.com/johncantrell97/programming-lightning",
+      "stars": 0,
+      "forks": 1
+    },
+    {
+      "user": "RGB-Tools",
+      "repo": "rust-lightning",
+      "url": "https://github.com/RGB-Tools/rust-lightning",
+      "stars": 5,
+      "forks": 10
+    },
+    {
+      "user": "bennyhodl",
+      "repo": "houston",
+      "url": "https://github.com/bennyhodl/houston",
+      "stars": 0,
+      "forks": 0
+    },
+    {
+      "user": "NikoayDavydkin",
+      "repo": "myProject",
+      "url": "https://github.com/NikoayDavydkin/myProject",
+      "stars": 0,
+      "forks": 0
+    },
+    {
+      "user": "RGB-Tools",
+      "repo": "rgb-lib-stress-test",
+      "url": "https://github.com/RGB-Tools/rgb-lib-stress-test",
+      "stars": 2,
+      "forks": 1
+    },
+    {
+      "user": "nope78787",
+      "repo": "stabilitypool",
+      "url": "https://github.com/nope78787/stabilitypool",
+      "stars": 8,
+      "forks": 4
+    },
+    {
+      "user": "benthecarman",
+      "repo": "zap-tunnel",
+      "url": "https://github.com/benthecarman/zap-tunnel",
+      "stars": 16,
+      "forks": 1
+    },
+    {
+      "user": "lightning-signer",
+      "repo": "vls",
+      "url": "https://github.com/lightning-signer/vls",
+      "stars": 1,
+      "forks": 0
+    },
+    {
+      "user": "johncantrell97",
+      "repo": "ldk-simple",
+      "url": "https://github.com/johncantrell97/ldk-simple",
+      "stars": 1,
+      "forks": 1
+    },
+    {
+      "user": "Velas-Commerce",
+      "repo": "RN-Breez-SDK-Demo",
+      "url": "https://github.com/Velas-Commerce/RN-Breez-SDK-Demo",
+      "stars": 1,
+      "forks": 0
+    },
+    {
+      "user": "MutinyWallet",
+      "repo": "bitcoin-waila",
+      "url": "https://github.com/MutinyWallet/bitcoin-waila",
+      "stars": 30,
+      "forks": 6
+    },
+    {
+      "user": "LNP-BP",
+      "repo": "invoices",
+      "url": "https://github.com/LNP-BP/invoices",
+      "stars": 8,
+      "forks": 5
+    },
+    {
+      "user": "lndk-org",
+      "repo": "lndk",
+      "url": "https://github.com/lndk-org/lndk",
+      "stars": 101,
+      "forks": 27
+    },
+    {
+      "user": "thesimplekid",
+      "repo": "zap-to-relay",
+      "url": "https://github.com/thesimplekid/zap-to-relay",
+      "stars": 1,
+      "forks": 0
+    },
+    {
+      "user": "fedimint",
+      "repo": "fedimint-custom-modules-example",
+      "url": "https://github.com/fedimint/fedimint-custom-modules-example",
+      "stars": 15,
+      "forks": 17
+    },
+    {
+      "user": "jbesraa",
+      "repo": "light-node",
+      "url": "https://github.com/jbesraa/light-node",
+      "stars": 0,
+      "forks": 0
+    },
+    {
+      "user": "jkczyz",
+      "repo": "offer-examples",
+      "url": "https://github.com/jkczyz/offer-examples",
+      "stars": 0,
+      "forks": 0
+    },
+    {
+      "user": "MostroP2P",
+      "repo": "mostro-cli",
+      "url": "https://github.com/MostroP2P/mostro-cli",
+      "stars": 33,
+      "forks": 12
+    },
+    {
+      "user": "AnthonyRonning",
+      "repo": "LNsploit",
+      "url": "https://github.com/AnthonyRonning/LNsploit",
+      "stars": 20,
+      "forks": 5
+    },
+    {
+      "user": "freddiekrugerrand",
+      "repo": "onion-size",
+      "url": "https://github.com/freddiekrugerrand/onion-size",
+      "stars": 1,
+      "forks": 0
+    },
+    {
+      "user": "civkit",
+      "repo": "staking-credentials",
+      "url": "https://github.com/civkit/staking-credentials",
+      "stars": 7,
+      "forks": 4
+    },
+    {
+      "user": "satimoto",
+      "repo": "breez-sdk",
+      "url": "https://github.com/satimoto/breez-sdk",
+      "stars": 0,
+      "forks": 1
+    },
+    {
+      "user": "matthiasdebernardini",
+      "repo": "osmium-webapi",
+      "url": "https://github.com/matthiasdebernardini/osmium-webapi",
+      "stars": 1,
+      "forks": 0
+    },
+    {
+      "user": "td-bn",
+      "repo": "bitcoin-rust-workshop",
+      "url": "https://github.com/td-bn/bitcoin-rust-workshop",
+      "stars": 0,
+      "forks": 0
+    },
+    {
+      "user": "orgTestCodacy11KRepos110MB",
+      "repo": "repo-2868-rust-lightning",
+      "url": "https://github.com/orgTestCodacy11KRepos110MB/repo-2868-rust-lightning",
+      "stars": 0,
+      "forks": 0
+    },
+    {
+      "user": "get10101",
+      "repo": "10101",
+      "url": "https://github.com/get10101/10101",
+      "stars": 138,
+      "forks": 25
+    },
+    {
+      "user": "jirijakes",
+      "repo": "bitsplain",
+      "url": "https://github.com/jirijakes/bitsplain",
+      "stars": 1,
+      "forks": 0
+    },
+    {
+      "user": "tristan-f-r",
+      "repo": "rust-lightning",
+      "url": "https://github.com/tristan-f-r/rust-lightning",
+      "stars": 0,
+      "forks": 0
+    },
+    {
+      "user": "tnull",
+      "repo": "lightning-node-tester",
+      "url": "https://github.com/tnull/lightning-node-tester",
+      "stars": 1,
+      "forks": 0
+    },
+    {
+      "user": "breez",
+      "repo": "breez-sdk-greenlight",
+      "url": "https://github.com/breez/breez-sdk-greenlight",
+      "stars": 263,
+      "forks": 45
+    },
+    {
+      "user": "Nsandomeno",
+      "repo": "dummy-ln",
+      "url": "https://github.com/Nsandomeno/dummy-ln",
+      "stars": 0,
+      "forks": 0
+    },
+    {
+      "user": "Blockstream",
+      "repo": "greenlight",
+      "url": "https://github.com/Blockstream/greenlight",
+      "stars": 133,
+      "forks": 46
+    },
+    {
+      "user": "bitmask-stack",
+      "repo": "bitmask-core",
+      "url": "https://github.com/bitmask-stack/bitmask-core",
+      "stars": 95,
+      "forks": 23
+    },
+    {
+      "user": "ngutech21",
+      "repo": "lndhubx",
+      "url": "https://github.com/ngutech21/lndhubx",
+      "stars": 0,
+      "forks": 0
+    },
+    {
+      "user": "kuutamolabs",
+      "repo": "kld",
+      "url": "https://github.com/kuutamolabs/kld",
+      "stars": 25,
+      "forks": 2
+    },
+    {
+      "user": "LtbLightning",
+      "repo": "ldk-flutter",
+      "url": "https://github.com/LtbLightning/ldk-flutter",
+      "stars": 5,
+      "forks": 1
+    },
+    {
+      "user": "lightningdevkit",
+      "repo": "ldk-node",
+      "url": "https://github.com/lightningdevkit/ldk-node",
+      "stars": 193,
+      "forks": 117
+    },
+    {
+      "user": "getlipa",
+      "repo": "lipa-lightning-lib",
+      "url": "https://github.com/getlipa/lipa-lightning-lib",
+      "stars": 20,
+      "forks": 2
+    },
+    {
+      "user": "TheBlueMatt",
+      "repo": "rust-lightning-bitcoinrpc",
+      "url": "https://github.com/TheBlueMatt/rust-lightning-bitcoinrpc",
+      "stars": 35,
+      "forks": 19
+    },
+    {
+      "user": "RGB-Tools",
+      "repo": "rgb-lib",
+      "url": "https://github.com/RGB-Tools/rgb-lib",
+      "stars": 45,
+      "forks": 33
+    },
+    {
+      "user": "lightningdevkit",
+      "repo": "rapid-gossip-sync-server",
+      "url": "https://github.com/lightningdevkit/rapid-gossip-sync-server",
+      "stars": 28,
+      "forks": 26
+    },
+    {
+      "user": "stakwork",
+      "repo": "sphinx-rs",
+      "url": "https://github.com/stakwork/sphinx-rs",
+      "stars": 1,
+      "forks": 0
+    },
+    {
+      "user": "GLEECBTC",
+      "repo": "komodo-defi-framework",
+      "url": "https://github.com/GLEECBTC/komodo-defi-framework",
+      "stars": 124,
+      "forks": 114
+    },
+    {
+      "user": "futurepaul",
+      "repo": "fluttermint",
+      "url": "https://github.com/futurepaul/fluttermint",
+      "stars": 41,
+      "forks": 10
+    },
+    {
+      "user": "stakwork",
+      "repo": "sphinx-key",
+      "url": "https://github.com/stakwork/sphinx-key",
+      "stars": 30,
+      "forks": 2
+    },
+    {
+      "user": "LNP-BP",
+      "repo": "nodes",
+      "url": "https://github.com/LNP-BP/nodes",
+      "stars": 17,
+      "forks": 7
+    },
+    {
+      "user": "Storm-WG",
+      "repo": "storm-node",
+      "url": "https://github.com/Storm-WG/storm-node",
+      "stars": 4,
+      "forks": 5
+    },
+    {
+      "user": "kolliderhq",
+      "repo": "lndhubx",
+      "url": "https://github.com/kolliderhq/lndhubx",
+      "stars": 40,
+      "forks": 18
+    },
+    {
+      "user": "breez",
+      "repo": "c-breez",
+      "url": "https://github.com/breez/c-breez",
+      "stars": 20,
+      "forks": 2
+    },
+    {
+      "user": "vincenzopalazzo",
+      "repo": "ldk-sample",
+      "url": "https://github.com/vincenzopalazzo/ldk-sample",
+      "stars": 0,
+      "forks": 0
+    },
+    {
+      "user": "lexe-app",
+      "repo": "rust-lightning",
+      "url": "https://github.com/lexe-app/rust-lightning",
+      "stars": 0,
+      "forks": 0
+    },
+    {
+      "user": "justinmoon",
+      "repo": "fedimint",
+      "url": "https://github.com/justinmoon/fedimint",
+      "stars": 0,
+      "forks": 1
+    },
+    {
+      "user": "jbesraa",
+      "repo": "rust-lightning",
+      "url": "https://github.com/jbesraa/rust-lightning",
+      "stars": 0,
+      "forks": 0
+    },
+    {
+      "user": "enigbe",
+      "repo": "LN-Node",
+      "url": "https://github.com/enigbe/LN-Node",
+      "stars": 2,
+      "forks": 1
+    },
+    {
+      "user": "mariocynicys",
+      "repo": "rust-teos",
+      "url": "https://github.com/mariocynicys/rust-teos",
+      "stars": 0,
+      "forks": 0
+    },
+    {
+      "user": "orbitalturtle",
+      "repo": "rust-teos",
+      "url": "https://github.com/orbitalturtle/rust-teos",
+      "stars": 0,
+      "forks": 0
+    },
+    {
+      "user": "CyberFlameGO",
+      "repo": "ldk-sample",
+      "url": "https://github.com/CyberFlameGO/ldk-sample",
+      "stars": 0,
+      "forks": 0
+    },
+    {
+      "user": "Ashleyhen",
+      "repo": "rust-bitcoin-wallet",
+      "url": "https://github.com/Ashleyhen/rust-bitcoin-wallet",
+      "stars": 2,
+      "forks": 0
+    },
+    {
+      "user": "crisdut",
+      "repo": "lnp-node",
+      "url": "https://github.com/crisdut/lnp-node",
+      "stars": 0,
+      "forks": 0
+    },
+    {
+      "user": "futurepaul",
+      "repo": "rust-lightning",
+      "url": "https://github.com/futurepaul/rust-lightning",
+      "stars": 2,
+      "forks": 0
+    },
+    {
+      "user": "a-mpch",
+      "repo": "rust-lightning",
+      "url": "https://github.com/a-mpch/rust-lightning",
+      "stars": 0,
+      "forks": 0
+    },
+    {
+      "user": "elsirion",
+      "repo": "fedimint",
+      "url": "https://github.com/elsirion/fedimint",
+      "stars": 0,
+      "forks": 0
+    },
+    {
+      "user": "jurvis",
+      "repo": "rust-lightning",
+      "url": "https://github.com/jurvis/rust-lightning",
+      "stars": 0,
+      "forks": 0
+    },
+    {
+      "user": "ViktorT-11",
+      "repo": "rust-lightning",
+      "url": "https://github.com/ViktorT-11/rust-lightning",
+      "stars": 0,
+      "forks": 0
+    },
+    {
+      "user": "RCasatta",
+      "repo": "pay2email",
+      "url": "https://github.com/RCasatta/pay2email",
+      "stars": 24,
+      "forks": 2
+    },
+    {
+      "user": "naveensrinivasan",
+      "repo": "rust-lightning",
+      "url": "https://github.com/naveensrinivasan/rust-lightning",
+      "stars": 0,
+      "forks": 0
+    },
+    {
+      "user": "NicolaLS",
+      "repo": "minimint",
+      "url": "https://github.com/NicolaLS/minimint",
+      "stars": 1,
+      "forks": 0
+    },
+    {
+      "user": "johncantrell97",
+      "repo": "rust-lightning",
+      "url": "https://github.com/johncantrell97/rust-lightning",
+      "stars": 0,
+      "forks": 1
+    },
+    {
+      "user": "matt-wesley",
+      "repo": "fedimint",
+      "url": "https://github.com/matt-wesley/fedimint",
+      "stars": 0,
+      "forks": 0
+    },
+    {
+      "user": "hackerrdave",
+      "repo": "rust-lightning",
+      "url": "https://github.com/hackerrdave/rust-lightning",
+      "stars": 0,
+      "forks": 0
+    },
+    {
+      "user": "benthecarman",
+      "repo": "rust-dlc",
+      "url": "https://github.com/benthecarman/rust-dlc",
+      "stars": 1,
+      "forks": 0
+    },
+    {
+      "user": "johncantrell97",
+      "repo": "bdk-ldk",
+      "url": "https://github.com/johncantrell97/bdk-ldk",
+      "stars": 14,
+      "forks": 3
+    },
+    {
+      "user": "DON-MAC-256",
+      "repo": "fedimint",
+      "url": "https://github.com/DON-MAC-256/fedimint",
+      "stars": 0,
+      "forks": 0
+    },
+    {
+      "user": "Asone",
+      "repo": "LNFilestoreServer",
+      "url": "https://github.com/Asone/LNFilestoreServer",
+      "stars": 6,
+      "forks": 0
+    },
+    {
+      "user": "tcharding",
+      "repo": "rust-lightning",
+      "url": "https://github.com/tcharding/rust-lightning",
+      "stars": 0,
+      "forks": 0
+    },
+    {
+      "user": "vss96",
+      "repo": "rust-lightning",
+      "url": "https://github.com/vss96/rust-lightning",
+      "stars": 0,
+      "forks": 0
+    },
+    {
+      "user": "soenkehahn",
+      "repo": "agora-dependabot-test",
+      "url": "https://github.com/soenkehahn/agora-dependabot-test",
+      "stars": 0,
+      "forks": 0
+    },
+    {
+      "user": "ConorOkus",
+      "repo": "rust-lightning",
+      "url": "https://github.com/ConorOkus/rust-lightning",
+      "stars": 0,
+      "forks": 0
+    },
+    {
+      "user": "sr-gi",
+      "repo": "ldk-sample",
+      "url": "https://github.com/sr-gi/ldk-sample",
+      "stars": 0,
+      "forks": 0
+    },
+    {
+      "user": "ConorOkus",
+      "repo": "ldk-sample",
+      "url": "https://github.com/ConorOkus/ldk-sample",
+      "stars": 0,
+      "forks": 0
+    },
+    {
+      "user": "talaia-labs",
+      "repo": "rust-teos",
+      "url": "https://github.com/talaia-labs/rust-teos",
+      "stars": 150,
+      "forks": 66
+    },
+    {
+      "user": "eyfl",
+      "repo": "rust-lightning",
+      "url": "https://github.com/eyfl/rust-lightning",
+      "stars": 0,
+      "forks": 0
+    },
+    {
+      "user": "TheBlueMatt",
+      "repo": "ldk-sample",
+      "url": "https://github.com/TheBlueMatt/ldk-sample",
+      "stars": 0,
+      "forks": 0
+    },
+    {
+      "user": "agora-org",
+      "repo": "agora",
+      "url": "https://github.com/agora-org/agora",
+      "stars": 194,
+      "forks": 23
+    },
+    {
+      "user": "vincenzopalazzo",
+      "repo": "rust-lightning",
+      "url": "https://github.com/vincenzopalazzo/rust-lightning",
+      "stars": 0,
+      "forks": 1
+    },
+    {
+      "user": "dunxen",
+      "repo": "rust-lightning",
+      "url": "https://github.com/dunxen/rust-lightning",
+      "stars": 0,
+      "forks": 0
+    },
+    {
+      "user": "valentinewallace",
+      "repo": "ldk-sample",
+      "url": "https://github.com/valentinewallace/ldk-sample",
+      "stars": 0,
+      "forks": 2
+    },
+    {
+      "user": "lightningdevkit",
+      "repo": "ldk-sample",
+      "url": "https://github.com/lightningdevkit/ldk-sample",
+      "stars": 186,
+      "forks": 99
+    },
+    {
+      "user": "nunoedgar-invest",
+      "repo": "rust-lightning",
+      "url": "https://github.com/nunoedgar-invest/rust-lightning",
+      "stars": 0,
+      "forks": 0
+    },
+    {
+      "user": "sr-gi",
+      "repo": "rust-lightning",
+      "url": "https://github.com/sr-gi/rust-lightning",
+      "stars": 0,
+      "forks": 0
+    },
+    {
+      "user": "notmandatory",
+      "repo": "rust-lightning",
+      "url": "https://github.com/notmandatory/rust-lightning",
+      "stars": 0,
+      "forks": 0
+    },
+    {
+      "user": "notmandatory",
+      "repo": "murmel",
+      "url": "https://github.com/notmandatory/murmel",
+      "stars": 1,
+      "forks": 1
+    },
+    {
+      "user": "p2pderivatives",
+      "repo": "rust-dlc",
+      "url": "https://github.com/p2pderivatives/rust-dlc",
+      "stars": 157,
+      "forks": 40
+    },
+    {
+      "user": "LNP-WG",
+      "repo": "lnp-node",
+      "url": "https://github.com/LNP-WG/lnp-node",
+      "stars": 145,
+      "forks": 36
+    },
+    {
+      "user": "naumenkogs",
+      "repo": "rust-lightning",
+      "url": "https://github.com/naumenkogs/rust-lightning",
+      "stars": 0,
+      "forks": 0
+    },
+    {
+      "user": "tnull",
+      "repo": "rust-lightning",
+      "url": "https://github.com/tnull/rust-lightning",
+      "stars": 0,
+      "forks": 0
+    },
+    {
+      "user": "lightning-signer",
+      "repo": "rust-lightning",
+      "url": "https://github.com/lightning-signer/rust-lightning",
+      "stars": 1,
+      "forks": 0
+    },
+    {
+      "user": "jkczyz",
+      "repo": "rust-lightning",
+      "url": "https://github.com/jkczyz/rust-lightning",
+      "stars": 1,
+      "forks": 0
+    },
+    {
+      "user": "TigerInYourDream",
+      "repo": "murmel",
+      "url": "https://github.com/TigerInYourDream/murmel",
+      "stars": 0,
+      "forks": 0
+    },
+    {
+      "user": "arik-so",
+      "repo": "rust-lightning",
+      "url": "https://github.com/arik-so/rust-lightning",
+      "stars": 1,
+      "forks": 0
+    },
+    {
+      "user": "notjustanyusername",
+      "repo": "rust-lightning",
+      "url": "https://github.com/notjustanyusername/rust-lightning",
+      "stars": 0,
+      "forks": 0
+    },
+    {
+      "user": "bodymindarts",
+      "repo": "murmel",
+      "url": "https://github.com/bodymindarts/murmel",
+      "stars": 0,
+      "forks": 0
+    },
+    {
+      "user": "valentinewallace",
+      "repo": "rust-lightning",
+      "url": "https://github.com/valentinewallace/rust-lightning",
+      "stars": 2,
+      "forks": 2
+    },
+    {
+      "user": "scryinfo",
+      "repo": "cashbox",
+      "url": "https://github.com/scryinfo/cashbox",
+      "stars": 44,
+      "forks": 7
+    },
+    {
+      "user": "QPotato",
+      "repo": "rust-lightning",
+      "url": "https://github.com/QPotato/rust-lightning",
+      "stars": 0,
+      "forks": 0
+    },
+    {
+      "user": "knarfytrebil",
+      "repo": "rust-lightning-bitcoinrpc",
+      "url": "https://github.com/knarfytrebil/rust-lightning-bitcoinrpc",
+      "stars": 4,
+      "forks": 0
+    },
+    {
+      "user": "TheBlueMatt",
+      "repo": "rust-lightning",
+      "url": "https://github.com/TheBlueMatt/rust-lightning",
+      "stars": 7,
+      "forks": 2
+    },
+    {
+      "user": "rust-bitcoin",
+      "repo": "murmel",
+      "url": "https://github.com/rust-bitcoin/murmel",
+      "stars": 102,
+      "forks": 30
+    },
+    {
+      "user": "lightningdevkit",
+      "repo": "rust-lightning",
+      "url": "https://github.com/lightningdevkit/rust-lightning",
+      "stars": 1326,
+      "forks": 427
+    },
+    {
+      "user": "L2-Technology",
+      "repo": "sensei",
+      "url": "https://github.com/L2-Technology/sensei",
+      "stars": 197,
+      "forks": 38
+    }
+  ],
+  "pages": [
+    {
+      "url":  "https://github.com/lightningdevkit/rust-lightning/network/dependents",
+      "next": "NDgxNzU5MjQ4NDc"
+    },
+    {
+      "url":  "https://github.com/lightningdevkit/rust-lightning/network/dependents?dependents_after=NDgxNzU5MjQ4NDc",
+      "next": "NDYyNTg5OTExMzA"
+    },
+    {
+      "url":  "https://github.com/lightningdevkit/rust-lightning/network/dependents?dependents_after=NDYyNTg5OTExMzA",
+      "next": "NDI5ODU1MzEzMjg"
+    },
+    {
+      "url":  "https://github.com/lightningdevkit/rust-lightning/network/dependents?dependents_after=NDI5ODU1MzEzMjg",
+      "next": "NDA2OTM2NTc0ODk"
+    },
+    {
+      "url":  "https://github.com/lightningdevkit/rust-lightning/network/dependents?dependents_after=NDA2OTM2NTc0ODk",
+      "next": "Mzg2NzIwMjM0NzA"
+    },
+    {
+      "url":  "https://github.com/lightningdevkit/rust-lightning/network/dependents?dependents_after=Mzg2NzIwMjM0NzA",
+      "next": "MzY4MTE5NjQxNzI"
+    },
+    {
+      "url":  "https://github.com/lightningdevkit/rust-lightning/network/dependents?dependents_after=MzY4MTE5NjQxNzI",
+      "next": "MzQyNTMyMzQ0OTI"
+    },
+    {
+      "url":  "https://github.com/lightningdevkit/rust-lightning/network/dependents?dependents_after=MzQyNTMyMzQ0OTI",
+      "next": "MzE1MzY4MTAzODU"
+    },
+    {
+      "url":  "https://github.com/lightningdevkit/rust-lightning/network/dependents?dependents_after=MzE1MzY4MTAzODU",
+      "next": "MjgzODUyMjcyNjI"
+    },
+    {
+      "url":  "https://github.com/lightningdevkit/rust-lightning/network/dependents?dependents_after=MjgzODUyMjcyNjI",
+      "next": "MjU0Mjc4NTI1NDk"
+    },
+    {
+      "url":  "https://github.com/lightningdevkit/rust-lightning/network/dependents?dependents_after=MjU0Mjc4NTI1NDk",
+      "next": "MjEzMDkzMTg5MDM"
+    },
+    {
+      "url":  "https://github.com/lightningdevkit/rust-lightning/network/dependents?dependents_after=MjEzMDkzMTg5MDM",
+      "next": "MjEyNDk0ODM5MTM"
+    },
+    {
+      "url":  "https://github.com/lightningdevkit/rust-lightning/network/dependents?dependents_after=MjEyNDk0ODM5MTM"
+    }
+  ]
+}
