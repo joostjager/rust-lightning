@@ -56,6 +56,7 @@ use lightning::ln::msgs::{
 	UpdateAddHTLC,
 };
 use lightning::ln::script::ShutdownScript;
+use lightning::ln::types::ChannelId;
 use lightning::offers::invoice::UnsignedBolt12Invoice;
 use lightning::onion_message::messenger::{Destination, MessageRouter, OnionMessagePath};
 use lightning::routing::router::{
@@ -244,6 +245,32 @@ impl TestChainMonitor {
 				keys.get_peer_storage_key(),
 			)),
 			persister,
+		}
+	}
+
+	/// Completes all pending monitor updates for all channels.
+	pub fn complete_all_pending_monitor_updates(&self) {
+		for (channel_id, update_id) in self.persister.complete_all_pending_monitor_updates() {
+			self.chain_monitor.channel_monitor_updated(channel_id, update_id).unwrap();
+		}
+	}
+
+	/// Completes a single monitor update for the given channel, selected by the provided selector.
+	pub fn complete_monitor_update(
+		&self, chan_id: &ChannelId,
+		compl_selector: &dyn Fn(&mut Vec<(u64, Vec<u8>)>) -> Option<(u64, Vec<u8>)>,
+	) {
+		if let Some((channel_id, update_id)) =
+			self.persister.complete_monitor_update(chan_id, compl_selector)
+		{
+			self.chain_monitor.channel_monitor_updated(channel_id, update_id).unwrap();
+		}
+	}
+
+	/// Completes all pending monitor updates for a specific channel.
+	pub fn complete_all_monitor_updates(&self, chan_id: &ChannelId) {
+		for (channel_id, update_id) in self.persister.complete_all_monitor_updates(chan_id) {
+			self.chain_monitor.channel_monitor_updated(channel_id, update_id).unwrap();
 		}
 	}
 }
@@ -753,20 +780,6 @@ pub fn do_test<Out: Output>(data: &[u8], underlying_out: Out, anchors: bool) {
 	};
 
 	let mut channel_txn = Vec::new();
-	macro_rules! complete_all_pending_monitor_updates {
-		($monitor: expr) => {{
-			for (channel_id, state) in $monitor.persister.latest_monitors.lock().unwrap().iter_mut()
-			{
-				for (id, data) in state.pending_monitors.drain(..) {
-					$monitor.chain_monitor.channel_monitor_updated(*channel_id, id).unwrap();
-					if id >= state.persisted_monitor_id {
-						state.persisted_monitor_id = id;
-						state.persisted_monitor = data;
-					}
-				}
-			}
-		}};
-	}
 	macro_rules! make_channel {
 		($source: expr, $dest: expr, $source_monitor: expr, $dest_monitor: expr, $dest_keys_manager: expr, $chan_id: expr) => {{
 			let init_dest = Init {
@@ -873,7 +886,7 @@ pub fn do_test<Out: Output>(data: &[u8], underlying_out: Out, anchors: bool) {
 			};
 			$dest.handle_funding_created($source.get_our_node_id(), &funding_created);
 			// Complete any pending monitor updates for dest after watch_channel
-			complete_all_pending_monitor_updates!($dest_monitor);
+			$dest_monitor.complete_all_pending_monitor_updates();
 
 			let (funding_signed, channel_id) = {
 				let events = $dest.get_and_clear_pending_msg_events();
@@ -894,7 +907,7 @@ pub fn do_test<Out: Output>(data: &[u8], underlying_out: Out, anchors: bool) {
 
 			$source.handle_funding_signed($dest.get_our_node_id(), &funding_signed);
 			// Complete any pending monitor updates for source after watch_channel
-			complete_all_pending_monitor_updates!($source_monitor);
+			$source_monitor.complete_all_pending_monitor_updates();
 
 			let events = $source.get_and_clear_pending_events();
 			assert_eq!(events.len(), 1);
@@ -1490,43 +1503,6 @@ pub fn do_test<Out: Output>(data: &[u8], underlying_out: Out, anchors: bool) {
 
 		let complete_first = |v: &mut Vec<_>| if !v.is_empty() { Some(v.remove(0)) } else { None };
 		let complete_second = |v: &mut Vec<_>| if v.len() > 1 { Some(v.remove(1)) } else { None };
-		let complete_monitor_update =
-			|monitor: &Arc<TestChainMonitor>,
-			 chan_funding,
-			 compl_selector: &dyn Fn(&mut Vec<(u64, Vec<u8>)>) -> Option<(u64, Vec<u8>)>| {
-				if let Some(state) =
-					monitor.persister.latest_monitors.lock().unwrap().get_mut(chan_funding)
-				{
-					assert!(
-						state.pending_monitors.windows(2).all(|pair| pair[0].0 < pair[1].0),
-						"updates should be sorted by id"
-					);
-					if let Some((id, data)) = compl_selector(&mut state.pending_monitors) {
-						monitor.chain_monitor.channel_monitor_updated(*chan_funding, id).unwrap();
-						if id > state.persisted_monitor_id {
-							state.persisted_monitor_id = id;
-							state.persisted_monitor = data;
-						}
-					}
-				}
-			};
-
-		let complete_all_monitor_updates = |monitor: &Arc<TestChainMonitor>, chan_id| {
-			if let Some(state) = monitor.persister.latest_monitors.lock().unwrap().get_mut(chan_id)
-			{
-				assert!(
-					state.pending_monitors.windows(2).all(|pair| pair[0].0 < pair[1].0),
-					"updates should be sorted by id"
-				);
-				for (id, data) in state.pending_monitors.drain(..) {
-					monitor.chain_monitor.channel_monitor_updated(*chan_id, id).unwrap();
-					if id > state.persisted_monitor_id {
-						state.persisted_monitor_id = id;
-						state.persisted_monitor = data;
-					}
-				}
-			}
-		};
 
 		let v = get_slice!(1)[0];
 		out.locked_write(format!("READ A BYTE! HANDLING INPUT {:x}...........\n", v).as_bytes());
@@ -1553,10 +1529,10 @@ pub fn do_test<Out: Output>(data: &[u8], underlying_out: Out, anchors: bool) {
 				*mon_style[2].borrow_mut() = ChannelMonitorUpdateStatus::Completed;
 			},
 
-			0x08 => complete_all_monitor_updates(&monitor_a, &chan_1_id),
-			0x09 => complete_all_monitor_updates(&monitor_b, &chan_1_id),
-			0x0a => complete_all_monitor_updates(&monitor_b, &chan_2_id),
-			0x0b => complete_all_monitor_updates(&monitor_c, &chan_2_id),
+			0x08 => monitor_a.complete_all_monitor_updates(&chan_1_id),
+			0x09 => monitor_b.complete_all_monitor_updates(&chan_1_id),
+			0x0a => monitor_b.complete_all_monitor_updates(&chan_2_id),
+			0x0b => monitor_c.complete_all_monitor_updates(&chan_2_id),
 
 			0x0c => {
 				if !chan_a_disconnected {
@@ -2049,21 +2025,21 @@ pub fn do_test<Out: Output>(data: &[u8], underlying_out: Out, anchors: bool) {
 				monitor_c = new_monitor_c;
 			},
 
-			0xf0 => complete_monitor_update(&monitor_a, &chan_1_id, &complete_first),
-			0xf1 => complete_monitor_update(&monitor_a, &chan_1_id, &complete_second),
-			0xf2 => complete_monitor_update(&monitor_a, &chan_1_id, &Vec::pop),
+			0xf0 => monitor_a.complete_monitor_update(&chan_1_id, &complete_first),
+			0xf1 => monitor_a.complete_monitor_update(&chan_1_id, &complete_second),
+			0xf2 => monitor_a.complete_monitor_update(&chan_1_id, &Vec::pop),
 
-			0xf4 => complete_monitor_update(&monitor_b, &chan_1_id, &complete_first),
-			0xf5 => complete_monitor_update(&monitor_b, &chan_1_id, &complete_second),
-			0xf6 => complete_monitor_update(&monitor_b, &chan_1_id, &Vec::pop),
+			0xf4 => monitor_b.complete_monitor_update(&chan_1_id, &complete_first),
+			0xf5 => monitor_b.complete_monitor_update(&chan_1_id, &complete_second),
+			0xf6 => monitor_b.complete_monitor_update(&chan_1_id, &Vec::pop),
 
-			0xf8 => complete_monitor_update(&monitor_b, &chan_2_id, &complete_first),
-			0xf9 => complete_monitor_update(&monitor_b, &chan_2_id, &complete_second),
-			0xfa => complete_monitor_update(&monitor_b, &chan_2_id, &Vec::pop),
+			0xf8 => monitor_b.complete_monitor_update(&chan_2_id, &complete_first),
+			0xf9 => monitor_b.complete_monitor_update(&chan_2_id, &complete_second),
+			0xfa => monitor_b.complete_monitor_update(&chan_2_id, &Vec::pop),
 
-			0xfc => complete_monitor_update(&monitor_c, &chan_2_id, &complete_first),
-			0xfd => complete_monitor_update(&monitor_c, &chan_2_id, &complete_second),
-			0xfe => complete_monitor_update(&monitor_c, &chan_2_id, &Vec::pop),
+			0xfc => monitor_c.complete_monitor_update(&chan_2_id, &complete_first),
+			0xfd => monitor_c.complete_monitor_update(&chan_2_id, &complete_second),
+			0xfe => monitor_c.complete_monitor_update(&chan_2_id, &Vec::pop),
 
 			0xff => {
 				// Test that no channel is in a stuck state where neither party can send funds even
@@ -2109,10 +2085,10 @@ pub fn do_test<Out: Output>(data: &[u8], underlying_out: Out, anchors: bool) {
 								panic!("It may take may iterations to settle the state, but it should not take forever");
 							}
 							// Next, make sure no monitor updates are pending
-							complete_all_monitor_updates(&monitor_a, &chan_1_id);
-							complete_all_monitor_updates(&monitor_b, &chan_1_id);
-							complete_all_monitor_updates(&monitor_b, &chan_2_id);
-							complete_all_monitor_updates(&monitor_c, &chan_2_id);
+							monitor_a.complete_all_monitor_updates(&chan_1_id);
+							monitor_b.complete_all_monitor_updates(&chan_1_id);
+							monitor_b.complete_all_monitor_updates(&chan_2_id);
+							monitor_c.complete_all_monitor_updates(&chan_2_id);
 							// Then, make sure any current forwards make their way to their destination
 							if process_msg_events!(0, false, ProcessMessages::AllMessages) {
 								last_pass_no_updates = false;

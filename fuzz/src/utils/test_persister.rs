@@ -46,6 +46,65 @@ impl TestPersister {
 	pub fn new(update_ret: chain::ChannelMonitorUpdateStatus) -> Self {
 		Self { update_ret: Mutex::new(update_ret), latest_monitors: Mutex::new(new_hash_map()) }
 	}
+
+	/// Returns all pending monitor updates for all channels, clearing them from the pending state.
+	/// Returns a Vec of (channel_id, update_id) pairs that should be passed to
+	/// `ChainMonitor::channel_monitor_updated`.
+	pub fn complete_all_pending_monitor_updates(&self) -> Vec<(ChannelId, u64)> {
+		let mut completed = Vec::new();
+		for (channel_id, state) in self.latest_monitors.lock().unwrap().iter_mut() {
+			for (id, data) in state.pending_monitors.drain(..) {
+				completed.push((*channel_id, id));
+				if id >= state.persisted_monitor_id {
+					state.persisted_monitor_id = id;
+					state.persisted_monitor = data;
+				}
+			}
+		}
+		completed
+	}
+
+	/// Returns a single pending monitor update for the given channel, selected by the provided
+	/// selector. Returns Some((channel_id, update_id)) if an update was selected, or None.
+	pub fn complete_monitor_update(
+		&self, chan_id: &ChannelId,
+		compl_selector: &dyn Fn(&mut Vec<(u64, Vec<u8>)>) -> Option<(u64, Vec<u8>)>,
+	) -> Option<(ChannelId, u64)> {
+		if let Some(state) = self.latest_monitors.lock().unwrap().get_mut(chan_id) {
+			assert!(
+				state.pending_monitors.windows(2).all(|pair| pair[0].0 < pair[1].0),
+				"updates should be sorted by id"
+			);
+			if let Some((id, data)) = compl_selector(&mut state.pending_monitors) {
+				if id > state.persisted_monitor_id {
+					state.persisted_monitor_id = id;
+					state.persisted_monitor = data;
+				}
+				return Some((*chan_id, id));
+			}
+		}
+		None
+	}
+
+	/// Returns all pending monitor updates for a specific channel, clearing them from the pending
+	/// state. Returns a Vec of (channel_id, update_id) pairs.
+	pub fn complete_all_monitor_updates(&self, chan_id: &ChannelId) -> Vec<(ChannelId, u64)> {
+		let mut completed = Vec::new();
+		if let Some(state) = self.latest_monitors.lock().unwrap().get_mut(chan_id) {
+			assert!(
+				state.pending_monitors.windows(2).all(|pair| pair[0].0 < pair[1].0),
+				"updates should be sorted by id"
+			);
+			for (id, data) in state.pending_monitors.drain(..) {
+				completed.push((*chan_id, id));
+				if id > state.persisted_monitor_id {
+					state.persisted_monitor_id = id;
+					state.persisted_monitor = data;
+				}
+			}
+		}
+		completed
+	}
 }
 
 impl chainmonitor::Persist<TestChannelSigner> for TestPersister {
