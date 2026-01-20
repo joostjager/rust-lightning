@@ -37,11 +37,8 @@ use lightning::blinded_path::message::{BlindedMessagePath, MessageContext, Messa
 use lightning::blinded_path::payment::{BlindedPaymentPath, ReceiveTlvs};
 use lightning::chain;
 use lightning::chain::chaininterface::{BroadcasterInterface, ConfirmationTarget, FeeEstimator};
-use lightning::chain::channelmonitor::{ChannelMonitor, MonitorEvent};
-use lightning::chain::transaction::OutPoint;
-use lightning::chain::{
-	chainmonitor, channelmonitor, BestBlock, ChannelMonitorUpdateStatus, Confirm, Watch,
-};
+use lightning::chain::channelmonitor::ChannelMonitor;
+use lightning::chain::{chainmonitor, BestBlock, ChannelMonitorUpdateStatus, Confirm, Watch};
 use lightning::events;
 use lightning::ln::channel::{
 	FEE_SPIKE_BUFFER_FEE_INCREASE_MULTIPLE, MAX_STD_OUTPUT_DUST_LIMIT_SATOSHIS,
@@ -59,7 +56,6 @@ use lightning::ln::msgs::{
 	UpdateAddHTLC,
 };
 use lightning::ln::script::ShutdownScript;
-use lightning::ln::types::ChannelId;
 use lightning::offers::invoice::UnsignedBolt12Invoice;
 use lightning::onion_message::messenger::{Destination, MessageRouter, OnionMessagePath};
 use lightning::routing::router::{
@@ -74,7 +70,7 @@ use lightning::util::config::UserConfig;
 use lightning::util::errors::APIError;
 use lightning::util::hash_tables::*;
 use lightning::util::logger::Logger;
-use lightning::util::ser::{LengthReadable, ReadableArgs, Writeable, Writer};
+use lightning::util::ser::{LengthReadable, ReadableArgs, Writeable};
 use lightning::util::test_channel_signer::{EnforcementState, TestChannelSigner};
 
 use lightning_invoice::RawBolt11Invoice;
@@ -160,14 +156,6 @@ impl BroadcasterInterface for TestBroadcaster {
 	fn broadcast_transactions(&self, _txs: &[&Transaction]) {}
 }
 
-pub struct VecWriter(pub Vec<u8>);
-impl Writer for VecWriter {
-	fn write_all(&mut self, buf: &[u8]) -> Result<(), ::lightning::io::Error> {
-		self.0.extend_from_slice(buf);
-		Ok(())
-	}
-}
-
 pub struct TestWallet {
 	secret_key: SecretKey,
 	utxos: Mutex<Vec<lightning::events::bump_transaction::Utxo>>,
@@ -225,44 +213,21 @@ impl TestWallet {
 	}
 }
 
-/// The LDK API requires that any time we tell it we're done persisting a `ChannelMonitor[Update]`
-/// we never pass it in as the "latest" `ChannelMonitor` on startup. However, we can pass
-/// out-of-date monitors as long as we never told LDK we finished persisting them, which we do by
-/// storing both old `ChannelMonitor`s and ones that are "being persisted" here.
-///
-/// Note that such "being persisted" `ChannelMonitor`s are stored in `ChannelManager` and will
-/// simply be replayed on startup.
-struct LatestMonitorState {
-	/// The latest monitor id which we told LDK we've persisted.
-	///
-	/// Note that there may still be earlier pending monitor updates in [`Self::pending_monitors`]
-	/// which we haven't yet completed. We're allowed to reload with those as well, at least until
-	/// they're completed.
-	persisted_monitor_id: u64,
-	/// The latest serialized `ChannelMonitor` that we told LDK we persisted.
-	persisted_monitor: Vec<u8>,
-	/// A set of (monitor id, serialized `ChannelMonitor`)s which we're currently "persisting",
-	/// from LDK's perspective.
-	pending_monitors: Vec<(u64, Vec<u8>)>,
-}
+type ChainMon = chainmonitor::ChainMonitor<
+	TestChannelSigner,
+	Arc<dyn chain::Filter>,
+	Arc<TestBroadcaster>,
+	Arc<FuzzEstimator>,
+	Arc<dyn Logger>,
+	Arc<TestPersister>,
+	Arc<KeyProvider>,
+>;
 
 struct TestChainMonitor {
-	pub logger: Arc<dyn Logger>,
-	pub keys: Arc<KeyProvider>,
+	pub chain_monitor: Arc<ChainMon>,
 	pub persister: Arc<TestPersister>,
-	pub chain_monitor: Arc<
-		chainmonitor::ChainMonitor<
-			TestChannelSigner,
-			Arc<dyn chain::Filter>,
-			Arc<TestBroadcaster>,
-			Arc<FuzzEstimator>,
-			Arc<dyn Logger>,
-			Arc<TestPersister>,
-			Arc<KeyProvider>,
-		>,
-	>,
-	pub latest_monitors: Mutex<HashMap<ChannelId, LatestMonitorState>>,
 }
+
 impl TestChainMonitor {
 	pub fn new(
 		broadcaster: Arc<TestBroadcaster>, logger: Arc<dyn Logger>, feeest: Arc<FuzzEstimator>,
@@ -272,93 +237,14 @@ impl TestChainMonitor {
 			chain_monitor: Arc::new(chainmonitor::ChainMonitor::new(
 				None,
 				broadcaster,
-				logger.clone(),
+				logger,
 				feeest,
 				Arc::clone(&persister),
 				Arc::clone(&keys),
 				keys.get_peer_storage_key(),
 			)),
-			logger,
-			keys,
 			persister,
-			latest_monitors: Mutex::new(new_hash_map()),
 		}
-	}
-}
-impl chain::Watch<TestChannelSigner> for TestChainMonitor {
-	fn watch_channel(
-		&self, channel_id: ChannelId, monitor: channelmonitor::ChannelMonitor<TestChannelSigner>,
-	) -> Result<chain::ChannelMonitorUpdateStatus, ()> {
-		let mut ser = VecWriter(Vec::new());
-		monitor.write(&mut ser).unwrap();
-		let monitor_id = monitor.get_latest_update_id();
-		let res = self.chain_monitor.watch_channel(channel_id, monitor);
-		let state = match res {
-			Ok(chain::ChannelMonitorUpdateStatus::Completed) => LatestMonitorState {
-				persisted_monitor_id: monitor_id,
-				persisted_monitor: ser.0,
-				pending_monitors: Vec::new(),
-			},
-			Ok(chain::ChannelMonitorUpdateStatus::InProgress) => LatestMonitorState {
-				persisted_monitor_id: monitor_id,
-				persisted_monitor: Vec::new(),
-				pending_monitors: vec![(monitor_id, ser.0)],
-			},
-			Ok(chain::ChannelMonitorUpdateStatus::UnrecoverableError) => panic!(),
-			Err(()) => panic!(),
-		};
-		if self.latest_monitors.lock().unwrap().insert(channel_id, state).is_some() {
-			panic!("Already had monitor pre-watch_channel");
-		}
-		res
-	}
-
-	fn update_channel(
-		&self, channel_id: ChannelId, update: &channelmonitor::ChannelMonitorUpdate,
-	) -> chain::ChannelMonitorUpdateStatus {
-		let mut map_lock = self.latest_monitors.lock().unwrap();
-		let map_entry = map_lock.get_mut(&channel_id).expect("Didn't have monitor on update call");
-		let latest_monitor_data = map_entry
-			.pending_monitors
-			.last()
-			.as_ref()
-			.map(|(_, data)| data)
-			.unwrap_or(&map_entry.persisted_monitor);
-		let deserialized_monitor =
-			<(BlockHash, channelmonitor::ChannelMonitor<TestChannelSigner>)>::read(
-				&mut &latest_monitor_data[..],
-				(&*self.keys, &*self.keys),
-			)
-			.unwrap()
-			.1;
-		deserialized_monitor
-			.update_monitor(
-				update,
-				&&TestBroadcaster {},
-				&&FuzzEstimator { ret_val: atomic::AtomicU32::new(253) },
-				&self.logger,
-			)
-			.unwrap();
-		let mut ser = VecWriter(Vec::new());
-		deserialized_monitor.write(&mut ser).unwrap();
-		let res = self.chain_monitor.update_channel(channel_id, update);
-		match res {
-			chain::ChannelMonitorUpdateStatus::Completed => {
-				map_entry.persisted_monitor_id = update.update_id;
-				map_entry.persisted_monitor = ser.0;
-			},
-			chain::ChannelMonitorUpdateStatus::InProgress => {
-				map_entry.pending_monitors.push((update.update_id, ser.0));
-			},
-			chain::ChannelMonitorUpdateStatus::UnrecoverableError => panic!(),
-		}
-		res
-	}
-
-	fn release_pending_monitor_events(
-		&self,
-	) -> Vec<(OutPoint, ChannelId, Vec<MonitorEvent>, PublicKey)> {
-		return self.chain_monitor.release_pending_monitor_events();
 	}
 }
 
@@ -526,7 +412,7 @@ fn check_payment_send_events(source: &ChanMan, sent_payment_id: PaymentId) -> bo
 }
 
 type ChanMan<'a> = ChannelManager<
-	Arc<TestChainMonitor>,
+	Arc<ChainMon>,
 	Arc<TestBroadcaster>,
 	Arc<KeyProvider>,
 	Arc<KeyProvider>,
@@ -746,9 +632,7 @@ pub fn do_test<Out: Output>(data: &[u8], underlying_out: Out, anchors: bool) {
 				broadcast.clone(),
 				logger.clone(),
 				$fee_estimator.clone(),
-				Arc::new(TestPersister {
-					update_ret: Mutex::new(mon_style[$node_id as usize].borrow().clone()),
-				}),
+				Arc::new(TestPersister::new(mon_style[$node_id as usize].borrow().clone())),
 				Arc::clone(&keys_manager),
 			));
 
@@ -766,7 +650,7 @@ pub fn do_test<Out: Output>(data: &[u8], underlying_out: Out, anchors: bool) {
 			(
 				ChannelManager::new(
 					$fee_estimator.clone(),
-					monitor.clone(),
+					monitor.chain_monitor.clone(),
 					broadcast.clone(),
 					&router,
 					&router,
@@ -786,20 +670,18 @@ pub fn do_test<Out: Output>(data: &[u8], underlying_out: Out, anchors: bool) {
 
 	let reload_node = |ser: &Vec<u8>,
 	                   node_id: u8,
-	                   old_monitors: &TestChainMonitor,
+	                   old_monitor: &Arc<TestChainMonitor>,
 	                   mut use_old_mons,
 	                   keys,
 	                   fee_estimator| {
 		let keys_manager = Arc::clone(keys);
 		let logger: Arc<dyn Logger> =
 			Arc::new(test_logger::TestLogger::new(node_id.to_string(), out.clone()));
-		let chain_monitor = Arc::new(TestChainMonitor::new(
+		let monitor = Arc::new(TestChainMonitor::new(
 			broadcast.clone(),
 			logger.clone(),
 			Arc::clone(fee_estimator),
-			Arc::new(TestPersister {
-				update_ret: Mutex::new(ChannelMonitorUpdateStatus::Completed),
-			}),
+			Arc::new(TestPersister::new(ChannelMonitorUpdateStatus::Completed)),
 			Arc::clone(keys),
 		));
 
@@ -813,9 +695,9 @@ pub fn do_test<Out: Output>(data: &[u8], underlying_out: Out, anchors: bool) {
 		}
 
 		let mut monitors = new_hash_map();
-		let mut old_monitors = old_monitors.latest_monitors.lock().unwrap();
-		for (channel_id, mut prev_state) in old_monitors.drain() {
-			let (mon_id, serialized_mon) = if use_old_mons % 3 == 0 {
+		let mut old_monitors_lock = old_monitor.persister.latest_monitors.lock().unwrap();
+		for (channel_id, mut prev_state) in old_monitors_lock.drain() {
+			let (_mon_id, serialized_mon) = if use_old_mons % 3 == 0 {
 				// Reload with the oldest `ChannelMonitor` (the one that we already told
 				// `ChannelManager` we finished persisting).
 				(prev_state.persisted_monitor_id, prev_state.persisted_monitor)
@@ -837,18 +719,11 @@ pub fn do_test<Out: Output>(data: &[u8], underlying_out: Out, anchors: bool) {
 			)
 			.expect("Failed to read monitor");
 			monitors.insert(channel_id, mon.1);
-			// Update the latest `ChannelMonitor` state to match what we just told LDK.
-			prev_state.persisted_monitor = serialized_mon;
-			prev_state.persisted_monitor_id = mon_id;
-			// Wipe any `ChannelMonitor`s which we never told LDK we finished persisting,
-			// considering them discarded. LDK should replay these for us as they're stored in
-			// the `ChannelManager`.
-			prev_state.pending_monitors.clear();
-			chain_monitor.latest_monitors.lock().unwrap().insert(channel_id, prev_state);
 		}
+		drop(old_monitors_lock);
 		let mut monitor_refs = new_hash_map();
-		for (channel_id, monitor) in monitors.iter() {
-			monitor_refs.insert(*channel_id, monitor);
+		for (channel_id, mon) in monitors.iter() {
+			monitor_refs.insert(*channel_id, mon);
 		}
 
 		let read_args = ChannelManagerReadArgs {
@@ -856,7 +731,7 @@ pub fn do_test<Out: Output>(data: &[u8], underlying_out: Out, anchors: bool) {
 			node_signer: Arc::clone(&keys_manager),
 			signer_provider: keys_manager,
 			fee_estimator: Arc::clone(fee_estimator),
-			chain_monitor: chain_monitor.clone(),
+			chain_monitor: monitor.chain_monitor.clone(),
 			tx_broadcaster: broadcast.clone(),
 			router: &router,
 			message_router: &router,
@@ -867,21 +742,21 @@ pub fn do_test<Out: Output>(data: &[u8], underlying_out: Out, anchors: bool) {
 
 		let manager =
 			<(BlockHash, ChanMan)>::read(&mut &ser[..], read_args).expect("Failed to read manager");
-		let res = (manager.1, chain_monitor.clone());
 		for (channel_id, mon) in monitors.drain() {
 			assert_eq!(
-				chain_monitor.chain_monitor.watch_channel(channel_id, mon),
+				monitor.chain_monitor.watch_channel(channel_id, mon),
 				Ok(ChannelMonitorUpdateStatus::Completed)
 			);
 		}
-		*chain_monitor.persister.update_ret.lock().unwrap() = *mon_style[node_id as usize].borrow();
-		res
+		*monitor.persister.update_ret.lock().unwrap() = *mon_style[node_id as usize].borrow();
+		(manager.1, monitor)
 	};
 
 	let mut channel_txn = Vec::new();
 	macro_rules! complete_all_pending_monitor_updates {
 		($monitor: expr) => {{
-			for (channel_id, state) in $monitor.latest_monitors.lock().unwrap().iter_mut() {
+			for (channel_id, state) in $monitor.persister.latest_monitors.lock().unwrap().iter_mut()
+			{
 				for (id, data) in state.pending_monitors.drain(..) {
 					$monitor.chain_monitor.channel_monitor_updated(*channel_id, id).unwrap();
 					if id >= state.persisted_monitor_id {
@@ -1619,7 +1494,9 @@ pub fn do_test<Out: Output>(data: &[u8], underlying_out: Out, anchors: bool) {
 			|monitor: &Arc<TestChainMonitor>,
 			 chan_funding,
 			 compl_selector: &dyn Fn(&mut Vec<(u64, Vec<u8>)>) -> Option<(u64, Vec<u8>)>| {
-				if let Some(state) = monitor.latest_monitors.lock().unwrap().get_mut(chan_funding) {
+				if let Some(state) =
+					monitor.persister.latest_monitors.lock().unwrap().get_mut(chan_funding)
+				{
 					assert!(
 						state.pending_monitors.windows(2).all(|pair| pair[0].0 < pair[1].0),
 						"updates should be sorted by id"
@@ -1635,7 +1512,8 @@ pub fn do_test<Out: Output>(data: &[u8], underlying_out: Out, anchors: bool) {
 			};
 
 		let complete_all_monitor_updates = |monitor: &Arc<TestChainMonitor>, chan_id| {
-			if let Some(state) = monitor.latest_monitors.lock().unwrap().get_mut(chan_id) {
+			if let Some(state) = monitor.persister.latest_monitors.lock().unwrap().get_mut(chan_id)
+			{
 				assert!(
 					state.pending_monitors.windows(2).all(|pair| pair[0].0 < pair[1].0),
 					"updates should be sorted by id"
