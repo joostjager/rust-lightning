@@ -60,6 +60,14 @@ use crate::util::persist::{KVStore, MonitorName, MonitorUpdatingPersisterAsync};
 use crate::util::ser::{VecWriter, Writeable};
 use crate::util::wakers::{Future, Notifier};
 
+// Temporary diagnostic macro that compiles away in no_std builds.
+macro_rules! debug_eprintln {
+	($($arg:tt)*) => {
+		#[cfg(feature = "std")]
+		eprintln!($($arg)*);
+	};
+}
+
 use alloc::collections::VecDeque;
 use alloc::sync::Arc;
 #[cfg(peer_storage)]
@@ -1265,24 +1273,43 @@ where
 	pub fn flush(&self, count: usize, logger: &L) -> Result<(), ()> {
 		if count > 0 {
 			log_trace!(logger, "Flushing up to {} monitor operations", count);
+			debug_eprintln!(
+				"[ChainMonitor::flush] count={} queue_len={} monitors_len={}",
+				count,
+				self.pending_ops.lock().unwrap().len(),
+				self.monitors.read().unwrap().len(),
+			);
 		}
-		for _ in 0..count {
+		for _i in 0..count {
 			let mut queue = self.pending_ops.lock().unwrap();
 			let op = match queue.pop_front() {
 				Some(op) => op,
-				None => return Ok(()),
+				None => {
+					debug_eprintln!("[ChainMonitor::flush] queue empty at iteration {}", _i);
+					return Ok(());
+				},
 			};
 
 			let (channel_id, update_id, status) = match op {
 				PendingMonitorOp::NewMonitor { channel_id, monitor, update_id } => {
 					let logger = WithChannelMonitor::from(logger, &monitor, None);
 					log_trace!(logger, "Flushing new monitor");
+					debug_eprintln!(
+						"[ChainMonitor::flush] iter={} NewMonitor chan={}",
+						_i,
+						channel_id
+					);
 					// Hold `pending_ops` across the internal call so that
 					// `watch_channel` (which checks `monitors` + `pending_ops`
 					// atomically) cannot race with this insertion.
 					match self.watch_channel_internal(channel_id, monitor) {
 						Ok(status) => {
 							drop(queue);
+							debug_eprintln!(
+								"[ChainMonitor::flush] NewMonitor chan={} ok status={:?}",
+								channel_id,
+								status
+							);
 							(channel_id, update_id, status)
 						},
 						Err(()) => {
@@ -1291,6 +1318,10 @@ where
 							// Any queued updates for this channel will also
 							// fail since no monitor was inserted.
 							log_error!(logger, "watch_channel failed");
+							debug_eprintln!(
+								"[ChainMonitor::flush] NewMonitor chan={} FAILED",
+								channel_id
+							);
 							return Err(());
 						},
 					}
@@ -1298,11 +1329,22 @@ where
 				PendingMonitorOp::Update { channel_id, update } => {
 					let logger = WithContext::from(logger, None, Some(channel_id), None);
 					log_trace!(logger, "Flushing monitor update {}", update.update_id);
+					debug_eprintln!(
+						"[ChainMonitor::flush] iter={} Update chan={} update_id={}",
+						_i,
+						channel_id,
+						update.update_id
+					);
 					// Release `pending_ops` before the internal call so that
 					// concurrent `update_channel` queuing is not blocked.
 					drop(queue);
 					let update_id = update.update_id;
 					let status = self.update_channel_internal(channel_id, &update);
+					debug_eprintln!(
+						"[ChainMonitor::flush] Update chan={} status={:?}",
+						channel_id,
+						status
+					);
 					(channel_id, update_id, status)
 				},
 			};
@@ -1312,6 +1354,7 @@ where
 					let logger = WithContext::from(logger, None, Some(channel_id), None);
 					if let Err(e) = self.channel_monitor_updated(channel_id, update_id) {
 						log_error!(logger, "channel_monitor_updated failed: {:?}", e);
+						debug_eprintln!("[ChainMonitor::flush] channel_monitor_updated FAILED chan={} update_id={}: {:?}", channel_id, update_id, e);
 					}
 				},
 				ChannelMonitorUpdateStatus::InProgress => {},
@@ -1320,6 +1363,10 @@ where
 				},
 			}
 		}
+		debug_eprintln!(
+			"[ChainMonitor::flush] done monitors_len={}",
+			self.monitors.read().unwrap().len(),
+		);
 		Ok(())
 	}
 }
@@ -1547,6 +1594,10 @@ where
 		let mut pending_ops = self.pending_ops.lock().unwrap();
 		let monitors = self.monitors.read().unwrap();
 		if monitors.contains_key(&channel_id) {
+			debug_eprintln!(
+				"[ChainMonitor] watch_channel(deferred) chan={} ALREADY IN MONITORS",
+				channel_id
+			);
 			return Err(());
 		}
 		let already_pending = pending_ops.iter().any(|op| match op {
@@ -1554,8 +1605,17 @@ where
 			_ => false,
 		});
 		if already_pending {
+			debug_eprintln!(
+				"[ChainMonitor] watch_channel(deferred) chan={} ALREADY PENDING",
+				channel_id
+			);
 			return Err(());
 		}
+		debug_eprintln!(
+			"[ChainMonitor] watch_channel(deferred) chan={} queued, pending_after={}",
+			channel_id,
+			pending_ops.len() + 1,
+		);
 		pending_ops.push_back(PendingMonitorOp::NewMonitor { channel_id, monitor, update_id });
 		Ok(ChannelMonitorUpdateStatus::InProgress)
 	}
@@ -1568,6 +1628,12 @@ where
 		}
 
 		let mut pending_ops = self.pending_ops.lock().unwrap();
+		debug_eprintln!(
+			"[ChainMonitor] update_channel(deferred) chan={} update_id={} queued, pending_after={}",
+			channel_id,
+			update.update_id,
+			pending_ops.len() + 1,
+		);
 		pending_ops.push_back(PendingMonitorOp::Update { channel_id, update: update.clone() });
 		ChannelMonitorUpdateStatus::InProgress
 	}
@@ -2198,10 +2264,27 @@ mod tests {
 		let chain_monitor_a = &nodes[0].chain_monitor.chain_monitor;
 		let chain_monitor_b = &nodes[1].chain_monitor.chain_monitor;
 
+		debug_eprintln!("[test_deferred] before create_announced_chan: a_monitors={} a_pending={} b_monitors={} b_pending={}",
+			chain_monitor_a.list_monitors().len(), chain_monitor_a.pending_operation_count(),
+			chain_monitor_b.list_monitors().len(), chain_monitor_b.pending_operation_count());
+
 		create_announced_chan_between_nodes(&nodes, 0, 1);
 
+		debug_eprintln!("[test_deferred] after create_announced_chan: a_monitors={} a_pending={} b_monitors={} b_pending={}",
+			chain_monitor_a.list_monitors().len(), chain_monitor_a.pending_operation_count(),
+			chain_monitor_b.list_monitors().len(), chain_monitor_b.pending_operation_count());
+
 		let (preimage, _hash, ..) = route_payment(&nodes[0], &[&nodes[1]], 10_000);
+
+		debug_eprintln!("[test_deferred] after route_payment: a_monitors={} a_pending={} b_monitors={} b_pending={}",
+			chain_monitor_a.list_monitors().len(), chain_monitor_a.pending_operation_count(),
+			chain_monitor_b.list_monitors().len(), chain_monitor_b.pending_operation_count());
+
 		claim_payment(&nodes[0], &[&nodes[1]], preimage);
+
+		debug_eprintln!("[test_deferred] after claim_payment: a_monitors={} a_pending={} b_monitors={} b_pending={}",
+			chain_monitor_a.list_monitors().len(), chain_monitor_a.pending_operation_count(),
+			chain_monitor_b.list_monitors().len(), chain_monitor_b.pending_operation_count());
 
 		assert_eq!(chain_monitor_a.list_monitors().len(), 1);
 		assert_eq!(chain_monitor_b.list_monitors().len(), 1);

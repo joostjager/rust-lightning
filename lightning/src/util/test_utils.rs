@@ -652,7 +652,17 @@ impl<'a> chain::Watch<TestChannelSigner> for TestChainMonitor<'a> {
 			.unwrap()
 			.insert(channel_id, (monitor.get_latest_update_id(), monitor.get_latest_update_id()));
 		self.added_monitors.lock().unwrap().push((channel_id, monitor));
-		self.chain_monitor.watch_channel(channel_id, new_monitor)
+		let deferred = self.chain_monitor.pending_operation_count() > 0
+			|| self.chain_monitor.list_monitors().is_empty();
+		let res = self.chain_monitor.watch_channel(channel_id, new_monitor);
+		eprintln!(
+			"[TestChainMonitor] watch_channel chan={} deferred_hint={} pending_after={} monitors_after={} result={:?}",
+			channel_id, deferred,
+			self.chain_monitor.pending_operation_count(),
+			self.chain_monitor.list_monitors().len(),
+			res.as_ref().map(|s| format!("{:?}", s)),
+		);
+		res
 	}
 
 	fn update_channel(
@@ -693,6 +703,19 @@ impl<'a> chain::Watch<TestChannelSigner> for TestChainMonitor<'a> {
 		let update_res = self.chain_monitor.update_channel(channel_id, update);
 		// At every point where we get a monitor update, we should be able to send a useful monitor
 		// to a watchtower and disk...
+		let in_monitors = self.chain_monitor.list_monitors().contains(&channel_id);
+		let pending_count = self.chain_monitor.pending_operation_count();
+		eprintln!(
+			"[TestChainMonitor] update_channel chan={} update_id={} in_monitors={} pending={} update_res={:?}",
+			channel_id, update.update_id, in_monitors, pending_count, update_res,
+		);
+		if !in_monitors {
+			eprintln!(
+				"[TestChainMonitor] WARNING: update_channel called but monitor not in monitors map! \
+				 Calling get_monitor will panic. pending_count={}",
+				pending_count,
+			);
+		}
 		let monitor = self.chain_monitor.get_monitor(channel_id).unwrap();
 		w.0.clear();
 		monitor.write(&mut w).unwrap();
@@ -720,7 +743,19 @@ impl<'a> chain::Watch<TestChannelSigner> for TestChainMonitor<'a> {
 		// costs a lock acquisition. It ensures standard test helpers (route_payment, etc.)
 		// work with deferred chain monitors.
 		let count = self.chain_monitor.pending_operation_count();
+		if count > 0 {
+			eprintln!(
+				"[TestChainMonitor] release_pending_monitor_events: flushing {} ops, monitors_before={}",
+				count, self.chain_monitor.list_monitors().len(),
+			);
+		}
 		self.chain_monitor.flush(count, &self.logger).unwrap();
+		if count > 0 {
+			eprintln!(
+				"[TestChainMonitor] release_pending_monitor_events: after flush monitors={}",
+				self.chain_monitor.list_monitors().len(),
+			);
+		}
 		return self.chain_monitor.release_pending_monitor_events();
 	}
 }
