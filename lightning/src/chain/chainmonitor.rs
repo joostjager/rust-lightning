@@ -1131,6 +1131,7 @@ where
 	pub fn flush(&self, count: usize) {
 		let items: Vec<_> = {
 			let mut queue = self.deferred_completions.lock().unwrap();
+			log_debug!(self.logger, "flush() called: requested={}, queued={}", count, queue.len());
 			if count > queue.len() {
 				log_warn!(
 					self.logger,
