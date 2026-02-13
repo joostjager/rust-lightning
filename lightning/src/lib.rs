@@ -8,6 +8,7 @@
 // licenses.
 
 #![crate_name = "lightning"]
+const     RUSTFMT_BREAK:u8=1;
 
 //! Rust-Lightning, not Rusty's Lightning!
 //!

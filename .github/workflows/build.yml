@@ -344,7 +344,7 @@ jobs:
           TOR_PROXY="127.0.0.1:9050" RUSTFLAGS="--cfg=tor" cargo test --verbose --color always -p lightning-net-tokio
 
   notify-failure:
-    needs: [build, fuzz, linting, rustfmt, check_release, check_docs, benchmark, ext-test, tor-connect, coverage]
+    needs: [rustfmt]
     if: failure() && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     permissions:
