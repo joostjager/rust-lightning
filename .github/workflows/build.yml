@@ -342,3 +342,23 @@ jobs:
       - name: Test tor connections using lightning-net-tokio
         run: |
           TOR_PROXY="127.0.0.1:9050" RUSTFLAGS="--cfg=tor" cargo test --verbose --color always -p lightning-net-tokio
+
+  notify-failure:
+    needs: [build, fuzz, linting, rustfmt, check_release, check_docs, benchmark, ext-test, tor-connect, coverage]
+    if: failure() && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+    steps:
+      - uses: jayqi/failed-build-issue-action@1a893bbf43ef1c2a8705e2b115cd4f0fe3c5649b # v1.2.0
+        id: create-issue
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Assign issue to committer
+        if: steps.create-issue.outputs.issue-number
+        run: |
+          gh issue edit ${{ steps.create-issue.outputs.issue-number }} \
+            --repo ${{ github.repository }} \
+            --add-assignee ${{ github.event.head_commit.author.username }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
