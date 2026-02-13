@@ -21,3 +21,29 @@ PIN_RELEASE_DEPS # pin the release dependencies in our main workspace
 [ "$RUSTC_MINOR_VERSION" -lt 81 ] && cargo update -p idna_adapter --precise "1.1.0" --quiet
 
 export RUST_BACKTRACE=1
+
+CI_STEP_START_TIME=""
+CI_STEP_NAME=""
+CI_SUMMARY=""
+
+function ci_step_start {
+	CI_STEP_NAME="$1"
+	CI_STEP_START_TIME=$(date +%s)
+	echo "::group::$CI_STEP_NAME"
+}
+
+function ci_step_end {
+	local elapsed=$(( $(date +%s) - CI_STEP_START_TIME ))
+	local mins=$(( elapsed / 60 ))
+	local secs=$(( elapsed % 60 ))
+	echo "::endgroup::"
+	echo "TIMING: ${CI_STEP_NAME} completed in ${mins}m ${secs}s"
+	CI_SUMMARY="${CI_SUMMARY}${mins}m ${secs}s  ${CI_STEP_NAME}\n"
+}
+
+function ci_print_summary {
+	echo ""
+	echo "===== TIMING SUMMARY ====="
+	echo -e "$CI_SUMMARY"
+	echo "=========================="
+}

@@ -4,30 +4,53 @@ set -eox pipefail
 # shellcheck source=ci/ci-tests-common.sh
 source "$(dirname "$0")/ci-tests-common.sh"
 
-echo -e "\n\nChecking and testing Block Sync Clients with features"
-
+ci_step_start "Test lightning-block-sync with rest-client"
 cargo test -p lightning-block-sync --quiet --color always --features rest-client
 cargo check -p lightning-block-sync --quiet --color always --features rest-client
+ci_step_end
+
+ci_step_start "Test lightning-block-sync with rpc-client"
 cargo test -p lightning-block-sync --quiet --color always --features rpc-client
 cargo check -p lightning-block-sync --quiet --color always --features rpc-client
+ci_step_end
+
+ci_step_start "Test lightning-block-sync with rpc-client,rest-client"
 cargo test -p lightning-block-sync --quiet --color always --features rpc-client,rest-client
 cargo check -p lightning-block-sync --quiet --color always --features rpc-client,rest-client
+ci_step_end
+
+ci_step_start "Test lightning-block-sync with rpc-client,rest-client,tokio"
 cargo test -p lightning-block-sync --quiet --color always --features rpc-client,rest-client,tokio
 cargo check -p lightning-block-sync --quiet --color always --features rpc-client,rest-client,tokio
+ci_step_end
 
-echo -e "\n\nChecking Transaction Sync Clients with features."
+ci_step_start "Check lightning-transaction-sync feature combos"
 cargo check -p lightning-transaction-sync --quiet --color always --features esplora-blocking
 cargo check -p lightning-transaction-sync --quiet --color always --features esplora-async
 cargo check -p lightning-transaction-sync --quiet --color always --features esplora-async-https
 cargo check -p lightning-transaction-sync --quiet --color always --features electrum
+ci_step_end
 
 if [ -z "$CI_ENV" ] && [[ -z "$BITCOIND_EXE" || -z "$ELECTRS_EXE" ]]; then
-	echo -e "\n\nSkipping testing Transaction Sync Clients due to BITCOIND_EXE or ELECTRS_EXE being unset."
+	ci_step_start "Check lightning-transaction-sync tests (no bitcoind)"
 	cargo check -p lightning-transaction-sync --tests
+	ci_step_end
 else
-	echo -e "\n\nTesting Transaction Sync Clients with features."
+	ci_step_start "Test lightning-transaction-sync with esplora-blocking"
 	cargo test -p lightning-transaction-sync --quiet --color always --features esplora-blocking
+	ci_step_end
+
+	ci_step_start "Test lightning-transaction-sync with esplora-async"
 	cargo test -p lightning-transaction-sync --quiet --color always --features esplora-async
+	ci_step_end
+
+	ci_step_start "Test lightning-transaction-sync with esplora-async-https"
 	cargo test -p lightning-transaction-sync --quiet --color always --features esplora-async-https
+	ci_step_end
+
+	ci_step_start "Test lightning-transaction-sync with electrum"
 	cargo test -p lightning-transaction-sync --quiet --color always --features electrum
+	ci_step_end
 fi
+
+ci_print_summary
