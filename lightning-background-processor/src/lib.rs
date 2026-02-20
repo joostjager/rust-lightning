@@ -185,19 +185,6 @@ const ARCHIVE_STALE_MONITORS_TIMER: Duration = Duration::from_secs(60 * 10);
 #[cfg(test)]
 const ARCHIVE_STALE_MONITORS_TIMER: Duration = Duration::from_secs(1);
 
-/// core::cmp::min is not currently const, so we define a trivial (and equivalent) replacement
-const fn min_duration(a: Duration, b: Duration) -> Duration {
-	if a.as_nanos() < b.as_nanos() {
-		a
-	} else {
-		b
-	}
-}
-const FASTEST_TIMER: Duration = min_duration(
-	min_duration(FRESHNESS_TIMER, PING_TIMER),
-	min_duration(SCORER_PERSIST_TIMER, min_duration(FIRST_NETWORK_PRUNE_TIMER, REBROADCAST_TIMER)),
-);
-
 /// Either [`P2PGossipSync`] or [`RapidGossipSync`].
 pub enum GossipSync<
 	P: Deref<Target = P2PGossipSync<G, U, L>>,
@@ -499,262 +486,20 @@ pub const NO_LIQUIDITY_MANAGER_SYNC: Option<
 	>,
 > = None;
 
-pub(crate) mod futures_util {
-	use core::future::Future;
-	use core::marker::Unpin;
-	use core::pin::Pin;
-	use core::task::{Poll, RawWaker, RawWakerVTable, Waker};
-	pub(crate) struct Selector<
-		A: Future<Output = bool> + Unpin,
-		B: Future<Output = ()> + Unpin,
-		C: Future<Output = ()> + Unpin,
-		D: Future<Output = ()> + Unpin,
-		E: Future<Output = ()> + Unpin,
-		F: Future<Output = ()> + Unpin,
-	> {
-		pub a: A,
-		pub b: B,
-		pub c: C,
-		pub d: D,
-		pub e: E,
-		pub f: F,
-	}
-
-	pub(crate) enum SelectorOutput {
-		A(bool),
-		B,
-		C,
-		D,
-		E,
-		F,
-	}
-
-	impl<
-			A: Future<Output = bool> + Unpin,
-			B: Future<Output = ()> + Unpin,
-			C: Future<Output = ()> + Unpin,
-			D: Future<Output = ()> + Unpin,
-			E: Future<Output = ()> + Unpin,
-			F: Future<Output = ()> + Unpin,
-		> Future for Selector<A, B, C, D, E, F>
-	{
-		type Output = SelectorOutput;
-		fn poll(
-			mut self: Pin<&mut Self>, ctx: &mut core::task::Context<'_>,
-		) -> Poll<SelectorOutput> {
-			// Bias the selector so it first polls the sleeper future, allowing to exit immediately
-			// if the flag is set.
-			match Pin::new(&mut self.a).poll(ctx) {
-				Poll::Ready(res) => {
-					return Poll::Ready(SelectorOutput::A(res));
-				},
-				Poll::Pending => {},
+/// Polls all given pinned futures, returning `Ready` if any future completes.
+/// This is a macro because each `pin!`ned async block has a unique anonymous type, so they
+/// cannot be collected into an array or `Vec`.
+macro_rules! poll_all_futures {
+	($cx:expr, $($fut:expr),* $(,)?) => {{
+		$(
+			// Fully-qualified call because the `Future` trait is not in scope.
+			if let core::task::Poll::Ready(result) = core::future::Future::poll($fut.as_mut(), $cx) {
+				return core::task::Poll::Ready(result);
 			}
-			match Pin::new(&mut self.b).poll(ctx) {
-				Poll::Ready(()) => {
-					return Poll::Ready(SelectorOutput::B);
-				},
-				Poll::Pending => {},
-			}
-			match Pin::new(&mut self.c).poll(ctx) {
-				Poll::Ready(()) => {
-					return Poll::Ready(SelectorOutput::C);
-				},
-				Poll::Pending => {},
-			}
-			match Pin::new(&mut self.d).poll(ctx) {
-				Poll::Ready(()) => {
-					return Poll::Ready(SelectorOutput::D);
-				},
-				Poll::Pending => {},
-			}
-			match Pin::new(&mut self.e).poll(ctx) {
-				Poll::Ready(()) => {
-					return Poll::Ready(SelectorOutput::E);
-				},
-				Poll::Pending => {},
-			}
-			match Pin::new(&mut self.f).poll(ctx) {
-				Poll::Ready(()) => {
-					return Poll::Ready(SelectorOutput::F);
-				},
-				Poll::Pending => {},
-			}
-			Poll::Pending
-		}
-	}
-
-	/// A selector that takes a future wrapped in an option that will be polled if it is `Some` and
-	/// will always be pending otherwise.
-	pub(crate) struct OptionalSelector<F: Future<Output = ()> + Unpin> {
-		pub optional_future: Option<F>,
-	}
-
-	impl<F: Future<Output = ()> + Unpin> Future for OptionalSelector<F> {
-		type Output = ();
-		fn poll(mut self: Pin<&mut Self>, ctx: &mut core::task::Context<'_>) -> Poll<Self::Output> {
-			match self.optional_future.as_mut() {
-				Some(f) => match Pin::new(f).poll(ctx) {
-					Poll::Ready(()) => {
-						self.optional_future.take();
-						Poll::Ready(())
-					},
-					Poll::Pending => Poll::Pending,
-				},
-				None => Poll::Pending,
-			}
-		}
-	}
-
-	impl<F: Future<Output = ()> + Unpin> From<Option<F>> for OptionalSelector<F> {
-		fn from(optional_future: Option<F>) -> Self {
-			Self { optional_future }
-		}
-	}
-
-	// If we want to poll a future without an async context to figure out if it has completed or
-	// not without awaiting, we need a Waker, which needs a vtable...we fill it with dummy values
-	// but sadly there's a good bit of boilerplate here.
-	fn dummy_waker_clone(_: *const ()) -> RawWaker {
-		RawWaker::new(core::ptr::null(), &DUMMY_WAKER_VTABLE)
-	}
-	fn dummy_waker_action(_: *const ()) {}
-
-	const DUMMY_WAKER_VTABLE: RawWakerVTable = RawWakerVTable::new(
-		dummy_waker_clone,
-		dummy_waker_action,
-		dummy_waker_action,
-		dummy_waker_action,
-	);
-	pub(crate) fn dummy_waker() -> Waker {
-		unsafe { Waker::from_raw(RawWaker::new(core::ptr::null(), &DUMMY_WAKER_VTABLE)) }
-	}
-
-	enum JoinerResult<ERR, F: Future<Output = Result<(), ERR>> + Unpin> {
-		Pending(Option<F>),
-		Ready(Result<(), ERR>),
-	}
-
-	pub(crate) struct Joiner<
-		ERR,
-		A: Future<Output = Result<(), ERR>> + Unpin,
-		B: Future<Output = Result<(), ERR>> + Unpin,
-		C: Future<Output = Result<(), ERR>> + Unpin,
-		D: Future<Output = Result<(), ERR>> + Unpin,
-		E: Future<Output = Result<(), ERR>> + Unpin,
-	> {
-		a: JoinerResult<ERR, A>,
-		b: JoinerResult<ERR, B>,
-		c: JoinerResult<ERR, C>,
-		d: JoinerResult<ERR, D>,
-		e: JoinerResult<ERR, E>,
-	}
-
-	impl<
-			ERR,
-			A: Future<Output = Result<(), ERR>> + Unpin,
-			B: Future<Output = Result<(), ERR>> + Unpin,
-			C: Future<Output = Result<(), ERR>> + Unpin,
-			D: Future<Output = Result<(), ERR>> + Unpin,
-			E: Future<Output = Result<(), ERR>> + Unpin,
-		> Joiner<ERR, A, B, C, D, E>
-	{
-		pub(crate) fn new() -> Self {
-			Self {
-				a: JoinerResult::Pending(None),
-				b: JoinerResult::Pending(None),
-				c: JoinerResult::Pending(None),
-				d: JoinerResult::Pending(None),
-				e: JoinerResult::Pending(None),
-			}
-		}
-
-		pub(crate) fn set_a(&mut self, fut: A) {
-			self.a = JoinerResult::Pending(Some(fut));
-		}
-		pub(crate) fn set_a_res(&mut self, res: Result<(), ERR>) {
-			self.a = JoinerResult::Ready(res);
-		}
-		pub(crate) fn set_b(&mut self, fut: B) {
-			self.b = JoinerResult::Pending(Some(fut));
-		}
-		pub(crate) fn set_c(&mut self, fut: C) {
-			self.c = JoinerResult::Pending(Some(fut));
-		}
-		pub(crate) fn set_d(&mut self, fut: D) {
-			self.d = JoinerResult::Pending(Some(fut));
-		}
-		pub(crate) fn set_e(&mut self, fut: E) {
-			self.e = JoinerResult::Pending(Some(fut));
-		}
-	}
-
-	impl<
-			ERR,
-			A: Future<Output = Result<(), ERR>> + Unpin,
-			B: Future<Output = Result<(), ERR>> + Unpin,
-			C: Future<Output = Result<(), ERR>> + Unpin,
-			D: Future<Output = Result<(), ERR>> + Unpin,
-			E: Future<Output = Result<(), ERR>> + Unpin,
-		> Future for Joiner<ERR, A, B, C, D, E>
-	where
-		Joiner<ERR, A, B, C, D, E>: Unpin,
-	{
-		type Output = [Result<(), ERR>; 5];
-		fn poll(mut self: Pin<&mut Self>, ctx: &mut core::task::Context<'_>) -> Poll<Self::Output> {
-			let mut all_complete = true;
-			macro_rules! handle {
-				($val: ident) => {
-					match &mut (self.$val) {
-						JoinerResult::Pending(None) => {
-							self.$val = JoinerResult::Ready(Ok(()));
-						},
-						JoinerResult::<ERR, _>::Pending(Some(ref mut val)) => {
-							match Pin::new(val).poll(ctx) {
-								Poll::Ready(res) => {
-									self.$val = JoinerResult::Ready(res);
-								},
-								Poll::Pending => {
-									all_complete = false;
-								},
-							}
-						},
-						JoinerResult::Ready(_) => {},
-					}
-				};
-			}
-			handle!(a);
-			handle!(b);
-			handle!(c);
-			handle!(d);
-			handle!(e);
-
-			if all_complete {
-				let mut res = [Ok(()), Ok(()), Ok(()), Ok(()), Ok(())];
-				if let JoinerResult::Ready(ref mut val) = &mut self.a {
-					core::mem::swap(&mut res[0], val);
-				}
-				if let JoinerResult::Ready(ref mut val) = &mut self.b {
-					core::mem::swap(&mut res[1], val);
-				}
-				if let JoinerResult::Ready(ref mut val) = &mut self.c {
-					core::mem::swap(&mut res[2], val);
-				}
-				if let JoinerResult::Ready(ref mut val) = &mut self.d {
-					core::mem::swap(&mut res[3], val);
-				}
-				if let JoinerResult::Ready(ref mut val) = &mut self.e {
-					core::mem::swap(&mut res[4], val);
-				}
-				Poll::Ready(res)
-			} else {
-				Poll::Pending
-			}
-		}
-	}
+		)*
+		core::task::Poll::Pending
+	}};
 }
-use core::task;
-use futures_util::{dummy_waker, Joiner, OptionalSelector, Selector, SelectorOutput};
 
 /// Processes background events in a future.
 ///
@@ -977,7 +722,6 @@ where
 		let logger = &logger;
 		let kv_store = &kv_store;
 		let fetch_time = &fetch_time;
-		// We should be able to drop the Box once our MSRV is 1.68
 		Box::pin(async move {
 			if let Some(network_graph) = network_graph {
 				handle_network_graph_update(network_graph, &event)
@@ -996,10 +740,6 @@ where
 							.await
 						{
 							log_error!(logger, "Error: Failed to persist scorer, check your disk and permissions {}", e);
-							// We opt not to abort early on persistence failure here as persisting
-							// the scorer is non-critical and we still hope that it will have
-							// resolved itself when it is potentially critical in event handling
-							// below.
 						}
 					}
 				}
@@ -1014,116 +754,16 @@ where
 	log_trace!(logger, "Rebroadcasting monitor's pending claims on startup");
 	chain_monitor.get_cm().rebroadcast_pending_claims();
 
-	let mut last_freshness_call = sleeper(FRESHNESS_TIMER);
-	let mut last_onion_message_handler_call = sleeper(ONION_MESSAGE_HANDLER_TIMER);
-	let mut last_ping_call = sleeper(PING_TIMER);
-	let mut last_prune_call = sleeper(FIRST_NETWORK_PRUNE_TIMER);
-	let mut last_scorer_persist_call = sleeper(SCORER_PERSIST_TIMER);
-	let mut last_rebroadcast_call = sleeper(REBROADCAST_TIMER);
-	let mut last_sweeper_call = sleeper(SWEEPER_TIMER);
-	let mut last_archive_call = sleeper(FIRST_ARCHIVE_STALE_MONITORS_TIMER);
-	let mut have_pruned = false;
-	let mut have_decayed_scorer = false;
-	let mut have_archived = false;
+	// Each task is a long-lived future that loops internally. They are pinned on the stack
+	// (required for polling) and polled concurrently via poll_all_futures below.
 
-	let mut last_forwards_processing_call = sleeper(batch_delay.get());
-
-	loop {
-		channel_manager.get_cm().process_pending_events_async(async_event_handler).await;
-		chain_monitor.get_cm().process_pending_events_async(async_event_handler).await;
-		if let Some(om) = &onion_messenger {
-			om.get_om().process_pending_events_async(async_event_handler).await
-		}
-
-		// Note that the PeerManager::process_events may block on ChannelManager's locks,
-		// hence it comes last here. When the ChannelManager finishes whatever it's doing,
-		// we want to ensure we get into `persist_manager` as quickly as we can, especially
-		// without running the normal event processing above and handing events to users.
-		//
-		// Specifically, on an *extremely* slow machine, we may see ChannelManager start
-		// processing a message effectively at any point during this loop. In order to
-		// minimize the time between such processing completing and persisting the updated
-		// ChannelManager, we want to minimize methods blocking on a ChannelManager
-		// generally, and as a fallback place such blocking only immediately before
-		// persistence.
-		peer_manager.as_ref().process_events();
-		match check_and_reset_sleeper(&mut last_forwards_processing_call, || {
-			sleeper(batch_delay.next())
-		}) {
-			Some(false) => {
-				channel_manager.get_cm().process_pending_htlc_forwards();
-			},
-			Some(true) => break,
-			None => {},
-		}
-
-		// We wait up to 100ms, but track how long it takes to detect being put to sleep,
-		// see `await_start`'s use below.
-		let mut await_start = None;
-		if mobile_interruptable_platform {
-			await_start = Some(sleeper(Duration::from_secs(1)));
-		}
-		let om_fut: OptionalSelector<_> =
-			onion_messenger.as_ref().map(|om| om.get_om().get_update_future()).into();
-		let lm_fut: OptionalSelector<_> = liquidity_manager
-			.as_ref()
-			.map(|lm| lm.get_lm().get_pending_msgs_or_needs_persist_future())
-			.into();
-		let gv_fut: OptionalSelector<_> = gossip_sync.validation_completion_future().into();
-		let needs_processing = channel_manager.get_cm().needs_pending_htlc_processing();
-		let sleep_delay = match (needs_processing, mobile_interruptable_platform) {
-			(true, true) => batch_delay.get().min(Duration::from_millis(100)),
-			(true, false) => batch_delay.get().min(FASTEST_TIMER),
-			(false, true) => Duration::from_millis(100),
-			(false, false) => FASTEST_TIMER,
-		};
-		let fut = Selector {
-			a: sleeper(sleep_delay),
-			b: channel_manager.get_cm().get_event_or_persistence_needed_future(),
-			c: chain_monitor.get_cm().get_update_future(),
-			d: om_fut,
-			e: lm_fut,
-			f: gv_fut,
-		};
-		match fut.await {
-			SelectorOutput::B
-			| SelectorOutput::C
-			| SelectorOutput::D
-			| SelectorOutput::E
-			| SelectorOutput::F => {},
-			SelectorOutput::A(exit) => {
-				if exit {
-					break;
-				}
-			},
-		}
-
-		let await_slow = if mobile_interruptable_platform {
-			// Specify a zero new sleeper timeout because we won't use the new sleeper. It is re-initialized in the next
-			// loop iteration.
-			match check_and_reset_sleeper(&mut await_start.unwrap(), || sleeper(Duration::ZERO)) {
-				Some(true) => break,
-				Some(false) => true,
-				None => false,
-			}
-		} else {
-			false
-		};
-		match check_and_reset_sleeper(&mut last_freshness_call, || sleeper(FRESHNESS_TIMER)) {
-			Some(false) => {
-				log_trace!(logger, "Calling ChannelManager's timer_tick_occurred");
-				channel_manager.get_cm().timer_tick_occurred();
-			},
-			Some(true) => break,
-			None => {},
-		}
-
-		let mut futures = Joiner::new();
-
-		if channel_manager.get_cm().get_and_clear_needs_persistence() {
-			log_trace!(logger, "Persisting ChannelManager...");
-
-			let fut = async {
+	// CM events + persistence: wait for signal, process events, persist if needed
+	let mut cm_events_fut = core::pin::pin!(async {
+		loop {
+			channel_manager.get_cm().get_event_or_persistence_needed_future().await;
+			channel_manager.get_cm().process_pending_events_async(&async_event_handler).await;
+			if channel_manager.get_cm().get_and_clear_needs_persistence() {
+				log_trace!(logger, "Persisting ChannelManager...");
 				kv_store
 					.write(
 						CHANNEL_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE,
@@ -1131,82 +771,81 @@ where
 						CHANNEL_MANAGER_PERSISTENCE_KEY,
 						channel_manager.get_cm().encode(),
 					)
-					.await
+					.await?;
+				log_trace!(logger, "Done persisting ChannelManager.");
+			}
+		}
+	});
+
+	// ChainMonitor events: wait for signal, process events
+	let mut chain_monitor_events_fut = core::pin::pin!(async {
+		loop {
+			chain_monitor.get_cm().get_update_future().await;
+			chain_monitor.get_cm().process_pending_events_async(&async_event_handler).await;
+		}
+	});
+
+	// OM events: wait for signal, process events.
+	// When onion_messenger is None, `pending()` parks this future forever.
+	let mut om_events_fut = core::pin::pin!(async {
+		if let Some(ref om) = onion_messenger {
+			loop {
+				om.get_om().get_update_future().await;
+				om.get_om().process_pending_events_async(&async_event_handler).await;
+			}
+		} else {
+			core::future::pending::<Result<(), lightning::io::Error>>().await
+		}
+	});
+
+	// HTLC forward batch check
+	let mut htlc_batch_fut = core::pin::pin!(async {
+		loop {
+			let exit = sleeper(batch_delay.next()).await;
+			if exit {
+				return Ok(());
+			}
+			if channel_manager.get_cm().needs_pending_htlc_processing() {
+				channel_manager.get_cm().process_pending_htlc_forwards();
+			}
+		}
+	});
+
+	// CM freshness tick
+	let mut cm_freshness_fut = core::pin::pin!(async {
+		loop {
+			let exit = sleeper(FRESHNESS_TIMER).await;
+			if exit {
+				return Ok(());
+			}
+			log_trace!(logger, "Calling ChannelManager's timer_tick_occurred");
+			channel_manager.get_cm().timer_tick_occurred();
+		}
+	});
+
+	// Network graph: prune + persist
+	let mut network_graph_fut = core::pin::pin!(async {
+		let mut have_pruned = false;
+		let exit = sleeper(FIRST_NETWORK_PRUNE_TIMER).await;
+		if exit {
+			return Ok(());
+		}
+		loop {
+			let should_prune = match gossip_sync {
+				GossipSync::Rapid(_) => !have_pruned,
+				_ => true,
 			};
-			// TODO: Once our MSRV is 1.68 we should be able to drop the Box
-			let mut fut = Box::pin(fut);
-
-			// Because persisting the ChannelManager is important to avoid accidental
-			// force-closures, go ahead and poll the future once before we do slightly more
-			// CPU-intensive tasks in the form of NetworkGraph pruning or scorer time-stepping
-			// below. This will get it moving but won't block us for too long if the underlying
-			// future is actually async.
-			use core::future::Future;
-			let mut waker = dummy_waker();
-			let mut ctx = task::Context::from_waker(&mut waker);
-			match core::pin::Pin::new(&mut fut).poll(&mut ctx) {
-				task::Poll::Ready(res) => futures.set_a_res(res),
-				task::Poll::Pending => futures.set_a(fut),
-			}
-
-			log_trace!(logger, "Done persisting ChannelManager.");
-		}
-
-		// Note that we want to archive stale ChannelMonitors and run a network graph prune once
-		// not long after startup before falling back to their usual infrequent runs. This avoids
-		// short-lived clients never archiving stale ChannelMonitors or pruning their network
-		// graph. For network graph pruning, in the case of RGS sync, we run a prune immediately
-		// after initial sync completes, otherwise we do so on a timer which should be long enough
-		// to give us a chance to get most of the network graph from our peers.
-		let archive_timer = if have_archived {
-			ARCHIVE_STALE_MONITORS_TIMER
-		} else {
-			FIRST_ARCHIVE_STALE_MONITORS_TIMER
-		};
-		let archive_timer_elapsed = {
-			match check_and_reset_sleeper(&mut last_archive_call, || sleeper(archive_timer)) {
-				Some(false) => true,
-				Some(true) => break,
-				None => false,
-			}
-		};
-		if archive_timer_elapsed {
-			log_trace!(logger, "Archiving stale ChannelMonitors.");
-			chain_monitor.get_cm().archive_fully_resolved_channel_monitors();
-			have_archived = true;
-			log_trace!(logger, "Archived stale ChannelMonitors.");
-		}
-
-		let prune_timer = if gossip_sync.prunable_network_graph().is_some() {
-			NETWORK_PRUNE_TIMER
-		} else {
-			FIRST_NETWORK_PRUNE_TIMER
-		};
-		let prune_timer_elapsed = {
-			match check_and_reset_sleeper(&mut last_prune_call, || sleeper(prune_timer)) {
-				Some(false) => true,
-				Some(true) => break,
-				None => false,
-			}
-		};
-
-		let should_prune = match gossip_sync {
-			GossipSync::Rapid(_) => !have_pruned || prune_timer_elapsed,
-			_ => prune_timer_elapsed,
-		};
-		if should_prune {
-			// The network graph must not be pruned while rapid sync completion is pending
-			if let Some(network_graph) = gossip_sync.prunable_network_graph() {
-				if let Some(duration_since_epoch) = fetch_time() {
-					log_trace!(logger, "Pruning and persisting network graph.");
-					network_graph.remove_stale_channels_and_tracking_with_time(
-						duration_since_epoch.as_secs(),
-					);
-				} else {
-					log_warn!(logger, "Not pruning network graph, consider implementing the fetch_time argument or calling remove_stale_channels_and_tracking_with_time manually.");
-					log_trace!(logger, "Persisting network graph.");
-				}
-				let fut = async {
+			if should_prune {
+				if let Some(network_graph) = gossip_sync.prunable_network_graph() {
+					if let Some(duration_since_epoch) = fetch_time() {
+						log_trace!(logger, "Pruning and persisting network graph.");
+						network_graph.remove_stale_channels_and_tracking_with_time(
+							duration_since_epoch.as_secs(),
+						);
+					} else {
+						log_warn!(logger, "Not pruning network graph, consider implementing the fetch_time argument or calling remove_stale_channels_and_tracking_with_time manually.");
+						log_trace!(logger, "Persisting network graph.");
+					}
 					if let Err(e) = kv_store
 						.write(
 							NETWORK_GRAPH_PERSISTENCE_PRIMARY_NAMESPACE,
@@ -1216,85 +855,81 @@ where
 						)
 						.await
 					{
-						log_error!(logger, "Error: Failed to persist network graph, check your disk and permissions {}",e);
+						log_error!(logger, "Error: Failed to persist network graph, check your disk and permissions {}", e);
 					}
-
-					Ok(())
-				};
-
-				// TODO: Once our MSRV is 1.68 we should be able to drop the Box
-				futures.set_b(Box::pin(fut));
-
-				have_pruned = true;
+					have_pruned = true;
+				}
+			}
+			// Use the short timer until we've successfully pruned at least once, so that we
+			// retry promptly if rapid gossip sync hasn't completed yet.
+			let timer = if have_pruned { NETWORK_PRUNE_TIMER } else { FIRST_NETWORK_PRUNE_TIMER };
+			let exit = sleeper(timer).await;
+			if exit {
+				return Ok(());
 			}
 		}
-		if !have_decayed_scorer {
-			if let Some(ref scorer) = scorer {
+	});
+
+	// Scorer: time_passed + persist
+	let mut scorer_fut = core::pin::pin!(async {
+		if let Some(ref scorer) = scorer {
+			if let Some(duration_since_epoch) = fetch_time() {
+				log_trace!(logger, "Calling time_passed on scorer at startup");
+				scorer.write_lock().time_passed(duration_since_epoch);
+			}
+			loop {
+				let exit = sleeper(SCORER_PERSIST_TIMER).await;
+				if exit {
+					return Ok(());
+				}
 				if let Some(duration_since_epoch) = fetch_time() {
-					log_trace!(logger, "Calling time_passed on scorer at startup");
+					log_trace!(logger, "Calling time_passed and persisting scorer");
 					scorer.write_lock().time_passed(duration_since_epoch);
+				} else {
+					log_trace!(logger, "Persisting scorer");
+				}
+				if let Err(e) = kv_store
+					.write(
+						SCORER_PERSISTENCE_PRIMARY_NAMESPACE,
+						SCORER_PERSISTENCE_SECONDARY_NAMESPACE,
+						SCORER_PERSISTENCE_KEY,
+						scorer.encode(),
+					)
+					.await
+				{
+					log_error!(
+						logger,
+						"Error: Failed to persist scorer, check your disk and permissions {}",
+						e
+					);
 				}
 			}
-			have_decayed_scorer = true;
+		} else {
+			core::future::pending::<Result<(), lightning::io::Error>>().await
 		}
-		match check_and_reset_sleeper(&mut last_scorer_persist_call, || {
-			sleeper(SCORER_PERSIST_TIMER)
-		}) {
-			Some(false) => {
-				if let Some(ref scorer) = scorer {
-					if let Some(duration_since_epoch) = fetch_time() {
-						log_trace!(logger, "Calling time_passed and persisting scorer");
-						scorer.write_lock().time_passed(duration_since_epoch);
-					} else {
-						log_trace!(logger, "Persisting scorer");
-					}
-					let fut = async {
-						if let Err(e) = kv_store
-							.write(
-								SCORER_PERSISTENCE_PRIMARY_NAMESPACE,
-								SCORER_PERSISTENCE_SECONDARY_NAMESPACE,
-								SCORER_PERSISTENCE_KEY,
-								scorer.encode(),
-							)
-							.await
-						{
-							log_error!(
-							logger,
-							"Error: Failed to persist scorer, check your disk and permissions {}",
-							e
-						);
-						}
+	});
 
-						Ok(())
-					};
-
-					// TODO: Once our MSRV is 1.68 we should be able to drop the Box
-					futures.set_c(Box::pin(fut));
+	// Sweeper
+	let mut sweeper_fut = core::pin::pin!(async {
+		if let Some(ref sweeper) = sweeper {
+			loop {
+				let exit = sleeper(SWEEPER_TIMER).await;
+				if exit {
+					return Ok(());
 				}
-			},
-			Some(true) => break,
-			None => {},
-		}
-		match check_and_reset_sleeper(&mut last_sweeper_call, || sleeper(SWEEPER_TIMER)) {
-			Some(false) => {
 				log_trace!(logger, "Regenerating sweeper spends if necessary");
-				if let Some(ref sweeper) = sweeper {
-					let fut = async {
-						let _ = sweeper.regenerate_and_broadcast_spend_if_necessary().await;
-
-						Ok(())
-					};
-
-					// TODO: Once our MSRV is 1.68 we should be able to drop the Box
-					futures.set_d(Box::pin(fut));
-				}
-			},
-			Some(true) => break,
-			None => {},
+				let _ = sweeper.regenerate_and_broadcast_spend_if_necessary().await;
+			}
+		} else {
+			core::future::pending::<Result<(), lightning::io::Error>>().await
 		}
+	});
 
-		if let Some(liquidity_manager) = liquidity_manager.as_ref() {
-			let fut = async {
+	// Liquidity manager persist
+	let mut liquidity_manager_fut = core::pin::pin!(async {
+		if let Some(ref liquidity_manager) = liquidity_manager {
+			loop {
+				liquidity_manager.get_lm().get_pending_msgs_or_needs_persist_future().await;
 				liquidity_manager
 					.get_lm()
 					.persist()
@@ -1307,72 +942,102 @@ where
 					.map_err(|e| {
 						log_error!(logger, "Persisting LiquidityManager failed: {}", e);
 						e
-					})
-			};
-			futures.set_e(Box::pin(fut));
-		}
-
-		// Run persistence tasks in parallel and exit if any of them returns an error.
-		for res in futures.await {
-			res?;
-		}
-
-		match check_and_reset_sleeper(&mut last_onion_message_handler_call, || {
-			sleeper(ONION_MESSAGE_HANDLER_TIMER)
-		}) {
-			Some(false) => {
-				if let Some(om) = &onion_messenger {
-					log_trace!(logger, "Calling OnionMessageHandler's timer_tick_occurred");
-					om.get_om().timer_tick_occurred();
-				}
-			},
-			Some(true) => break,
-			None => {},
-		}
-
-		// Peer manager timer tick. If we were interrupted on a mobile platform, we disconnect all peers.
-		if await_slow {
-			// On various platforms, we may be starved of CPU cycles for several reasons.
-			// E.g. on iOS, if we've been in the background, we will be entirely paused.
-			// Similarly, if we're on a desktop platform and the device has been asleep, we
-			// may not get any cycles.
-			// We detect this by checking if our max-100ms-sleep, above, ran longer than a
-			// full second, at which point we assume sockets may have been killed (they
-			// appear to be at least on some platforms, even if it has only been a second).
-			// Note that we have to take care to not get here just because user event
-			// processing was slow at the top of the loop. For example, the sample client
-			// may call Bitcoin Core RPCs during event handling, which very often takes
-			// more than a handful of seconds to complete, and shouldn't disconnect all our
-			// peers.
-			log_trace!(logger, "100ms sleep took more than a second, disconnecting peers.");
-			peer_manager.as_ref().disconnect_all_peers();
-			last_ping_call = sleeper(PING_TIMER);
+					})?;
+			}
 		} else {
-			match check_and_reset_sleeper(&mut last_ping_call, || sleeper(PING_TIMER)) {
-				Some(false) => {
-					log_trace!(logger, "Calling PeerManager's timer_tick_occurred");
-					peer_manager.as_ref().timer_tick_occurred();
-				},
-				Some(true) => break,
-				_ => {},
+			core::future::pending::<Result<(), lightning::io::Error>>().await
+		}
+	});
+
+	// PM timer_tick
+	let mut pm_tick_fut = core::pin::pin!(async {
+		loop {
+			let exit = sleeper(PING_TIMER).await;
+			if exit {
+				return Ok(());
+			}
+			if mobile_interruptable_platform {
+				log_trace!(logger, "Disconnecting peers on mobile platform timer tick.");
+				peer_manager.as_ref().disconnect_all_peers();
+			} else {
+				log_trace!(logger, "Calling PeerManager's timer_tick_occurred");
+				peer_manager.as_ref().timer_tick_occurred();
 			}
 		}
+	});
 
-		// Rebroadcast pending claims.
-		match check_and_reset_sleeper(&mut last_rebroadcast_call, || sleeper(REBROADCAST_TIMER)) {
-			Some(false) => {
-				log_trace!(logger, "Rebroadcasting monitor's pending claims");
-				chain_monitor.get_cm().rebroadcast_pending_claims();
-			},
-			Some(true) => break,
-			None => {},
+	// OM timer_tick
+	let mut om_tick_fut = core::pin::pin!(async {
+		if let Some(ref om) = onion_messenger {
+			loop {
+				let exit = sleeper(ONION_MESSAGE_HANDLER_TIMER).await;
+				if exit {
+					return Ok(());
+				}
+				log_trace!(logger, "Calling OnionMessageHandler's timer_tick_occurred");
+				om.get_om().timer_tick_occurred();
+			}
+		} else {
+			core::future::pending::<Result<(), lightning::io::Error>>().await
 		}
-	}
+	});
+
+	// Rebroadcast pending claims
+	let mut rebroadcast_fut = core::pin::pin!(async {
+		loop {
+			let exit = sleeper(REBROADCAST_TIMER).await;
+			if exit {
+				return Ok(());
+			}
+			log_trace!(logger, "Rebroadcasting monitor's pending claims");
+			chain_monitor.get_cm().rebroadcast_pending_claims();
+		}
+	});
+
+	// Archive stale monitors
+	let mut archive_fut = core::pin::pin!(async {
+		let exit = sleeper(FIRST_ARCHIVE_STALE_MONITORS_TIMER).await;
+		if exit {
+			return Ok(());
+		}
+		loop {
+			log_trace!(logger, "Archiving stale ChannelMonitors.");
+			chain_monitor.get_cm().archive_fully_resolved_channel_monitors();
+			log_trace!(logger, "Archived stale ChannelMonitors.");
+			let exit = sleeper(ARCHIVE_STALE_MONITORS_TIMER).await;
+			if exit {
+				return Ok(());
+			}
+		}
+	});
+
+	// Run all tasks concurrently. Returns when any task returns (exit signal or error).
+	// PeerManager has no signal/future mechanism, so we call process_events() on every
+	// poll cycle. This is cheap (just an atomic check) when there is no work to do.
+	let _ = core::future::poll_fn(|cx| {
+		peer_manager.as_ref().process_events();
+		poll_all_futures!(
+			cx,
+			cm_events_fut,
+			chain_monitor_events_fut,
+			om_events_fut,
+			htlc_batch_fut,
+			cm_freshness_fut,
+			network_graph_fut,
+			scorer_fut,
+			sweeper_fut,
+			liquidity_manager_fut,
+			pm_tick_fut,
+			om_tick_fut,
+			rebroadcast_fut,
+			archive_fut,
+		)
+	})
+	.await;
+
 	log_trace!(logger, "Terminating background processor.");
 
-	// After we exit, ensure we persist the ChannelManager one final time - this avoids
-	// some races where users quit while channel updates were in-flight, with
-	// ChannelMonitor update(s) persisted without a corresponding ChannelManager update.
+	// After we exit, ensure we persist the ChannelManager one final time
 	kv_store
 		.write(
 			CHANNEL_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE,
@@ -1402,22 +1067,6 @@ where
 			.await?;
 	}
 	Ok(())
-}
-
-fn check_and_reset_sleeper<
-	SleepFuture: core::future::Future<Output = bool> + core::marker::Unpin,
->(
-	fut: &mut SleepFuture, mut new_sleeper: impl FnMut() -> SleepFuture,
-) -> Option<bool> {
-	let mut waker = dummy_waker();
-	let mut ctx = task::Context::from_waker(&mut waker);
-	match core::pin::Pin::new(&mut *fut).poll(&mut ctx) {
-		task::Poll::Ready(exit) => {
-			*fut = new_sleeper();
-			Some(exit)
-		},
-		task::Poll::Pending => None,
-	}
 }
 
 /// Async events processor that is based on [`process_events_async`] but allows for [`KVStoreSync`] to be used for
