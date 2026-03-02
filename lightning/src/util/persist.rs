@@ -116,6 +116,17 @@ pub const OUTPUT_SWEEPER_PERSISTENCE_SECONDARY_NAMESPACE: &str = "";
 /// [`OutputSweeper`]: crate::util::sweep::OutputSweeper
 pub const OUTPUT_SWEEPER_PERSISTENCE_KEY: &str = "output_sweeper";
 
+/// The primary namespace under which system deltas will be persisted by
+/// [`QueuedKVStoreSync`].
+///
+/// [`QueuedKVStoreSync`]: crate::util::queued_kv_store::QueuedKVStoreSync
+pub const SYSTEM_DELTA_PERSISTENCE_PRIMARY_NAMESPACE: &str = "system_deltas";
+/// The secondary namespace under which system deltas will be persisted by
+/// [`QueuedKVStoreSync`].
+///
+/// [`QueuedKVStoreSync`]: crate::util::queued_kv_store::QueuedKVStoreSync
+pub const SYSTEM_DELTA_PERSISTENCE_SECONDARY_NAMESPACE: &str = "";
+
 /// A sentinel value to be prepended to monitors persisted by the [`MonitorUpdatingPersister`].
 ///
 /// This serves to prevent someone from accidentally loading such monitors (which may need

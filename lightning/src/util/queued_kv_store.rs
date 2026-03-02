@@ -13,11 +13,17 @@
 //! reducing I/O overhead.
 
 use crate::io;
+use crate::io::Read;
 use crate::prelude::*;
 use crate::sync::Mutex;
-use crate::util::persist::KVStoreSync;
+use crate::util::persist::{
+	KVStoreSync, SYSTEM_DELTA_PERSISTENCE_PRIMARY_NAMESPACE,
+	SYSTEM_DELTA_PERSISTENCE_SECONDARY_NAMESPACE,
+};
+use crate::util::ser::{Readable, Writeable, Writer};
 
 use core::ops::Deref;
+use core::sync::atomic::{AtomicU64, Ordering};
 
 /// A [`KVStoreSync`] wrapper that queues writes and removes until explicitly committed.
 ///
@@ -35,6 +41,7 @@ where
 {
 	inner: K,
 	pending_ops: Mutex<Vec<PendingOp>>,
+	sequence_number: AtomicU64,
 }
 
 #[derive(Clone)]
@@ -56,35 +63,93 @@ impl PendingOp {
 	}
 }
 
+const PENDING_OP_WRITE_TYPE: u8 = 0;
+const PENDING_OP_REMOVE_TYPE: u8 = 1;
+
+impl Writeable for PendingOp {
+	fn write<W: Writer>(&self, writer: &mut W) -> Result<(), io::Error> {
+		match self {
+			PendingOp::Write { primary_namespace, secondary_namespace, key, value } => {
+				PENDING_OP_WRITE_TYPE.write(writer)?;
+				primary_namespace.write(writer)?;
+				secondary_namespace.write(writer)?;
+				key.write(writer)?;
+				value.write(writer)?;
+			},
+			PendingOp::Remove { primary_namespace, secondary_namespace, key, lazy } => {
+				PENDING_OP_REMOVE_TYPE.write(writer)?;
+				primary_namespace.write(writer)?;
+				secondary_namespace.write(writer)?;
+				key.write(writer)?;
+				lazy.write(writer)?;
+			},
+		}
+		Ok(())
+	}
+}
+
+impl Readable for PendingOp {
+	fn read<R: Read>(reader: &mut R) -> Result<Self, crate::ln::msgs::DecodeError> {
+		let op_type: u8 = Readable::read(reader)?;
+		match op_type {
+			PENDING_OP_WRITE_TYPE => Ok(PendingOp::Write {
+				primary_namespace: Readable::read(reader)?,
+				secondary_namespace: Readable::read(reader)?,
+				key: Readable::read(reader)?,
+				value: Readable::read(reader)?,
+			}),
+			PENDING_OP_REMOVE_TYPE => Ok(PendingOp::Remove {
+				primary_namespace: Readable::read(reader)?,
+				secondary_namespace: Readable::read(reader)?,
+				key: Readable::read(reader)?,
+				lazy: Readable::read(reader)?,
+			}),
+			_ => Err(crate::ln::msgs::DecodeError::InvalidValue),
+		}
+	}
+}
+
 impl<K: Deref> QueuedKVStoreSync<K>
 where
 	K::Target: KVStoreSync,
 {
 	/// Creates a new `QueuedKVStoreSync` wrapping the given store.
 	pub fn new(inner: K) -> Self {
-		Self { inner, pending_ops: Mutex::new(Vec::new()) }
+		Self { inner, pending_ops: Mutex::new(Vec::new()), sequence_number: AtomicU64::new(0) }
 	}
 
-	/// Commits all pending operations to the underlying store.
+	/// Commits all pending operations to the underlying store as a single atomic
+	/// system delta write.
 	///
-	/// Returns the number of operations committed, or an error if any fails.
-	/// On error, remaining operations stay queued for retry.
+	/// All buffered ops are serialized into one value and written under a single
+	/// key in the `system_deltas` namespace. This ensures that either all ops or
+	/// none are persisted, avoiding partial state on crash.
+	///
+	/// Returns the number of operations committed, or an error if the write fails.
+	/// On error, pending operations stay queued for retry.
 	pub fn commit(&self) -> Result<usize, io::Error> {
 		let mut pending = self.pending_ops.lock().unwrap();
 		let count = pending.len();
-
-		while let Some(op) = pending.first() {
-			match op {
-				PendingOp::Write { primary_namespace, secondary_namespace, key, value } => {
-					self.inner.write(primary_namespace, secondary_namespace, key, value.clone())?;
-				},
-				PendingOp::Remove { primary_namespace, secondary_namespace, key, lazy } => {
-					self.inner.remove(primary_namespace, secondary_namespace, key, *lazy)?;
-				},
-			}
-			pending.remove(0);
+		if count == 0 {
+			return Ok(0);
 		}
 
+		let mut buf = Vec::new();
+		(count as u64).write(&mut buf).expect("Vec write cannot fail");
+		for op in pending.iter() {
+			op.write(&mut buf).expect("Vec write cannot fail");
+		}
+
+		let seq = self.sequence_number.fetch_add(1, Ordering::Relaxed);
+		let key = seq.to_string();
+		self.inner.write(
+			SYSTEM_DELTA_PERSISTENCE_PRIMARY_NAMESPACE,
+			SYSTEM_DELTA_PERSISTENCE_SECONDARY_NAMESPACE,
+			&key,
+			buf,
+		)?;
+
+		pending.clear();
 		Ok(count)
 	}
 
@@ -259,24 +324,48 @@ mod tests {
 		}
 	}
 
+	fn read_delta(store: &TestStore, key: &str) -> Vec<PendingOp> {
+		let buf = store
+			.read(
+				SYSTEM_DELTA_PERSISTENCE_PRIMARY_NAMESPACE,
+				SYSTEM_DELTA_PERSISTENCE_SECONDARY_NAMESPACE,
+				key,
+			)
+			.unwrap();
+		let mut reader = &buf[..];
+		let count: u64 = Readable::read(&mut reader).unwrap();
+		let mut ops = Vec::new();
+		for _ in 0..count {
+			ops.push(Readable::read(&mut reader).unwrap());
+		}
+		ops
+	}
+
 	#[test]
 	fn test_write_queued_until_commit() {
 		let inner = TestStore::new();
 		let queued = QueuedKVStoreSync::new(&inner);
 
-		// Write should not hit inner store yet
 		queued.write("ns", "", "key1", vec![1, 2, 3]).unwrap();
 		assert_eq!(queued.pending_count(), 1);
 		assert!(inner.read("ns", "", "key1").is_err());
 
-		// But read through queued store should work
 		assert_eq!(queued.read("ns", "", "key1").unwrap(), vec![1, 2, 3]);
 
-		// After commit, inner store should have the data
 		let committed = queued.commit().unwrap();
 		assert_eq!(committed, 1);
 		assert_eq!(queued.pending_count(), 0);
-		assert_eq!(inner.read("ns", "", "key1").unwrap(), vec![1, 2, 3]);
+
+		let ops = read_delta(&inner, "0");
+		assert_eq!(ops.len(), 1);
+		match &ops[0] {
+			PendingOp::Write { primary_namespace, key, value, .. } => {
+				assert_eq!(primary_namespace, "ns");
+				assert_eq!(key, "key1");
+				assert_eq!(value, &vec![1, 2, 3]);
+			},
+			_ => panic!("expected Write op"),
+		}
 	}
 
 	#[test]
@@ -286,17 +375,24 @@ mod tests {
 
 		let queued = QueuedKVStoreSync::new(&inner);
 
-		// Remove should not hit inner store yet
 		queued.remove("ns", "", "key1", false).unwrap();
 		assert_eq!(queued.pending_count(), 1);
-		assert!(inner.read("ns", "", "key1").is_ok()); // Still in inner
+		assert!(inner.read("ns", "", "key1").is_ok());
 
-		// But read through queued store should return NotFound
 		assert!(queued.read("ns", "", "key1").is_err());
 
-		// After commit, inner store should not have the data
 		queued.commit().unwrap();
-		assert!(inner.read("ns", "", "key1").is_err());
+
+		let ops = read_delta(&inner, "0");
+		assert_eq!(ops.len(), 1);
+		match &ops[0] {
+			PendingOp::Remove { primary_namespace, key, lazy, .. } => {
+				assert_eq!(primary_namespace, "ns");
+				assert_eq!(key, "key1");
+				assert!(!lazy);
+			},
+			_ => panic!("expected Remove op"),
+		}
 	}
 
 	#[test]
@@ -304,20 +400,20 @@ mod tests {
 		let inner = TestStore::new();
 		let queued = QueuedKVStoreSync::new(&inner);
 
-		// Multiple writes to same key
 		queued.write("ns", "", "key1", vec![1]).unwrap();
 		queued.write("ns", "", "key1", vec![2]).unwrap();
 		queued.write("ns", "", "key1", vec![3]).unwrap();
 
-		// Should only have one pending op
 		assert_eq!(queued.pending_count(), 1);
-
-		// Read should return latest value
 		assert_eq!(queued.read("ns", "", "key1").unwrap(), vec![3]);
 
-		// After commit, inner should have latest value
 		queued.commit().unwrap();
-		assert_eq!(inner.read("ns", "", "key1").unwrap(), vec![3]);
+		let ops = read_delta(&inner, "0");
+		assert_eq!(ops.len(), 1);
+		match &ops[0] {
+			PendingOp::Write { value, .. } => assert_eq!(value, &vec![3]),
+			_ => panic!("expected Write op"),
+		}
 	}
 
 	#[test]
@@ -424,5 +520,68 @@ mod tests {
 
 		// Should read from inner when no pending op
 		assert_eq!(queued.read("ns", "", "inner_key").unwrap(), vec![1, 2, 3]);
+	}
+
+	#[test]
+	fn test_commit_empty_is_noop() {
+		let inner = TestStore::new();
+		let queued = QueuedKVStoreSync::new(&inner);
+
+		let committed = queued.commit().unwrap();
+		assert_eq!(committed, 0);
+
+		let delta_keys = inner
+			.list(
+				SYSTEM_DELTA_PERSISTENCE_PRIMARY_NAMESPACE,
+				SYSTEM_DELTA_PERSISTENCE_SECONDARY_NAMESPACE,
+			)
+			.unwrap();
+		assert!(delta_keys.is_empty());
+	}
+
+	#[test]
+	fn test_commit_produces_single_delta_key() {
+		let inner = TestStore::new();
+		let queued = QueuedKVStoreSync::new(&inner);
+
+		queued.write("ns1", "", "key1", vec![1]).unwrap();
+		queued.write("ns2", "", "key2", vec![2]).unwrap();
+		queued.remove("ns1", "", "key3", true).unwrap();
+
+		let committed = queued.commit().unwrap();
+		assert_eq!(committed, 3);
+
+		let delta_keys = inner
+			.list(
+				SYSTEM_DELTA_PERSISTENCE_PRIMARY_NAMESPACE,
+				SYSTEM_DELTA_PERSISTENCE_SECONDARY_NAMESPACE,
+			)
+			.unwrap();
+		assert_eq!(delta_keys.len(), 1);
+
+		let ops = read_delta(&inner, &delta_keys[0]);
+		assert_eq!(ops.len(), 3);
+	}
+
+	#[test]
+	fn test_commit_sequence_numbers_increment() {
+		let inner = TestStore::new();
+		let queued = QueuedKVStoreSync::new(&inner);
+
+		queued.write("ns", "", "key1", vec![1]).unwrap();
+		queued.commit().unwrap();
+
+		queued.write("ns", "", "key2", vec![2]).unwrap();
+		queued.commit().unwrap();
+
+		let delta_keys = inner
+			.list(
+				SYSTEM_DELTA_PERSISTENCE_PRIMARY_NAMESPACE,
+				SYSTEM_DELTA_PERSISTENCE_SECONDARY_NAMESPACE,
+			)
+			.unwrap();
+		assert_eq!(delta_keys.len(), 2);
+		assert!(delta_keys.contains(&"0".to_string()));
+		assert!(delta_keys.contains(&"1".to_string()));
 	}
 }
