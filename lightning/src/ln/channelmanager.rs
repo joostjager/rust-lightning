@@ -188,7 +188,7 @@ use crate::ln::script::ShutdownScript;
 use core::borrow::Borrow;
 use core::convert::Infallible;
 use core::ops::Deref;
-use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use core::time::Duration;
 use core::{cmp, mem};
 
@@ -2808,6 +2808,15 @@ pub struct ChannelManager<
 	#[cfg(any(test, feature = "_test_utils"))]
 	pub(super) per_peer_state: FairRwLock<HashMap<PublicKey, Mutex<PeerState<SP>>>>,
 
+	/// The latest incremental update ID for persistence. Incremented each time an incremental
+	/// update is written via [`Self::write_without_lock`] with `changed_only` set to true.
+	latest_update_id: AtomicU64,
+
+	/// Stores the last persisted serialized bytes for each peer state. Used by
+	/// [`Self::write_without_lock`] to detect which peers have changed since the last persist
+	/// by comparing current serialization to these stored bytes.
+	last_persisted_peer_bytes: Mutex<HashMap<PublicKey, Vec<u8>>>,
+
 	/// We only support using one of [`ChannelMonitorUpdateStatus::InProgress`] and
 	/// [`ChannelMonitorUpdateStatus::Completed`] without restarting. Because the API does not
 	/// otherwise directly enforce this, we enforce it in non-test builds here by storing which one
@@ -3394,7 +3403,7 @@ macro_rules! process_events_body {
 				// Persist while holding the write lock, before handling events.
 				// This ensures the persisted state includes the events we're about to handle.
 				let mut buf = Vec::new();
-				if $self.write_without_lock(&mut buf).is_ok() {
+				if $self.write_without_lock(&mut buf, true).is_ok() {
 					let _ = $self.kv_store.write(
 						CHANNEL_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE,
 						CHANNEL_MANAGER_PERSISTENCE_SECONDARY_NAMESPACE,
@@ -3560,6 +3569,9 @@ impl<
 			highest_seen_timestamp: AtomicUsize::new(current_timestamp as usize),
 
 			per_peer_state: FairRwLock::new(new_hash_map()),
+
+			latest_update_id: AtomicU64::new(0),
+			last_persisted_peer_bytes: Mutex::new(new_hash_map()),
 
 			#[cfg(not(any(test, feature = "_externalize_tests")))]
 			monitor_update_type: AtomicUsize::new(0),
@@ -15235,7 +15247,7 @@ impl<
 		// Serialize and persist while still holding the write lock, ensuring the persisted
 		// state matches the events we're about to return.
 		let mut buf = Vec::new();
-		if self.write_without_lock(&mut buf).is_ok() {
+		if self.write_without_lock(&mut buf, true).is_ok() {
 			let _ = self.kv_store.write(
 				CHANNEL_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE,
 				CHANNEL_MANAGER_PERSISTENCE_SECONDARY_NAMESPACE,
@@ -15797,11 +15809,19 @@ impl<
 		self.needs_persist_flag.swap(false, Ordering::AcqRel)
 	}
 
+	/// Returns the latest update ID that was written. Returns 0 if no updates have been written.
+	pub fn get_latest_update_id(&self) -> u64 {
+		self.latest_update_id.load(Ordering::Acquire)
+	}
+
 	/// Serializes the [`ChannelManager`] to the given writer.
+	///
+	/// If `changed_only` is true, only peer states that have changed since the last persist are
+	/// written. Change detection uses byte comparison against `last_persisted_peer_bytes`.
 	///
 	/// This method assumes that [`Self::total_consistency_lock`] is already held by the caller.
 	#[rustfmt::skip]
-	pub(crate) fn write_without_lock<W: Writer>(&self, writer: &mut W) -> Result<(), io::Error> {
+	fn write_without_lock<W: Writer>(&self, writer: &mut W, changed_only: bool) -> Result<(), io::Error> {
 		write_ver_prefix!(writer, SERIALIZATION_VERSION, MIN_SERIALIZATION_VERSION);
 
 		self.chain_hash.write(writer)?;
@@ -15812,16 +15832,49 @@ impl<
 		}
 
 		let per_peer_state = self.per_peer_state.write().unwrap();
+		let mut last_persisted = self.last_persisted_peer_bytes.lock().unwrap();
 
-		let mut serializable_peer_count: u64 = 0;
+		// Serialize each peer's state and determine which ones to include.
+		let mut peers_to_write: Vec<(&PublicKey, &Mutex<PeerState<SP>>)> = Vec::new();
+		let mut new_serialized_bytes: HashMap<PublicKey, Vec<u8>> = new_hash_map();
+
+		for (peer_pubkey, peer_mtx) in per_peer_state.iter() {
+			let peer = peer_mtx.lock().unwrap();
+			if peer.ok_to_remove(false) {
+				continue;
+			}
+
+			let mut peer_bytes = Vec::new();
+			peer.latest_features.write(&mut peer_bytes).expect("Vec write can't fail");
+			peer.peer_storage.write(&mut peer_bytes).expect("Vec write can't fail");
+			peer.monitor_update_blocked_actions.write(&mut peer_bytes).expect("Vec write can't fail");
+			peer.in_flight_monitor_updates.write(&mut peer_bytes).expect("Vec write can't fail");
+			for channel in peer.channel_by_id.values().filter_map(Channel::as_funded).filter(|c| c.context.can_resume_on_restart()) {
+				channel.write(&mut peer_bytes).expect("Vec write can't fail");
+			}
+
+			let should_write = if changed_only {
+				match last_persisted.get(peer_pubkey) {
+					Some(prev_bytes) => &peer_bytes != prev_bytes,
+					None => true,
+				}
+			} else {
+				true
+			};
+
+			if should_write {
+				peers_to_write.push((peer_pubkey, peer_mtx));
+				new_serialized_bytes.insert(*peer_pubkey, peer_bytes);
+			}
+		}
+
+		let serializable_peer_count = peers_to_write.len() as u64;
+
 		{
 			let mut number_of_funded_channels = 0;
-			for (_, peer_state_mutex) in per_peer_state.iter() {
-				let mut peer_state_lock = peer_state_mutex.lock().unwrap();
-				let peer_state = &mut *peer_state_lock;
-				if !peer_state.ok_to_remove(false) {
-					serializable_peer_count += 1;
-				}
+			for (_, peer_state_mutex) in &peers_to_write {
+				let peer_state_lock = peer_state_mutex.lock().unwrap();
+				let peer_state = &*peer_state_lock;
 
 				number_of_funded_channels += peer_state.channel_by_id
 					.values()
@@ -15832,9 +15885,9 @@ impl<
 
 			(number_of_funded_channels as u64).write(writer)?;
 
-			for (_, peer_state_mutex) in per_peer_state.iter() {
-				let mut peer_state_lock = peer_state_mutex.lock().unwrap();
-				let peer_state = &mut *peer_state_lock;
+			for (_, peer_state_mutex) in &peers_to_write {
+				let peer_state_lock = peer_state_mutex.lock().unwrap();
+				let peer_state = &*peer_state_lock;
 				for channel in peer_state.channel_by_id
 					.values()
 					.filter_map(Channel::as_funded)
@@ -15881,7 +15934,7 @@ impl<
 
 		let mut monitor_update_blocked_actions_per_peer = None;
 		let mut peer_states = Vec::new();
-		for (_, peer_state_mutex) in per_peer_state.iter() {
+		for (_, peer_state_mutex) in &peers_to_write {
 			// Because we're holding the owning `per_peer_state` write lock here there's no chance
 			// of a lockorder violation deadlock - no other thread can be holding any
 			// per_peer_state lock at all.
@@ -15891,21 +15944,15 @@ impl<
 		let mut peer_storage_dir: Vec<(&PublicKey, &Vec<u8>)> = Vec::new();
 
 		(serializable_peer_count).write(writer)?;
-		for ((peer_pubkey, _), peer_state) in per_peer_state.iter().zip(peer_states.iter()) {
-			// Peers which we have no channels to should be dropped once disconnected. As we
-			// disconnect all peers when shutting down and serializing the ChannelManager, we
-			// consider all peers as disconnected here. There's therefore no need write peers with
-			// no channels.
-			if !peer_state.ok_to_remove(false) {
-				peer_pubkey.write(writer)?;
-				peer_state.latest_features.write(writer)?;
-				peer_storage_dir.push((peer_pubkey, &peer_state.peer_storage));
+		for ((peer_pubkey, _), peer_state) in peers_to_write.iter().zip(peer_states.iter()) {
+			peer_pubkey.write(writer)?;
+			peer_state.latest_features.write(writer)?;
+			peer_storage_dir.push((peer_pubkey, &peer_state.peer_storage));
 
-				if !peer_state.monitor_update_blocked_actions.is_empty() {
-					monitor_update_blocked_actions_per_peer
-						.get_or_insert_with(Vec::new)
-						.push((*peer_pubkey, &peer_state.monitor_update_blocked_actions));
-				}
+			if !peer_state.monitor_update_blocked_actions.is_empty() {
+				monitor_update_blocked_actions_per_peer
+					.get_or_insert_with(Vec::new)
+					.push((**peer_pubkey, &peer_state.monitor_update_blocked_actions));
 			}
 		}
 
@@ -16028,7 +16075,7 @@ impl<
 
 		let mut legacy_in_flight_monitor_updates: Option<HashMap<(&PublicKey, &OutPoint), &Vec<ChannelMonitorUpdate>>> = None;
 		let mut in_flight_monitor_updates: Option<HashMap<(&PublicKey, &ChannelId), &Vec<ChannelMonitorUpdate>>> = None;
-		for ((counterparty_id, _), peer_state) in per_peer_state.iter().zip(peer_states.iter()) {
+		for ((counterparty_id, _), peer_state) in peers_to_write.iter().zip(peer_states.iter()) {
 			for (channel_id, (funding_txo, updates)) in peer_state.in_flight_monitor_updates.iter() {
 				if !updates.is_empty() {
 					legacy_in_flight_monitor_updates.get_or_insert_with(|| new_hash_map())
@@ -16038,6 +16085,8 @@ impl<
 				}
 			}
 		}
+
+		let update_id = self.latest_update_id.load(Ordering::Acquire);
 
 		write_tlv_fields!(writer, {
 			(1, pending_outbound_payments_no_retry, required),
@@ -16057,10 +16106,15 @@ impl<
 			(17, in_flight_monitor_updates, option),
 			(19, peer_storage_dir, optional_vec),
 			(21, WithoutLength(&self.flow.writeable_async_receive_offer_cache()), required),
+			(23, update_id, required),
 		});
 
 		// Remove the SpliceFailed and DiscardFunding events added earlier.
 		events.truncate(event_count);
+
+		for (peer_pubkey, bytes) in new_serialized_bytes {
+			last_persisted.insert(peer_pubkey, bytes);
+		}
 
 		Ok(())
 	}
@@ -17705,7 +17759,7 @@ impl<
 {
 	fn write<W: Writer>(&self, writer: &mut W) -> Result<(), io::Error> {
 		let _consistency_lock = self.total_consistency_lock.write().unwrap();
-		self.write_without_lock(writer)
+		self.write_without_lock(writer, false)
 	}
 }
 
@@ -17793,6 +17847,7 @@ pub(super) struct ChannelManagerData<SP: SignerProvider> {
 	forward_htlcs_legacy: HashMap<u64, Vec<HTLCForwardInfo>>,
 	pending_intercepted_htlcs_legacy: HashMap<InterceptId, PendingAddHTLCInfo>,
 	decode_update_add_htlcs_legacy: HashMap<u64, Vec<msgs::UpdateAddHTLC>>,
+	update_id: u64,
 	// The `ChannelManager` version that was written.
 	version: u8,
 }
@@ -17978,6 +18033,7 @@ impl<'a, ES: EntropySource, SP: SignerProvider, L: Logger>
 		let mut inbound_payment_id_secret = None;
 		let mut peer_storage_dir: Option<Vec<(PublicKey, Vec<u8>)>> = None;
 		let mut async_receive_offer_cache: AsyncReceiveOfferCache = AsyncReceiveOfferCache::new();
+		let mut update_id: u64 = 0;
 		read_tlv_fields!(reader, {
 			(1, pending_outbound_payments_no_retry, option),
 			(2, pending_intercepted_htlcs_legacy, option),
@@ -17996,6 +18052,7 @@ impl<'a, ES: EntropySource, SP: SignerProvider, L: Logger>
 			(17, in_flight_monitor_updates, option),
 			(19, peer_storage_dir, optional_vec),
 			(21, async_receive_offer_cache, (default_value, async_receive_offer_cache)),
+			(23, update_id, (default_value, 0u64)),
 		});
 
 		// Merge legacy pending_outbound_payments fields into a single HashMap.
@@ -18113,6 +18170,7 @@ impl<'a, ES: EntropySource, SP: SignerProvider, L: Logger>
 			in_flight_monitor_updates: in_flight_monitor_updates.unwrap_or_default(),
 			peer_storage_dir: peer_storage_dir.unwrap_or_default(),
 			async_receive_offer_cache,
+			update_id,
 			version,
 		})
 	}
@@ -18425,6 +18483,7 @@ impl<
 			mut in_flight_monitor_updates,
 			peer_storage_dir,
 			async_receive_offer_cache,
+			update_id,
 			version: _version,
 		} = data;
 
@@ -19747,6 +19806,9 @@ impl<
 			highest_seen_timestamp: AtomicUsize::new(highest_seen_timestamp as usize),
 
 			per_peer_state: FairRwLock::new(per_peer_state),
+
+			latest_update_id: AtomicU64::new(update_id),
+			last_persisted_peer_bytes: Mutex::new(new_hash_map()),
 
 			#[cfg(not(any(test, feature = "_externalize_tests")))]
 			monitor_update_type: AtomicUsize::new(0),
