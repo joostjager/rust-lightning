@@ -3400,23 +3400,25 @@ macro_rules! process_events_body {
 
 				pending_events = $self.pending_events.lock().unwrap().clone();
 
-				// Persist while holding the write lock, before handling events.
-				// This ensures the persisted state includes the events we're about to handle.
-				let mut buf = Vec::new();
-				if $self.write_without_lock(&mut buf, true).is_ok() {
-					let _ = $self.kv_store.write(
-						CHANNEL_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE,
-						CHANNEL_MANAGER_PERSISTENCE_SECONDARY_NAMESPACE,
-						CHANNEL_MANAGER_PERSISTENCE_KEY,
-						buf,
-					);
+				if !pending_events.is_empty() {
+					// Persist while holding the write lock, before handling events.
+					// This ensures the persisted state includes the events we're about to handle.
+					let mut buf = Vec::new();
+					if $self.write_without_lock(&mut buf, true).is_ok() {
+						let _ = $self.kv_store.write(
+							CHANNEL_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE,
+							CHANNEL_MANAGER_PERSISTENCE_SECONDARY_NAMESPACE,
+							CHANNEL_MANAGER_PERSISTENCE_KEY,
+							buf,
+						);
+					}
+
+					// Commit all pending writes (including any queued monitor updates) atomically.
+					let _ = $self.kv_store.commit();
+
+					// Clear the persistence flag since we just persisted.
+					$self.needs_persist_flag.store(false, Ordering::Release);
 				}
-
-				// Commit all pending writes (including any queued monitor updates) atomically.
-				let _ = $self.kv_store.commit();
-
-				// Clear the persistence flag since we just persisted.
-				$self.needs_persist_flag.store(false, Ordering::Release);
 			}
 
 			let mut post_event_actions = Vec::new();
@@ -15244,23 +15246,25 @@ impl<
 			pending_events.append(&mut broadcast_msgs);
 		}
 
-		// Serialize and persist while still holding the write lock, ensuring the persisted
-		// state matches the events we're about to return.
-		let mut buf = Vec::new();
-		if self.write_without_lock(&mut buf, true).is_ok() {
-			let _ = self.kv_store.write(
-				CHANNEL_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE,
-				CHANNEL_MANAGER_PERSISTENCE_SECONDARY_NAMESPACE,
-				CHANNEL_MANAGER_PERSISTENCE_KEY,
-				buf,
-			);
+		if !pending_events.is_empty() {
+			// Serialize and persist while still holding the write lock, ensuring the persisted
+			// state matches the events we're about to return.
+			let mut buf = Vec::new();
+			if self.write_without_lock(&mut buf, true).is_ok() {
+				let _ = self.kv_store.write(
+					CHANNEL_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE,
+					CHANNEL_MANAGER_PERSISTENCE_SECONDARY_NAMESPACE,
+					CHANNEL_MANAGER_PERSISTENCE_KEY,
+					buf,
+				);
+			}
+
+			// Commit all pending writes (including any queued monitor updates) atomically.
+			let _ = self.kv_store.commit();
+
+			// Clear the persistence flag since we just persisted.
+			self.needs_persist_flag.store(false, Ordering::Release);
 		}
-
-		// Commit all pending writes (including any queued monitor updates) atomically.
-		let _ = self.kv_store.commit();
-
-		// Clear the persistence flag since we just persisted.
-		self.needs_persist_flag.store(false, Ordering::Release);
 
 		pending_events
 	}
