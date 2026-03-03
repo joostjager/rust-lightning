@@ -59,11 +59,10 @@ use lightning::sign::{ChangeDestinationSource, ChangeDestinationSourceSync, Outp
 use lightning::util::async_poll::MaybeSend;
 use lightning::util::logger::Logger;
 use lightning::util::persist::{
-	KVStore, KVStoreSync, KVStoreSyncWrapper, CHANNEL_MANAGER_PERSISTENCE_KEY,
-	CHANNEL_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE, CHANNEL_MANAGER_PERSISTENCE_SECONDARY_NAMESPACE,
-	NETWORK_GRAPH_PERSISTENCE_KEY, NETWORK_GRAPH_PERSISTENCE_PRIMARY_NAMESPACE,
-	NETWORK_GRAPH_PERSISTENCE_SECONDARY_NAMESPACE, SCORER_PERSISTENCE_KEY,
-	SCORER_PERSISTENCE_PRIMARY_NAMESPACE, SCORER_PERSISTENCE_SECONDARY_NAMESPACE,
+	KVStore, KVStoreSync, KVStoreSyncWrapper, NETWORK_GRAPH_PERSISTENCE_KEY,
+	NETWORK_GRAPH_PERSISTENCE_PRIMARY_NAMESPACE, NETWORK_GRAPH_PERSISTENCE_SECONDARY_NAMESPACE,
+	SCORER_PERSISTENCE_KEY, SCORER_PERSISTENCE_PRIMARY_NAMESPACE,
+	SCORER_PERSISTENCE_SECONDARY_NAMESPACE,
 };
 use lightning::util::sweep::{OutputSweeper, OutputSweeperSync};
 use lightning::util::wakers::Future;
@@ -1324,17 +1323,6 @@ where
 	}
 	log_trace!(logger, "Terminating background processor.");
 
-	// After we exit, ensure we persist the ChannelManager one final time - this avoids
-	// some races where users quit while channel updates were in-flight, with
-	// ChannelMonitor update(s) persisted without a corresponding ChannelManager update.
-	kv_store
-		.write(
-			CHANNEL_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE,
-			CHANNEL_MANAGER_PERSISTENCE_SECONDARY_NAMESPACE,
-			CHANNEL_MANAGER_PERSISTENCE_KEY,
-			channel_manager.get_cm().encode(),
-		)
-		.await?;
 	if let Some(ref scorer) = scorer {
 		kv_store
 			.write(
@@ -1749,15 +1737,6 @@ impl BackgroundProcessor {
 				}
 			}
 
-			// After we exit, ensure we persist the ChannelManager one final time - this avoids
-			// some races where users quit while channel updates were in-flight, with
-			// ChannelMonitor update(s) persisted without a corresponding ChannelManager update.
-			kv_store.write(
-				CHANNEL_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE,
-				CHANNEL_MANAGER_PERSISTENCE_SECONDARY_NAMESPACE,
-				CHANNEL_MANAGER_PERSISTENCE_KEY,
-				channel_manager.get_cm().encode(),
-			)?;
 			if let Some(ref scorer) = scorer {
 				kv_store.write(
 					SCORER_PERSISTENCE_PRIMARY_NAMESPACE,

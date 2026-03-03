@@ -133,8 +133,8 @@ use crate::util::config::{
 use crate::util::errors::APIError;
 use crate::util::logger::{Level, Logger, WithContext};
 use crate::util::persist::{
-	KVStoreSync, CHANNEL_MANAGER_PERSISTENCE_KEY, CHANNEL_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE,
-	CHANNEL_MANAGER_PERSISTENCE_SECONDARY_NAMESPACE,
+	KVStoreSync, MonitorName, CHANNEL_MANAGER_PERSISTENCE_KEY,
+	CHANNEL_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE, CHANNEL_MANAGER_PERSISTENCE_SECONDARY_NAMESPACE,
 };
 use crate::util::scid_utils::fake_scid;
 use crate::util::ser::{
@@ -3403,22 +3403,32 @@ macro_rules! process_events_body {
 				if !pending_events.is_empty() {
 					// Persist while holding the write lock, before handling events.
 					// This ensures the persisted state includes the events we're about to handle.
-					let mut buf = Vec::new();
-					if $self.write_without_lock(&mut buf, true).is_ok() {
+					if let Ok((main_buf, channels)) = $self.write_without_lock(true) {
 						let _ = $self.kv_store.write(
 							CHANNEL_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE,
 							CHANNEL_MANAGER_PERSISTENCE_SECONDARY_NAMESPACE,
 							CHANNEL_MANAGER_PERSISTENCE_KEY,
-							buf,
+							main_buf,
 						);
+						for (key, channel_buf) in channels {
+							let _ = $self.kv_store.write(
+								CHANNEL_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE,
+								CHANNEL_MANAGER_PERSISTENCE_SECONDARY_NAMESPACE,
+								&key,
+								channel_buf,
+							);
+						}
 					}
-
-					// Commit all pending writes (including any queued monitor updates) atomically.
-					let _ = $self.kv_store.commit();
 
 					// Clear the persistence flag since we just persisted.
 					$self.needs_persist_flag.store(false, Ordering::Release);
 				}
+			}
+
+			if !pending_events.is_empty() {
+				// Commit all pending writes (including any queued monitor updates) atomically.
+				// This is done after releasing the total_consistency_lock.
+				let _ = $self.kv_store.commit();
 			}
 
 			let mut post_event_actions = Vec::new();
@@ -15205,65 +15215,84 @@ impl<
 	/// `MessageSendEvent`s are intended to be broadcasted to all peers, they will be placed among
 	/// the `MessageSendEvent`s to the specific peer they were generated under.
 	fn get_and_clear_pending_msg_events(&self) -> Vec<MessageSendEvent> {
-		// Take write lock for the entire operation to ensure atomic persist + event gathering.
-		let _consistency_lock = self.total_consistency_lock.write().unwrap();
-
-		// Process background events (normally done by PersistenceNotifierGuard).
-		let _ = self.process_background_events();
-
-		// TODO: This behavior should be documented. It's unintuitive that we query
-		// ChannelMonitors when clearing other events.
-		self.process_pending_monitor_events();
-		self.maybe_generate_initial_closing_signed();
-
-		#[cfg(test)]
-		if self.check_free_holding_cells() {
-			debug_assert!(false, "Holding cells should always be auto-free'd");
-		}
-
-		// Quiescence is an in-memory protocol, so we don't have to persist because of it.
-		self.maybe_send_stfu();
-
-		let mut is_any_peer_connected = false;
-		let mut pending_events = Vec::new();
+		let pending_events;
+		let needs_commit;
 		{
-			let per_peer_state = self.per_peer_state.read().unwrap();
-			for (_cp_id, peer_state_mutex) in per_peer_state.iter() {
-				let mut peer_state_lock = peer_state_mutex.lock().unwrap();
-				let peer_state = &mut *peer_state_lock;
-				if peer_state.pending_msg_events.len() > 0 {
-					pending_events.append(&mut peer_state.pending_msg_events);
-				}
-				if peer_state.is_connected {
-					is_any_peer_connected = true
-				}
-			}
-		}
+			// Take write lock to ensure atomic persist + event gathering.
+			let _consistency_lock = self.total_consistency_lock.write().unwrap();
 
-		// Ensure that we are connected to some peers before getting broadcast messages.
-		if is_any_peer_connected {
-			let mut broadcast_msgs = self.pending_broadcast_messages.lock().unwrap();
-			pending_events.append(&mut broadcast_msgs);
-		}
+			// Process background events (normally done by PersistenceNotifierGuard).
+			let _ = self.process_background_events();
 
-		if !pending_events.is_empty() {
-			// Serialize and persist while still holding the write lock, ensuring the persisted
-			// state matches the events we're about to return.
-			let mut buf = Vec::new();
-			if self.write_without_lock(&mut buf, true).is_ok() {
-				let _ = self.kv_store.write(
-					CHANNEL_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE,
-					CHANNEL_MANAGER_PERSISTENCE_SECONDARY_NAMESPACE,
-					CHANNEL_MANAGER_PERSISTENCE_KEY,
-					buf,
-				);
+			// TODO: This behavior should be documented. It's unintuitive that we query
+			// ChannelMonitors when clearing other events.
+			self.process_pending_monitor_events();
+			self.maybe_generate_initial_closing_signed();
+
+			#[cfg(test)]
+			if self.check_free_holding_cells() {
+				debug_assert!(false, "Holding cells should always be auto-free'd");
 			}
 
+			// Quiescence is an in-memory protocol, so we don't have to persist because of it.
+			self.maybe_send_stfu();
+
+			let mut is_any_peer_connected = false;
+			pending_events = {
+				let mut events = Vec::new();
+				let per_peer_state = self.per_peer_state.read().unwrap();
+				for (_cp_id, peer_state_mutex) in per_peer_state.iter() {
+					let mut peer_state_lock = peer_state_mutex.lock().unwrap();
+					let peer_state = &mut *peer_state_lock;
+					if peer_state.pending_msg_events.len() > 0 {
+						events.append(&mut peer_state.pending_msg_events);
+					}
+					if peer_state.is_connected {
+						is_any_peer_connected = true
+					}
+				}
+				drop(per_peer_state);
+
+				// Ensure that we are connected to some peers before getting broadcast messages.
+				if is_any_peer_connected {
+					let mut broadcast_msgs = self.pending_broadcast_messages.lock().unwrap();
+					events.append(&mut broadcast_msgs);
+				}
+				events
+			};
+
+			needs_commit = if !pending_events.is_empty() {
+				// Serialize and persist while still holding the write lock, ensuring the
+				// persisted state matches the events we're about to return.
+				if let Ok((main_buf, channels)) = self.write_without_lock(true) {
+					let _ = self.kv_store.write(
+						CHANNEL_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE,
+						CHANNEL_MANAGER_PERSISTENCE_SECONDARY_NAMESPACE,
+						CHANNEL_MANAGER_PERSISTENCE_KEY,
+						main_buf,
+					);
+					for (key, channel_buf) in channels {
+						let _ = self.kv_store.write(
+							CHANNEL_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE,
+							CHANNEL_MANAGER_PERSISTENCE_SECONDARY_NAMESPACE,
+							&key,
+							channel_buf,
+						);
+					}
+				}
+
+				// Clear the persistence flag since we just persisted.
+				self.needs_persist_flag.store(false, Ordering::Release);
+				true
+			} else {
+				false
+			};
+		}
+
+		if needs_commit {
 			// Commit all pending writes (including any queued monitor updates) atomically.
+			// This is done after releasing the total_consistency_lock.
 			let _ = self.kv_store.commit();
-
-			// Clear the persistence flag since we just persisted.
-			self.needs_persist_flag.store(false, Ordering::Release);
 		}
 
 		pending_events
@@ -15825,7 +15854,9 @@ impl<
 	///
 	/// This method assumes that [`Self::total_consistency_lock`] is already held by the caller.
 	#[rustfmt::skip]
-	fn write_without_lock<W: Writer>(&self, writer: &mut W, changed_only: bool) -> Result<(), io::Error> {
+	fn write_without_lock(&self, changed_only: bool) -> Result<(Vec<u8>, HashMap<String, Vec<u8>>), io::Error> {
+		let mut vec_writer = VecWriter(Vec::new());
+		let writer: &mut VecWriter = &mut vec_writer;
 		write_ver_prefix!(writer, SERIALIZATION_VERSION, MIN_SERIALIZATION_VERSION);
 
 		self.chain_hash.write(writer)?;
@@ -15874,20 +15905,10 @@ impl<
 
 		let serializable_peer_count = peers_to_write.len() as u64;
 
+		let mut channels_map: HashMap<String, Vec<u8>> = new_hash_map();
 		{
-			let mut number_of_funded_channels = 0;
-			for (_, peer_state_mutex) in &peers_to_write {
-				let peer_state_lock = peer_state_mutex.lock().unwrap();
-				let peer_state = &*peer_state_lock;
-
-				number_of_funded_channels += peer_state.channel_by_id
-					.values()
-					.filter_map(Channel::as_funded)
-					.filter(|chan| chan.context.can_resume_on_restart())
-					.count();
-			}
-
-			(number_of_funded_channels as u64).write(writer)?;
+			// Write 0 channels to the main blob; channels are serialized separately.
+			(0u64).write(writer)?;
 
 			for (_, peer_state_mutex) in &peers_to_write {
 				let peer_state_lock = peer_state_mutex.lock().unwrap();
@@ -15897,7 +15918,19 @@ impl<
 					.filter_map(Channel::as_funded)
 					.filter(|channel| channel.context.can_resume_on_restart())
 				{
-					channel.write(writer)?;
+					let channel_id = channel.context.channel_id();
+					let key = if let Some(funding_txo) = channel.funding.get_funding_txo() {
+						if ChannelId::v1_from_funding_outpoint(funding_txo) == channel_id {
+							format!("manager_{}", MonitorName::V1Channel(funding_txo))
+						} else {
+							format!("manager_{}", MonitorName::V2Channel(channel_id))
+						}
+					} else {
+						format!("manager_{}", MonitorName::V2Channel(channel_id))
+					};
+					let mut channel_writer = VecWriter(Vec::new());
+					channel.write(&mut channel_writer)?;
+					channels_map.insert(key, channel_writer.0);
 				}
 			}
 		}
@@ -16120,7 +16153,7 @@ impl<
 			last_persisted.insert(peer_pubkey, bytes);
 		}
 
-		Ok(())
+		Ok((vec_writer.0, channels_map))
 	}
 
 	#[cfg(any(test, feature = "_test_utils"))]
@@ -17761,9 +17794,8 @@ impl<
 		L: Logger,
 	> Writeable for ChannelManager<M, T, K, ES, NS, SP, F, R, MR, L>
 {
-	fn write<W: Writer>(&self, writer: &mut W) -> Result<(), io::Error> {
-		let _consistency_lock = self.total_consistency_lock.write().unwrap();
-		self.write_without_lock(writer, false)
+	fn write<W: Writer>(&self, _writer: &mut W) -> Result<(), io::Error> {
+		unimplemented!("use write_without_lock instead");
 	}
 }
 
