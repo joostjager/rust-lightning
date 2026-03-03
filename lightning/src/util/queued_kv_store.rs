@@ -118,41 +118,6 @@ where
 		Self { inner, pending_ops: Mutex::new(Vec::new()), sequence_number: AtomicU64::new(0) }
 	}
 
-	/// Commits all pending operations to the underlying store as a single atomic
-	/// system delta write.
-	///
-	/// All buffered ops are serialized into one value and written under a single
-	/// key in the `system_deltas` namespace. This ensures that either all ops or
-	/// none are persisted, avoiding partial state on crash.
-	///
-	/// Returns the number of operations committed, or an error if the write fails.
-	/// On error, pending operations stay queued for retry.
-	pub fn commit(&self) -> Result<usize, io::Error> {
-		let mut pending = self.pending_ops.lock().unwrap();
-		let count = pending.len();
-		if count == 0 {
-			return Ok(0);
-		}
-
-		let mut buf = Vec::new();
-		(count as u64).write(&mut buf).expect("Vec write cannot fail");
-		for op in pending.iter() {
-			op.write(&mut buf).expect("Vec write cannot fail");
-		}
-
-		let seq = self.sequence_number.fetch_add(1, Ordering::Relaxed);
-		let key = seq.to_string();
-		self.inner.write(
-			SYSTEM_DELTA_PERSISTENCE_PRIMARY_NAMESPACE,
-			SYSTEM_DELTA_PERSISTENCE_SECONDARY_NAMESPACE,
-			&key,
-			buf,
-		)?;
-
-		pending.clear();
-		Ok(count)
-	}
-
 	/// Returns the number of pending operations.
 	pub fn pending_count(&self) -> usize {
 		self.pending_ops.lock().unwrap().len()
@@ -254,6 +219,55 @@ where
 		}
 
 		Ok(keys)
+	}
+
+	fn commit(&self) -> Result<usize, io::Error> {
+		let mut pending = self.pending_ops.lock().unwrap();
+		let count = pending.len();
+		if count == 0 {
+			return Ok(0);
+		}
+
+		println!("QueuedKVStoreSync::commit: {} ops queued", count);
+		for op in pending.iter() {
+			match op {
+				PendingOp::Write { primary_namespace, secondary_namespace, key, value } => {
+					println!(
+						"  WRITE {}/{}/{} ({} bytes)",
+						primary_namespace,
+						secondary_namespace,
+						key,
+						value.len()
+					);
+				},
+				PendingOp::Remove { primary_namespace, secondary_namespace, key, lazy } => {
+					println!(
+						"  REMOVE {}/{}/{} (lazy={})",
+						primary_namespace, secondary_namespace, key, lazy
+					);
+				},
+			}
+		}
+
+		let mut buf = Vec::new();
+		(count as u64).write(&mut buf).expect("Vec write cannot fail");
+		for op in pending.iter() {
+			op.write(&mut buf).expect("Vec write cannot fail");
+		}
+
+		println!("  total delta size: {} bytes", buf.len());
+
+		let seq = self.sequence_number.fetch_add(1, Ordering::Relaxed);
+		let key = seq.to_string();
+		self.inner.write(
+			SYSTEM_DELTA_PERSISTENCE_PRIMARY_NAMESPACE,
+			SYSTEM_DELTA_PERSISTENCE_SECONDARY_NAMESPACE,
+			&key,
+			buf,
+		)?;
+
+		pending.clear();
+		Ok(count)
 	}
 }
 
