@@ -642,13 +642,11 @@ pub(crate) mod futures_util {
 		B: Future<Output = Result<(), ERR>> + Unpin,
 		C: Future<Output = Result<(), ERR>> + Unpin,
 		D: Future<Output = Result<(), ERR>> + Unpin,
-		E: Future<Output = Result<(), ERR>> + Unpin,
 	> {
 		a: JoinerResult<ERR, A>,
 		b: JoinerResult<ERR, B>,
 		c: JoinerResult<ERR, C>,
 		d: JoinerResult<ERR, D>,
-		e: JoinerResult<ERR, E>,
 	}
 
 	impl<
@@ -657,8 +655,7 @@ pub(crate) mod futures_util {
 			B: Future<Output = Result<(), ERR>> + Unpin,
 			C: Future<Output = Result<(), ERR>> + Unpin,
 			D: Future<Output = Result<(), ERR>> + Unpin,
-			E: Future<Output = Result<(), ERR>> + Unpin,
-		> Joiner<ERR, A, B, C, D, E>
+		> Joiner<ERR, A, B, C, D>
 	{
 		pub(crate) fn new() -> Self {
 			Self {
@@ -666,15 +663,11 @@ pub(crate) mod futures_util {
 				b: JoinerResult::Pending(None),
 				c: JoinerResult::Pending(None),
 				d: JoinerResult::Pending(None),
-				e: JoinerResult::Pending(None),
 			}
 		}
 
 		pub(crate) fn set_a(&mut self, fut: A) {
 			self.a = JoinerResult::Pending(Some(fut));
-		}
-		pub(crate) fn set_a_res(&mut self, res: Result<(), ERR>) {
-			self.a = JoinerResult::Ready(res);
 		}
 		pub(crate) fn set_b(&mut self, fut: B) {
 			self.b = JoinerResult::Pending(Some(fut));
@@ -685,9 +678,6 @@ pub(crate) mod futures_util {
 		pub(crate) fn set_d(&mut self, fut: D) {
 			self.d = JoinerResult::Pending(Some(fut));
 		}
-		pub(crate) fn set_e(&mut self, fut: E) {
-			self.e = JoinerResult::Pending(Some(fut));
-		}
 	}
 
 	impl<
@@ -696,12 +686,11 @@ pub(crate) mod futures_util {
 			B: Future<Output = Result<(), ERR>> + Unpin,
 			C: Future<Output = Result<(), ERR>> + Unpin,
 			D: Future<Output = Result<(), ERR>> + Unpin,
-			E: Future<Output = Result<(), ERR>> + Unpin,
-		> Future for Joiner<ERR, A, B, C, D, E>
+		> Future for Joiner<ERR, A, B, C, D>
 	where
-		Joiner<ERR, A, B, C, D, E>: Unpin,
+		Joiner<ERR, A, B, C, D>: Unpin,
 	{
-		type Output = [Result<(), ERR>; 5];
+		type Output = [Result<(), ERR>; 4];
 		fn poll(mut self: Pin<&mut Self>, ctx: &mut core::task::Context<'_>) -> Poll<Self::Output> {
 			let mut all_complete = true;
 			macro_rules! handle {
@@ -728,10 +717,9 @@ pub(crate) mod futures_util {
 			handle!(b);
 			handle!(c);
 			handle!(d);
-			handle!(e);
 
 			if all_complete {
-				let mut res = [Ok(()), Ok(()), Ok(()), Ok(()), Ok(())];
+				let mut res = [Ok(()), Ok(()), Ok(()), Ok(())];
 				if let JoinerResult::Ready(ref mut val) = &mut self.a {
 					core::mem::swap(&mut res[0], val);
 				}
@@ -743,9 +731,6 @@ pub(crate) mod futures_util {
 				}
 				if let JoinerResult::Ready(ref mut val) = &mut self.d {
 					core::mem::swap(&mut res[3], val);
-				}
-				if let JoinerResult::Ready(ref mut val) = &mut self.e {
-					core::mem::swap(&mut res[4], val);
 				}
 				Poll::Ready(res)
 			} else {
@@ -1121,38 +1106,6 @@ where
 
 		let mut futures = Joiner::new();
 
-		if channel_manager.get_cm().get_and_clear_needs_persistence() {
-			log_trace!(logger, "Persisting ChannelManager...");
-
-			let fut = async {
-				kv_store
-					.write(
-						CHANNEL_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE,
-						CHANNEL_MANAGER_PERSISTENCE_SECONDARY_NAMESPACE,
-						CHANNEL_MANAGER_PERSISTENCE_KEY,
-						channel_manager.get_cm().encode(),
-					)
-					.await
-			};
-			// TODO: Once our MSRV is 1.68 we should be able to drop the Box
-			let mut fut = Box::pin(fut);
-
-			// Because persisting the ChannelManager is important to avoid accidental
-			// force-closures, go ahead and poll the future once before we do slightly more
-			// CPU-intensive tasks in the form of NetworkGraph pruning or scorer time-stepping
-			// below. This will get it moving but won't block us for too long if the underlying
-			// future is actually async.
-			use core::future::Future;
-			let mut waker = dummy_waker();
-			let mut ctx = task::Context::from_waker(&mut waker);
-			match core::pin::Pin::new(&mut fut).poll(&mut ctx) {
-				task::Poll::Ready(res) => futures.set_a_res(res),
-				task::Poll::Pending => futures.set_a(fut),
-			}
-
-			log_trace!(logger, "Done persisting ChannelManager.");
-		}
-
 		// Note that we want to archive stale ChannelMonitors and run a network graph prune once
 		// not long after startup before falling back to their usual infrequent runs. This avoids
 		// short-lived clients never archiving stale ChannelMonitors or pruning their network
@@ -1224,7 +1177,7 @@ where
 				};
 
 				// TODO: Once our MSRV is 1.68 we should be able to drop the Box
-				futures.set_b(Box::pin(fut));
+				futures.set_a(Box::pin(fut));
 
 				have_pruned = true;
 			}
@@ -1270,7 +1223,7 @@ where
 					};
 
 					// TODO: Once our MSRV is 1.68 we should be able to drop the Box
-					futures.set_c(Box::pin(fut));
+					futures.set_b(Box::pin(fut));
 				}
 			},
 			Some(true) => break,
@@ -1287,7 +1240,7 @@ where
 					};
 
 					// TODO: Once our MSRV is 1.68 we should be able to drop the Box
-					futures.set_d(Box::pin(fut));
+					futures.set_c(Box::pin(fut));
 				}
 			},
 			Some(true) => break,
@@ -1310,7 +1263,7 @@ where
 						e
 					})
 			};
-			futures.set_e(Box::pin(fut));
+			futures.set_d(Box::pin(fut));
 		}
 
 		// Run persistence tasks in parallel and exit if any of them returns an error.
@@ -1685,17 +1638,6 @@ impl BackgroundProcessor {
 					channel_manager.get_cm().timer_tick_occurred();
 					last_freshness_call = Instant::now();
 				}
-				if channel_manager.get_cm().get_and_clear_needs_persistence() {
-					log_trace!(logger, "Persisting ChannelManager...");
-					(kv_store.write(
-						CHANNEL_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE,
-						CHANNEL_MANAGER_PERSISTENCE_SECONDARY_NAMESPACE,
-						CHANNEL_MANAGER_PERSISTENCE_KEY,
-						channel_manager.get_cm().encode(),
-					))?;
-					log_trace!(logger, "Done persisting ChannelManager.");
-				}
-
 				if let Some(liquidity_manager) = liquidity_manager.as_ref() {
 					log_trace!(logger, "Persisting LiquidityManager...");
 					let _ = liquidity_manager.get_lm().persist().map_err(|e| {
