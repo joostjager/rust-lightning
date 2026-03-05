@@ -38,7 +38,7 @@ use crate::chain::channelmonitor::{
 };
 use crate::chain::transaction::{OutPoint, TransactionData};
 use crate::chain::{BestBlock, ChannelMonitorUpdateStatus, WatchedOutput};
-use crate::events::{self, Event, EventHandler, ReplayEvent};
+use crate::events::{self, ClosureReason, Event, EventHandler, ReplayEvent};
 use crate::ln::channel_state::ChannelDetails;
 #[cfg(peer_storage)]
 use crate::ln::msgs::PeerStorage;
@@ -1415,6 +1415,41 @@ where
 				}
 
 				if update_res.is_err() {
+					if matches!(persist_res, ChannelMonitorUpdateStatus::Completed)
+						&& !monitor.no_further_updates_allowed()
+					{
+						// The monitor update failed but the persister already
+						// completed, and no chain-initiated close is pending.
+						// Returning InProgress here leaves a permanently stuck
+						// entry in ChannelManager's in_flight_monitor_updates
+						// because nobody will ever call channel_monitor_updated
+						// for it. Queue a force-close event so ChannelManager
+						// cleans up the channel.
+						//
+						// When no_further_updates_allowed() is true, the monitor
+						// already has a pending close event (e.g.
+						// CommitmentTxConfirmed) that will cause ChannelManager
+						// to force-close the channel. The stuck in-flight entry
+						// will be drained when the force-close update completes
+						// at a later index.
+						let funding_txo = monitor.get_funding_txo();
+						let counterparty_node_id = monitor.get_counterparty_node_id();
+						self.pending_monitor_events.lock().unwrap().push((
+							funding_txo,
+							channel_id,
+							vec![MonitorEvent::HolderForceClosedWithInfo {
+								reason: ClosureReason::ProcessingError {
+									err: "Failed to apply a channel monitor update, \
+										force-closing the channel"
+										.to_string(),
+								},
+								outpoint: funding_txo,
+								channel_id,
+							}],
+							counterparty_node_id,
+						));
+						self.event_notifier.notify();
+					}
 					ChannelMonitorUpdateStatus::InProgress
 				} else {
 					persist_res

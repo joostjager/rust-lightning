@@ -5178,15 +5178,16 @@ fn test_mpp_claim_to_holding_cell() {
 }
 
 #[test]
-#[should_panic(expected = "Watch::update_channel returned Completed while prior updates are still InProgress")]
 fn test_monitor_update_fail_after_funding_spend() {
 	// When a counterparty commitment transaction confirms (funding spend), the
 	// ChannelMonitor sets funding_spend_seen. If a commitment_signed from the
 	// counterparty is then processed (a race between chain events and message
 	// processing), update_monitor returns Err because no_further_updates_allowed()
-	// is true. ChainMonitor overrides the result to InProgress, permanently
-	// freezing the channel. A subsequent preimage claim returning Completed then
-	// triggers the per-channel assertion.
+	// is true. For a sync persister (Completed), ChainMonitor returns InProgress
+	// which creates a stuck entry in in_flight_monitor_updates. On the next event
+	// processing round, the CommitmentTxConfirmed monitor event is processed,
+	// clearing in_flight_monitor_updates and force-closing the channel. After
+	// that, preimage claims go through the closed-channel path.
 	let chanmon_cfgs = create_chanmon_cfgs(2);
 	let node_cfgs = create_node_cfgs(2, &chanmon_cfgs);
 	let node_chanmgrs = create_node_chanmgrs(2, &node_cfgs, &[None, None]);
@@ -5209,9 +5210,7 @@ fn test_monitor_update_fail_after_funding_spend() {
 	let (block_hash, height) = nodes[1].best_block_info();
 	let block = create_dummy_block(block_hash, height + 1, vec![as_commitment_tx[0].clone()]);
 	let txdata: Vec<_> = block.txdata.iter().enumerate().collect();
-	nodes[1].chain_monitor.chain_monitor.transactions_confirmed(
-		&block.header, &txdata, height + 1,
-	);
+	nodes[1].chain_monitor.chain_monitor.transactions_confirmed(&block.header, &txdata, height + 1);
 
 	// Send payment 2 from A to B.
 	let (route, payment_hash_2, _, payment_secret_2) =
@@ -5233,15 +5232,33 @@ fn test_monitor_update_fail_after_funding_spend() {
 
 	nodes[1].node.handle_update_add_htlc(node_a_id, &payment_event.msgs[0]);
 
-	// B processes commitment_signed. The monitor's update_monitor succeeds on the
-	// update steps, but returns Err at the end because no_further_updates_allowed()
-	// is true (funding_spend_seen). ChainMonitor overrides the result to InProgress.
+	// B processes commitment_signed. The monitor's update_monitor returns Err
+	// because no_further_updates_allowed() is true. ChainMonitor returns InProgress,
+	// creating a stuck entry in in_flight_monitor_updates. Since
+	// no_further_updates_allowed() is true, no HolderForceClosedWithInfo is pushed
+	// (the pending CommitmentTxConfirmed event will handle the close).
 	nodes[1].node.handle_commitment_signed(node_a_id, &payment_event.commitment_msg[0]);
 	check_added_monitors(&nodes[1], 1);
-	assert!(nodes[1].node.get_and_clear_pending_msg_events().is_empty());
 
-	// B claims payment 1. The PaymentPreimage monitor update returns Completed
-	// (update_monitor succeeds for preimage, and persister returns Completed),
-	// but the prior InProgress from the commitment_signed is still pending.
+	// The next call to get_and_clear_pending_msg_events (inside check_closed_broadcast)
+	// triggers event processing, which picks up the CommitmentTxConfirmed event.
+	// The handler clears in_flight_monitor_updates and force-closes the channel.
+	check_closed_broadcast(&nodes[1], 1, true);
+	check_added_monitors(&nodes[1], 1);
+	check_closed_event(&nodes[1], 1, ClosureReason::CommitmentTxConfirmed, &[node_a_id], 100_000);
+
+	// Advance B's chain to satisfy the HTLC claim transaction's locktime.
+	let (block_hash, height) = nodes[1].best_block_info();
+	let block = create_dummy_block(block_hash, height + 1, Vec::new());
+	connect_block(&nodes[1], &block);
+
+	// B claims payment 1. Now the channel is closed, so the preimage claim goes
+	// through the closed-channel path without hitting the per-channel assertion.
 	nodes[1].node.claim_funds(payment_preimage_1);
+	check_added_monitors(&nodes[1], 1);
+
+	// Drain the PaymentClaimed event.
+	let events = nodes[1].node.get_and_clear_pending_events();
+	assert_eq!(events.len(), 1);
+	assert!(matches!(events[0], Event::PaymentClaimed { .. }));
 }

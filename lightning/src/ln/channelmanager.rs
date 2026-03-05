@@ -10076,14 +10076,34 @@ This indicates a bug inside LDK. Please report this error at https://github.com/
 			if update_completed {
 				let _ = in_flight_updates.remove(update_idx);
 			}
-			// A Watch implementation must not return Completed while prior updates are
-			// still InProgress, as this would violate the async persistence contract.
+			// A Watch implementation must not return Completed while prior
+			// updates are still InProgress. After a restart, in-flight
+			// updates are replayed in order starting at index 0, so a
+			// completion at index 0 with later updates still queued is
+			// expected and safe. But when update_idx > 0, prior updates
+			// are stuck (update_monitor failed while the persister had
+			// already completed). Clear them so the pending close event
+			// (CommitmentTxConfirmed or HolderForceClosedWithInfo) can
+			// proceed without hitting this check again.
 			#[cfg(test)]
 			let skip_check = self.skip_monitor_update_assertion.load(Ordering::Relaxed);
 			#[cfg(not(test))]
 			let skip_check = false;
-			if !skip_check && update_completed && !in_flight_updates.is_empty() {
-				panic!("Watch::update_channel returned Completed while prior updates are still InProgress");
+			if !skip_check && update_completed && update_idx > 0 {
+				let logger = WithContext::from(
+					&self.logger,
+					Some(counterparty_node_id),
+					Some(channel_id),
+					None,
+				);
+				log_warn!(
+					logger,
+					"Watch::update_channel returned Completed for update at index {} \
+					 while {} prior update(s) are still in-flight, clearing them",
+					update_idx,
+					update_idx,
+				);
+				in_flight_updates.drain(..update_idx);
 			}
 			(update_completed, update_completed && in_flight_updates.is_empty())
 		} else {
