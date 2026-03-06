@@ -330,12 +330,13 @@ struct TestChainMonitor {
 			Arc<KeyProvider>,
 		>,
 	>,
+	pub deferred: bool,
 	pub latest_monitors: Mutex<HashMap<ChannelId, LatestMonitorState>>,
 }
 impl TestChainMonitor {
 	pub fn new(
 		broadcaster: Arc<TestBroadcaster>, logger: Arc<dyn Logger>, feeest: Arc<FuzzEstimator>,
-		persister: Arc<TestPersister>, keys: Arc<KeyProvider>,
+		persister: Arc<TestPersister>, keys: Arc<KeyProvider>, deferred: bool,
 	) -> Self {
 		Self {
 			chain_monitor: Arc::new(chainmonitor::ChainMonitor::new(
@@ -346,12 +347,42 @@ impl TestChainMonitor {
 				Arc::clone(&persister),
 				Arc::clone(&keys),
 				keys.get_peer_storage_key(),
-				false,
+				deferred,
 			)),
 			logger,
 			keys,
 			persister,
+			deferred,
 			latest_monitors: Mutex::new(new_hash_map()),
+		}
+	}
+
+	/// Flushes all deferred monitor operations and, if the persister reports success, promotes
+	/// pending monitor states to persisted in our shadow records. `TestChainMonitor` maintains
+	/// its own `latest_monitors` map that tracks serialized monitor snapshots independently of
+	/// `ChainMonitor`, so that the fuzzer can simulate node restarts by deserializing from these
+	/// snapshots rather than relying on the persister's storage.
+	///
+	/// This simulates the pattern of snapshotting the pending count, persisting the
+	/// `ChannelManager`, then flushing the queued monitor writes.
+	fn flush_and_update_latest_monitors(&self) {
+		let count = self.chain_monitor.pending_operation_count();
+		if count == 0 {
+			return;
+		}
+		// Execute all queued watch_channel/update_channel operations inside the ChainMonitor.
+		self.chain_monitor.flush(count, &self.logger);
+		let persister_res = *self.persister.update_ret.lock().unwrap();
+		// Only update our local tracking state when the persister signals completion. When
+		// persistence is still in-progress, the monitors stay in the pending set so that a
+		// simulated restart can still reload from the last fully-persisted snapshot.
+		if persister_res == chain::ChannelMonitorUpdateStatus::Completed {
+			for (_channel_id, state) in self.latest_monitors.lock().unwrap().iter_mut() {
+				if let Some((id, data)) = state.pending_monitors.drain(..).last() {
+					state.persisted_monitor_id = id;
+					state.persisted_monitor = data;
+				}
+			}
 		}
 	}
 }
@@ -363,6 +394,9 @@ impl chain::Watch<TestChannelSigner> for TestChainMonitor {
 		monitor.write(&mut ser).unwrap();
 		let monitor_id = monitor.get_latest_update_id();
 		let res = self.chain_monitor.watch_channel(channel_id, monitor);
+		if self.deferred {
+			assert_eq!(res, Ok(chain::ChannelMonitorUpdateStatus::InProgress));
+		}
 		let state = match res {
 			Ok(chain::ChannelMonitorUpdateStatus::Completed) => LatestMonitorState {
 				persisted_monitor_id: monitor_id,
@@ -412,6 +446,9 @@ impl chain::Watch<TestChannelSigner> for TestChainMonitor {
 		let mut ser = VecWriter(Vec::new());
 		deserialized_monitor.write(&mut ser).unwrap();
 		let res = self.chain_monitor.update_channel(channel_id, update);
+		if self.deferred {
+			assert_eq!(res, chain::ChannelMonitorUpdateStatus::InProgress);
+		}
 		match res {
 			chain::ChannelMonitorUpdateStatus::Completed => {
 				map_entry.persisted_monitor_id = update.update_id;
@@ -428,6 +465,9 @@ impl chain::Watch<TestChannelSigner> for TestChainMonitor {
 	fn release_pending_monitor_events(
 		&self,
 	) -> Vec<(OutPoint, ChannelId, Vec<MonitorEvent>, PublicKey)> {
+		if self.deferred {
+			self.flush_and_update_latest_monitors();
+		}
 		return self.chain_monitor.release_pending_monitor_events();
 	}
 }
@@ -949,9 +989,10 @@ pub fn do_test<Out: Output + MaybeSend + MaybeSync>(data: &[u8], out: Out) {
 	let broadcast_c = Arc::new(TestBroadcaster { txn_broadcasted: RefCell::new(Vec::new()) });
 	let router = FuzzRouter {};
 
-	// Read initial monitor styles and channel type from fuzz input byte 0:
+	// Read initial monitor styles, channel type, and deferred write mode from fuzz input byte 0:
 	// bits 0-2: monitor styles (1 bit per node)
 	// bits 3-4: channel type (0=Legacy, 1=KeyedAnchors, 2=ZeroFeeCommitments)
+	// bits 5-7: deferred monitor write mode (1 bit per node)
 	let config_byte = if !data.is_empty() { data[0] } else { 0 };
 	let chan_type = match (config_byte >> 3) & 0b11 {
 		0 => ChanType::Legacy,
@@ -974,6 +1015,11 @@ pub fn do_test<Out: Output + MaybeSend + MaybeSync>(data: &[u8], out: Out) {
 		} else {
 			ChannelMonitorUpdateStatus::Completed
 		}),
+	];
+	let deferred = [
+		config_byte & 0b0010_0000 != 0,
+		config_byte & 0b0100_0000 != 0,
+		config_byte & 0b1000_0000 != 0,
 	];
 
 	let mut chain_state = ChainState::new();
@@ -1003,6 +1049,7 @@ pub fn do_test<Out: Output + MaybeSend + MaybeSync>(data: &[u8], out: Out) {
 					update_ret: Mutex::new(mon_style[$node_id as usize].borrow().clone()),
 				}),
 				Arc::clone(&keys_manager),
+				deferred[$node_id as usize],
 			));
 
 			let mut config = UserConfig::default();
@@ -1067,6 +1114,7 @@ pub fn do_test<Out: Output + MaybeSend + MaybeSync>(data: &[u8], out: Out) {
 				update_ret: Mutex::new(ChannelMonitorUpdateStatus::Completed),
 			}),
 			Arc::clone(keys),
+			deferred[node_id as usize],
 		));
 
 		let mut config = UserConfig::default();
@@ -1144,11 +1192,20 @@ pub fn do_test<Out: Output + MaybeSend + MaybeSync>(data: &[u8], out: Out) {
 		let manager = <(BlockLocator, ChanMan)>::read(&mut &ser[..], read_args)
 			.expect("Failed to read manager");
 		let res = (manager.1, chain_monitor.clone());
+		let expected_status = if deferred[node_id as usize] {
+			ChannelMonitorUpdateStatus::InProgress
+		} else {
+			ChannelMonitorUpdateStatus::Completed
+		};
 		for (channel_id, mon) in monitors.drain() {
 			assert_eq!(
 				chain_monitor.chain_monitor.watch_channel(channel_id, mon),
-				Ok(ChannelMonitorUpdateStatus::Completed)
+				Ok(expected_status)
 			);
+		}
+		if deferred[node_id as usize] {
+			let count = chain_monitor.chain_monitor.pending_operation_count();
+			chain_monitor.chain_monitor.flush(count, &chain_monitor.logger);
 		}
 		*chain_monitor.persister.update_ret.lock().unwrap() = *mon_style[node_id as usize].borrow();
 		res
@@ -1156,6 +1213,7 @@ pub fn do_test<Out: Output + MaybeSend + MaybeSync>(data: &[u8], out: Out) {
 
 	macro_rules! complete_all_pending_monitor_updates {
 		($monitor: expr) => {{
+			$monitor.flush_and_update_latest_monitors();
 			for (channel_id, state) in $monitor.latest_monitors.lock().unwrap().iter_mut() {
 				for (id, data) in state.pending_monitors.drain(..) {
 					$monitor.chain_monitor.channel_monitor_updated(*channel_id, id).unwrap();
@@ -2133,6 +2191,7 @@ pub fn do_test<Out: Output + MaybeSend + MaybeSync>(data: &[u8], out: Out) {
 			|monitor: &Arc<TestChainMonitor>,
 			 chan_funding,
 			 compl_selector: &dyn Fn(&mut Vec<(u64, Vec<u8>)>) -> Option<(u64, Vec<u8>)>| {
+				monitor.flush_and_update_latest_monitors();
 				if let Some(state) = monitor.latest_monitors.lock().unwrap().get_mut(chan_funding) {
 					assert!(
 						state.pending_monitors.windows(2).all(|pair| pair[0].0 < pair[1].0),
@@ -2149,6 +2208,7 @@ pub fn do_test<Out: Output + MaybeSend + MaybeSync>(data: &[u8], out: Out) {
 			};
 
 		let complete_all_monitor_updates = |monitor: &Arc<TestChainMonitor>, chan_id| {
+			monitor.flush_and_update_latest_monitors();
 			if let Some(state) = monitor.latest_monitors.lock().unwrap().get_mut(chan_id) {
 				assert!(
 					state.pending_monitors.windows(2).all(|pair| pair[0].0 < pair[1].0),
