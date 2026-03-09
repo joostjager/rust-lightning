@@ -1014,23 +1014,20 @@ where
 	let mut last_forwards_processing_call = sleeper(batch_delay.get());
 
 	loop {
+		// Persist state and stage events/messages before consuming them.
+		// TODO: This could be made truly async by awaiting an async KV store commit,
+		// allowing the background task to yield during I/O instead of blocking the
+		// executor thread.
+		channel_manager.get_cm().persist_and_stage_events();
+
 		channel_manager.get_cm().process_pending_events_async(async_event_handler).await;
 		chain_monitor.get_cm().process_pending_events_async(async_event_handler).await;
 		if let Some(om) = &onion_messenger {
 			om.get_om().process_pending_events_async(async_event_handler).await
 		}
 
-		// Note that the PeerManager::process_events may block on ChannelManager's locks,
-		// hence it comes last here. When the ChannelManager finishes whatever it's doing,
-		// we want to ensure we get into `persist_manager` as quickly as we can, especially
-		// without running the normal event processing above and handing events to users.
-		//
-		// Specifically, on an *extremely* slow machine, we may see ChannelManager start
-		// processing a message effectively at any point during this loop. In order to
-		// minimize the time between such processing completing and persisting the updated
-		// ChannelManager, we want to minimize methods blocking on a ChannelManager
-		// generally, and as a fallback place such blocking only immediately before
-		// persistence.
+		// PeerManager::process_events calls get_and_clear_pending_msg_events,
+		// which now just drains the staged queue without any I/O.
 		peer_manager.as_ref().process_events();
 		match check_and_reset_sleeper(&mut last_forwards_processing_call, || {
 			sleeper(batch_delay.next())
@@ -1571,23 +1568,19 @@ impl BackgroundProcessor {
 			let mut last_forwards_processing_call = Instant::now();
 
 			loop {
+				// Persist state and stage events/messages before consuming them.
+				// This single call handles both user events and peer messages atomically,
+				// ensuring persisted state matches the events consumers are about to handle.
+				channel_manager.get_cm().persist_and_stage_events();
+
 				channel_manager.get_cm().process_pending_events(&event_handler);
 				chain_monitor.get_cm().process_pending_events(&event_handler);
 				if let Some(om) = &onion_messenger {
 					om.get_om().process_pending_events(&event_handler)
 				};
 
-				// Note that the PeerManager::process_events may block on ChannelManager's locks,
-				// hence it comes last here. When the ChannelManager finishes whatever it's doing,
-				// we want to ensure we get into `persist_manager` as quickly as we can, especially
-				// without running the normal event processing above and handing events to users.
-				//
-				// Specifically, on an *extremely* slow machine, we may see ChannelManager start
-				// processing a message effectively at any point during this loop. In order to
-				// minimize the time between such processing completing and persisting the updated
-				// ChannelManager, we want to minimize methods blocking on a ChannelManager
-				// generally, and as a fallback place such blocking only immediately before
-				// persistence.
+				// PeerManager::process_events calls get_and_clear_pending_msg_events,
+				// which now just drains the staged queue without any I/O.
 				peer_manager.as_ref().process_events();
 				if last_forwards_processing_call.elapsed() > cur_batch_delay {
 					channel_manager.get_cm().process_pending_htlc_forwards();

@@ -2873,6 +2873,12 @@ pub struct ChannelManager<
 	event_persist_notifier: Notifier,
 	needs_persist_flag: AtomicBool,
 
+	/// Events and messages that have been persisted and are ready for consumption.
+	/// Populated by `persist_and_stage_events`, drained by `process_pending_events` and
+	/// `get_and_clear_pending_msg_events`.
+	staged_events: Mutex<VecDeque<(events::Event, Option<EventCompletionAction>)>>,
+	staged_msg_events: Mutex<Vec<MessageSendEvent>>,
+
 	/// Tracks the message events that are to be broadcasted when we are connected to some peer.
 	pending_broadcast_messages: Mutex<Vec<MessageSendEvent>>,
 
@@ -3376,104 +3382,52 @@ macro_rules! try_channel_entry {
 #[rustfmt::skip]
 macro_rules! process_events_body {
 	($self: expr, $event_to_handle: expr, $handle_event: expr) => {
-		let mut handling_failed = false;
-		let mut processed_all_events = false;
-		while !handling_failed && !processed_all_events {
-			if $self.pending_events_processor.compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed).is_err() {
-				return;
-			}
+		if $self.pending_events_processor.compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed).is_err() {
+			return;
+		}
 
-			let pending_events;
-			{
-				// Take write lock to process background/monitor events and persist before
-				// handing events to the user. This ensures if the handler crashes, events
-				// will be replayed on restart.
-				let _consistency_lock = $self.total_consistency_lock.write().unwrap();
+		// Drain staged events that were already persisted by persist_and_stage_events.
+		let mut staged_events: VecDeque<_> = core::mem::take(&mut *$self.staged_events.lock().unwrap());
 
-				// Because `handle_post_event_actions` may send `ChannelMonitorUpdate`s to the user we must
-				// ensure any startup-generated background events are handled first.
-				let _ = $self.process_background_events();
+		let mut post_event_actions = Vec::new();
 
-				// TODO: This behavior should be documented. It's unintuitive that we query
-				// ChannelMonitors when clearing other events.
-				$self.process_pending_monitor_events();
-
-				pending_events = $self.pending_events.lock().unwrap().clone();
-
-				if !pending_events.is_empty() {
-					// Persist while holding the write lock, before handling events.
-					// This ensures the persisted state includes the events we're about to handle.
-					if let Ok((main_buf, channels)) = $self.write_without_lock(true) {
-						let _ = $self.kv_store.write(
-							CHANNEL_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE,
-							CHANNEL_MANAGER_PERSISTENCE_SECONDARY_NAMESPACE,
-							CHANNEL_MANAGER_PERSISTENCE_KEY,
-							main_buf,
-						);
-						for (key, channel_buf) in channels {
-							let _ = $self.kv_store.write(
-								CHANNEL_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE,
-								CHANNEL_MANAGER_PERSISTENCE_SECONDARY_NAMESPACE,
-								&key,
-								channel_buf,
-							);
-						}
+		let mut num_handled_events = 0;
+		for (event, action_opt) in staged_events.iter() {
+			log_trace!($self.logger, "Handling event {:?}...", event);
+			$event_to_handle = event.clone();
+			let event_handling_result = $handle_event;
+			log_trace!($self.logger, "Done handling event, result: {:?}", event_handling_result);
+			match event_handling_result {
+				Ok(()) => {
+					if let Some(action) = action_opt {
+						post_event_actions.push(action.clone());
 					}
-
-					// Clear the persistence flag since we just persisted.
-					$self.needs_persist_flag.store(false, Ordering::Release);
+					num_handled_events += 1;
+				}
+				Err(_e) => {
+					// Stop handling; unhandled events stay in staged_events below.
+					break;
 				}
 			}
+		}
 
-			if !pending_events.is_empty() {
-				// Commit all pending writes (including any queued monitor updates) atomically.
-				// This is done after releasing the total_consistency_lock.
-				let _ = $self.kv_store.commit();
+		// Remove handled events from staged. If handler failed, put remaining back.
+		staged_events.drain(..num_handled_events);
+		if !staged_events.is_empty() {
+			let mut staged = $self.staged_events.lock().unwrap();
+			// Prepend unhandled events back for the next call.
+			for event in staged_events.into_iter().rev() {
+				staged.push_front(event);
 			}
+		}
 
-			let mut post_event_actions = Vec::new();
+		$self.pending_events_processor.store(false, Ordering::Release);
 
-			let mut num_handled_events = 0;
-			for (event, action_opt) in pending_events {
-				log_trace!($self.logger, "Handling event {:?}...", event);
-				$event_to_handle = event;
-				let event_handling_result = $handle_event;
-				log_trace!($self.logger, "Done handling event, result: {:?}", event_handling_result);
-				match event_handling_result {
-					Ok(()) => {
-						if let Some(action) = action_opt {
-							post_event_actions.push(action);
-						}
-						num_handled_events += 1;
-					}
-					Err(_e) => {
-						// If we encounter an error we stop handling events and make sure to replay
-						// any unhandled events on the next invocation.
-						handling_failed = true;
-						break;
-					}
-				}
-			}
-
-			{
-				let mut pending_events = $self.pending_events.lock().unwrap();
-				pending_events.drain(..num_handled_events);
-				processed_all_events = pending_events.is_empty();
-				// Note that `push_pending_forwards_ev` relies on `pending_events_processor` being
-				// updated here with the `pending_events` lock acquired.
-				$self.pending_events_processor.store(false, Ordering::Release);
-			}
-
-			if !post_event_actions.is_empty() {
-				// `handle_post_event_actions` may update channel state, so take the total
-				// consistency lock now similarly to other callers of `handle_post_event_actions`.
-				// Note that if it needs to wake the background processor for event handling or
-				// persistence it will do so directly.
-				let _read_guard = $self.total_consistency_lock.read().unwrap();
-				$self.handle_post_event_actions(post_event_actions);
-				// If we had some actions, go around again as we may have more events now
-				processed_all_events = false;
-			}
+		if !post_event_actions.is_empty() {
+			// `handle_post_event_actions` may update channel state, so take the total
+			// consistency lock now similarly to other callers of `handle_post_event_actions`.
+			let _read_guard = $self.total_consistency_lock.read().unwrap();
+			$self.handle_post_event_actions(post_event_actions);
 		}
 	}
 }
@@ -3596,6 +3550,8 @@ impl<
 			background_events_processed_since_startup: AtomicBool::new(false),
 			event_persist_notifier: Notifier::new(),
 			needs_persist_flag: AtomicBool::new(false),
+			staged_events: Mutex::new(VecDeque::new()),
+			staged_msg_events: Mutex::new(Vec::new()),
 			funding_batch_states: Mutex::new(BTreeMap::new()),
 
 			pending_broadcast_messages: Mutex::new(Vec::new()),
@@ -15201,101 +15157,12 @@ impl<
 		res
 	}
 
-	/// Returns `MessageSendEvent`s strictly ordered per-peer, in the order they were generated.
-	/// The returned array will contain `MessageSendEvent`s for different peers if
-	/// `MessageSendEvent`s to more than one peer exists, but `MessageSendEvent`s to the same peer
-	/// is always placed next to each other.
+	/// Returns staged `MessageSendEvent`s that were previously persisted by
+	/// [`ChannelManager::persist_and_stage_events`].
 	///
-	/// Note that that while `MessageSendEvent`s are strictly ordered per-peer, the peer order for
-	/// the chunks of `MessageSendEvent`s for different peers is random. I.e. if the array contains
-	/// `MessageSendEvent`s  for both `node_a` and `node_b`, the `MessageSendEvent`s for `node_a`
-	/// will randomly be placed first or last in the returned array.
-	///
-	/// Note that even though `BroadcastChannelAnnouncement` and `BroadcastChannelUpdate`
-	/// `MessageSendEvent`s are intended to be broadcasted to all peers, they will be placed among
-	/// the `MessageSendEvent`s to the specific peer they were generated under.
+	/// This method performs no I/O. It simply drains the staged message queue.
 	fn get_and_clear_pending_msg_events(&self) -> Vec<MessageSendEvent> {
-		let pending_events;
-		let needs_commit;
-		{
-			// Take write lock to ensure atomic persist + event gathering.
-			let _consistency_lock = self.total_consistency_lock.write().unwrap();
-
-			// Process background events (normally done by PersistenceNotifierGuard).
-			let _ = self.process_background_events();
-
-			// TODO: This behavior should be documented. It's unintuitive that we query
-			// ChannelMonitors when clearing other events.
-			self.process_pending_monitor_events();
-			self.maybe_generate_initial_closing_signed();
-
-			#[cfg(test)]
-			if self.check_free_holding_cells() {
-				debug_assert!(false, "Holding cells should always be auto-free'd");
-			}
-
-			// Quiescence is an in-memory protocol, so we don't have to persist because of it.
-			self.maybe_send_stfu();
-
-			let mut is_any_peer_connected = false;
-			pending_events = {
-				let mut events = Vec::new();
-				let per_peer_state = self.per_peer_state.read().unwrap();
-				for (_cp_id, peer_state_mutex) in per_peer_state.iter() {
-					let mut peer_state_lock = peer_state_mutex.lock().unwrap();
-					let peer_state = &mut *peer_state_lock;
-					if peer_state.pending_msg_events.len() > 0 {
-						events.append(&mut peer_state.pending_msg_events);
-					}
-					if peer_state.is_connected {
-						is_any_peer_connected = true
-					}
-				}
-				drop(per_peer_state);
-
-				// Ensure that we are connected to some peers before getting broadcast messages.
-				if is_any_peer_connected {
-					let mut broadcast_msgs = self.pending_broadcast_messages.lock().unwrap();
-					events.append(&mut broadcast_msgs);
-				}
-				events
-			};
-
-			needs_commit = if !pending_events.is_empty() {
-				// Serialize and persist while still holding the write lock, ensuring the
-				// persisted state matches the events we're about to return.
-				if let Ok((main_buf, channels)) = self.write_without_lock(true) {
-					let _ = self.kv_store.write(
-						CHANNEL_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE,
-						CHANNEL_MANAGER_PERSISTENCE_SECONDARY_NAMESPACE,
-						CHANNEL_MANAGER_PERSISTENCE_KEY,
-						main_buf,
-					);
-					for (key, channel_buf) in channels {
-						let _ = self.kv_store.write(
-							CHANNEL_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE,
-							CHANNEL_MANAGER_PERSISTENCE_SECONDARY_NAMESPACE,
-							&key,
-							channel_buf,
-						);
-					}
-				}
-
-				// Clear the persistence flag since we just persisted.
-				self.needs_persist_flag.store(false, Ordering::Release);
-				true
-			} else {
-				false
-			};
-		}
-
-		if needs_commit {
-			// Commit all pending writes (including any queued monitor updates) atomically.
-			// This is done after releasing the total_consistency_lock.
-			let _ = self.kv_store.commit();
-		}
-
-		pending_events
+		core::mem::take(&mut *self.staged_msg_events.lock().unwrap())
 	}
 }
 
@@ -15819,6 +15686,109 @@ impl<
 
 		for (source, payment_hash, reason, destination) in timed_out_htlcs.drain(..) {
 			self.fail_htlc_backwards_internal(&source, &payment_hash, &reason, destination, None);
+		}
+	}
+
+	/// Persists the [`ChannelManager`] state and stages pending events and messages for
+	/// subsequent retrieval via [`EventsProvider::process_pending_events`] and
+	/// [`BaseMessageHandler::get_and_clear_pending_msg_events`].
+	///
+	/// This method processes background events and pending monitor events, gathers message
+	/// events from per-peer state, then serializes and persists the [`ChannelManager`] state
+	/// under the `total_consistency_lock` write lock. Message events are drained from their
+	/// per-peer queues while the write lock is held, so the persisted state reflects that
+	/// those messages have been sent. The KV store commit happens after releasing the lock.
+	/// Events and messages are only moved to the staged queues after a successful commit,
+	/// ensuring that consumers only see events whose state has been durably persisted.
+	///
+	/// This should be called by the background processor before processing events or peer
+	/// messages each loop iteration.
+	///
+	/// [`BaseMessageHandler::get_and_clear_pending_msg_events`]: crate::ln::msgs::BaseMessageHandler::get_and_clear_pending_msg_events
+	pub fn persist_and_stage_events(&self) {
+		let needs_commit;
+		let new_events;
+		let new_msg_events;
+		{
+			let _consistency_lock = self.total_consistency_lock.write().unwrap();
+
+			let _ = self.process_background_events();
+
+			self.process_pending_monitor_events();
+			self.maybe_generate_initial_closing_signed();
+
+			#[cfg(test)]
+			if self.check_free_holding_cells() {
+				debug_assert!(false, "Holding cells should always be auto-free'd");
+			}
+
+			self.maybe_send_stfu();
+
+			// Gather and drain message events from all peers while holding the write lock.
+			// This ensures the persisted state reflects that these messages have been sent.
+			let mut msg_events = Vec::new();
+			let mut is_any_peer_connected = false;
+			{
+				let per_peer_state = self.per_peer_state.read().unwrap();
+				for (_cp_id, peer_state_mutex) in per_peer_state.iter() {
+					let mut peer_state_lock = peer_state_mutex.lock().unwrap();
+					let peer_state = &mut *peer_state_lock;
+					if peer_state.pending_msg_events.len() > 0 {
+						msg_events.append(&mut peer_state.pending_msg_events);
+					}
+					if peer_state.is_connected {
+						is_any_peer_connected = true
+					}
+				}
+			}
+			if is_any_peer_connected {
+				let mut broadcast_msgs = self.pending_broadcast_messages.lock().unwrap();
+				msg_events.append(&mut broadcast_msgs);
+			}
+			new_msg_events = msg_events;
+
+			// Clone pending user events. We persist first (which serializes them from
+			// pending_events), then after commit move them to the staged queue and drain
+			// the originals.
+			new_events = self.pending_events.lock().unwrap().clone();
+
+			let has_events = !new_msg_events.is_empty() || !new_events.is_empty();
+			needs_commit = if has_events {
+				if let Ok((main_buf, channels)) = self.write_without_lock(true) {
+					let _ = self.kv_store.write(
+						CHANNEL_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE,
+						CHANNEL_MANAGER_PERSISTENCE_SECONDARY_NAMESPACE,
+						CHANNEL_MANAGER_PERSISTENCE_KEY,
+						main_buf,
+					);
+					for (key, channel_buf) in channels {
+						let _ = self.kv_store.write(
+							CHANNEL_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE,
+							CHANNEL_MANAGER_PERSISTENCE_SECONDARY_NAMESPACE,
+							&key,
+							channel_buf,
+						);
+					}
+				}
+				true
+			} else {
+				false
+			};
+		}
+
+		if needs_commit {
+			let _ = self.kv_store.commit();
+		}
+
+		// Stage events only after a successful commit, then drain the originals from
+		// pending_events so they won't be re-staged on the next call.
+		if !new_msg_events.is_empty() {
+			self.staged_msg_events.lock().unwrap().extend(new_msg_events);
+		}
+		if !new_events.is_empty() {
+			let num_events = new_events.len();
+			self.staged_events.lock().unwrap().extend(new_events);
+			self.pending_events.lock().unwrap().drain(..num_events);
 		}
 	}
 
@@ -19858,6 +19828,8 @@ impl<
 
 			event_persist_notifier: Notifier::new(),
 			needs_persist_flag: AtomicBool::new(false),
+			staged_events: Mutex::new(VecDeque::new()),
+			staged_msg_events: Mutex::new(Vec::new()),
 
 			funding_batch_states: Mutex::new(BTreeMap::new()),
 
