@@ -2058,8 +2058,7 @@ impl<
 ///   as documented by those traits
 /// - Perform any periodic channel and payment checks by calling [`timer_tick_occurred`] roughly
 ///   every minute
-/// - Persist to disk whenever [`get_and_clear_needs_persistence`] returns `true` using a
-///   [`KVStoreSync`] implementation
+/// - Call [`persist_and_stage_events`] to persist state and stage events for consumption
 /// - Handle [`Event`]s obtained via its [`EventsProvider`] implementation
 ///
 /// The [`Future`] returned by [`get_event_or_persistence_needed_future`] is useful in determining
@@ -2638,7 +2637,7 @@ impl<
 /// [`PeerManager::read_event`]: crate::ln::peer_handler::PeerManager::read_event
 /// [`PeerManager::process_events`]: crate::ln::peer_handler::PeerManager::process_events
 /// [`timer_tick_occurred`]: Self::timer_tick_occurred
-/// [`get_and_clear_needs_persistence`]: Self::get_and_clear_needs_persistence
+/// [`persist_and_stage_events`]: Self::persist_and_stage_events
 /// [`KVStoreSync`]: crate::util::persist::KVStoreSync
 /// [`get_event_or_persistence_needed_future`]: Self::get_event_or_persistence_needed_future
 /// [`lightning-block-sync`]: https://docs.rs/lightning_block_sync/latest/lightning_block_sync
@@ -2871,7 +2870,6 @@ pub struct ChannelManager<
 	background_events_processed_since_startup: AtomicBool,
 
 	event_persist_notifier: Notifier,
-	needs_persist_flag: AtomicBool,
 
 	/// Events and messages that have been persisted and are ready for consumption.
 	/// Populated by `persist_and_stage_events`, drained by `process_pending_events` and
@@ -2954,7 +2952,6 @@ enum NotifyOption {
 /// `optionally_notify` which returns a `NotifyOption`.
 struct PersistenceNotifierGuard<'a, F: FnOnce() -> NotifyOption> {
 	event_persist_notifier: &'a Notifier,
-	needs_persist_flag: &'a AtomicBool,
 	// Always `Some` once initialized, but tracked as an `Option` to obtain the closure by value in
 	// [`PersistenceNotifierGuard::drop`].
 	should_persist: Option<F>,
@@ -2984,7 +2981,6 @@ impl<'a> PersistenceNotifierGuard<'a, fn() -> NotifyOption> {
 
 		PersistenceNotifierGuard {
 			event_persist_notifier: &cm.get_cm().event_persist_notifier,
-			needs_persist_flag: &cm.get_cm().needs_persist_flag,
 			should_persist: Some(move || {
 				f();
 				force_notify
@@ -3001,7 +2997,6 @@ impl<'a> PersistenceNotifierGuard<'a, fn() -> NotifyOption> {
 
 		PersistenceNotifierGuard {
 			event_persist_notifier: &cm.get_cm().event_persist_notifier,
-			needs_persist_flag: &cm.get_cm().needs_persist_flag,
 			should_persist: Some(move || {
 				// Pick the "most" action between `persist_check` and the background events
 				// processing and return that.
@@ -3032,7 +3027,6 @@ impl<'a> PersistenceNotifierGuard<'a, fn() -> NotifyOption> {
 
 		PersistenceNotifierGuard {
 			event_persist_notifier: &cm.get_cm().event_persist_notifier,
-			needs_persist_flag: &cm.get_cm().needs_persist_flag,
 			should_persist: Some(persist_check),
 			_read_guard: read_guard,
 		}
@@ -3049,11 +3043,9 @@ impl<'a, F: FnOnce() -> NotifyOption> Drop for PersistenceNotifierGuard<'a, F> {
 			},
 		};
 		match should_persist() {
-			NotifyOption::DoPersist => {
-				self.needs_persist_flag.store(true, Ordering::Release);
+			NotifyOption::DoPersist | NotifyOption::SkipPersistHandleEvents => {
 				self.event_persist_notifier.notify()
 			},
-			NotifyOption::SkipPersistHandleEvents => self.event_persist_notifier.notify(),
 			NotifyOption::SkipPersistNoEvents => {},
 		}
 	}
@@ -3549,7 +3541,6 @@ impl<
 			total_consistency_lock: RwLock::new(()),
 			background_events_processed_since_startup: AtomicBool::new(false),
 			event_persist_notifier: Notifier::new(),
-			needs_persist_flag: AtomicBool::new(false),
 			staged_events: Mutex::new(VecDeque::new()),
 			staged_msg_events: Mutex::new(Vec::new()),
 			funding_batch_states: Mutex::new(BTreeMap::new()),
@@ -11559,7 +11550,6 @@ This indicates a bug inside LDK. Please report this error at https://github.com/
 								None,
 							));
 							// We have a successful signing session that we need to persist.
-							self.needs_persist_flag.store(true, Ordering::Release);
 							self.event_persist_notifier.notify()
 						}
 
@@ -11605,7 +11595,6 @@ This indicates a bug inside LDK. Please report this error at https://github.com/
 							}
 
 							// We have a successful signing session that we need to persist.
-							self.needs_persist_flag.store(true, Ordering::Release);
 							self.event_persist_notifier.notify()
 						}
 
@@ -13159,7 +13148,6 @@ This indicates a bug inside LDK. Please report this error at https://github.com/
 			}
 
 			self.fail_holding_cell_htlcs(failed_htlcs, chan_id, &cp_node_id);
-			self.needs_persist_flag.store(true, Ordering::Release);
 			self.event_persist_notifier.notify();
 		}
 	}
@@ -15705,7 +15693,7 @@ impl<
 	/// messages each loop iteration.
 	///
 	/// [`BaseMessageHandler::get_and_clear_pending_msg_events`]: crate::ln::msgs::BaseMessageHandler::get_and_clear_pending_msg_events
-	pub fn persist_and_stage_events(&self) {
+	pub fn persist_and_stage_events(&self) -> bool {
 		let needs_commit;
 		let new_events;
 		let new_msg_events;
@@ -15790,26 +15778,17 @@ impl<
 			self.staged_events.lock().unwrap().extend(new_events);
 			self.pending_events.lock().unwrap().drain(..num_events);
 		}
+
+		needs_commit
 	}
 
-	/// Gets a [`Future`] that completes when this [`ChannelManager`] may need to be persisted or
-	/// may have events that need processing.
-	///
-	/// In order to check if this [`ChannelManager`] needs persisting, call
-	/// [`Self::get_and_clear_needs_persistence`].
+	/// Gets a [`Future`] that completes when this [`ChannelManager`] may have events that need
+	/// processing.
 	///
 	/// Note that callbacks registered on the [`Future`] MUST NOT call back into this
 	/// [`ChannelManager`] and should instead register actions to be taken later.
 	pub fn get_event_or_persistence_needed_future(&self) -> Future {
 		self.event_persist_notifier.get_future()
-	}
-
-	/// Returns true if this [`ChannelManager`] needs to be persisted.
-	///
-	/// See [`Self::get_event_or_persistence_needed_future`] for retrieving a [`Future`] that
-	/// indicates this should be checked.
-	pub fn get_and_clear_needs_persistence(&self) -> bool {
-		self.needs_persist_flag.swap(false, Ordering::AcqRel)
 	}
 
 	/// Returns the latest update ID that was written. Returns 0 if no updates have been written.
@@ -19827,7 +19806,6 @@ impl<
 			background_events_processed_since_startup: AtomicBool::new(false),
 
 			event_persist_notifier: Notifier::new(),
-			needs_persist_flag: AtomicBool::new(false),
 			staged_events: Mutex::new(VecDeque::new()),
 			staged_msg_events: Mutex::new(Vec::new()),
 
