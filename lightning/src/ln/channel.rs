@@ -12723,9 +12723,7 @@ where
 	}
 
 	/// Checks during handling splice_init
-	pub fn validate_splice_init(
-		&self, msg: &msgs::SpliceInit, our_funding_contribution: SignedAmount,
-	) -> Result<FundingScope, ChannelError> {
+	pub fn validate_splice_init(&self, msg: &msgs::SpliceInit) -> Result<(), ChannelError> {
 		if self.holder_commitment_point.current_point().is_none() {
 			return Err(ChannelError::WarnAndDisconnect(format!(
 				"Channel {} commitment point needs to be advanced once before spliced",
@@ -12762,32 +12760,7 @@ where
 			)));
 		}
 
-		self.validate_splice_contributions(our_funding_contribution, their_funding_contribution)
-			.map_err(|e| ChannelError::WarnAndDisconnect(e))?;
-
-		// Rotate the pubkeys using the prev_funding_txid as a tweak
-		let prev_funding_txid = self.funding.get_funding_txid();
-		let funding_pubkey = match prev_funding_txid {
-			None => {
-				debug_assert!(false);
-				self.funding.get_holder_pubkeys().funding_pubkey
-			},
-			Some(prev_funding_txid) => self
-				.context
-				.holder_signer
-				.new_funding_pubkey(prev_funding_txid, &self.context.secp_ctx),
-		};
-		let mut new_keys = self.funding.get_holder_pubkeys().clone();
-		new_keys.funding_pubkey = funding_pubkey;
-
-		Ok(FundingScope::for_splice(
-			&self.funding,
-			&self.context,
-			our_funding_contribution,
-			their_funding_contribution,
-			msg.funding_pubkey,
-			new_keys,
-		))
+		Ok(())
 	}
 
 	fn validate_splice_contributions(
@@ -12927,17 +12900,46 @@ where
 	pub(crate) fn splice_init<ES: EntropySource, L: Logger>(
 		&mut self, msg: &msgs::SpliceInit, entropy_source: &ES, holder_node_id: &PublicKey,
 		logger: &L,
-	) -> Result<msgs::SpliceAck, ChannelError> {
-		let feerate = FeeRate::from_sat_per_kwu(msg.funding_feerate_per_kw as u64);
-		let (our_funding_contribution, holder_balance) =
-			self.resolve_queued_contribution(feerate, logger)?;
+	) -> Result<msgs::SpliceAck, InteractiveTxMsgError> {
+		self.validate_splice_init(msg).map_err(|e| self.quiescent_negotiation_err(e))?;
 
-		let splice_funding =
-			self.validate_splice_init(msg, our_funding_contribution.unwrap_or(SignedAmount::ZERO))?;
+		let feerate = FeeRate::from_sat_per_kwu(msg.funding_feerate_per_kw as u64);
+		let (queued_net_value, holder_balance) = self
+			.resolve_queued_contribution(feerate, logger)
+			.map_err(|e| self.quiescent_negotiation_err(e))?;
+
+		let our_funding_contribution = queued_net_value.unwrap_or(SignedAmount::ZERO);
+		let their_funding_contribution = SignedAmount::from_sat(msg.funding_contribution_satoshis);
+		self.validate_splice_contributions(our_funding_contribution, their_funding_contribution)
+			.map_err(|e| self.quiescent_negotiation_err(ChannelError::WarnAndDisconnect(e)))?;
+
+		// Rotate the pubkeys using the prev_funding_txid as a tweak
+		let prev_funding_txid = self.funding.get_funding_txid();
+		let funding_pubkey = match prev_funding_txid {
+			None => {
+				debug_assert!(false);
+				self.funding.get_holder_pubkeys().funding_pubkey
+			},
+			Some(prev_funding_txid) => self
+				.context
+				.holder_signer
+				.new_funding_pubkey(prev_funding_txid, &self.context.secp_ctx),
+		};
+		let mut holder_pubkeys = self.funding.get_holder_pubkeys().clone();
+		holder_pubkeys.funding_pubkey = funding_pubkey;
+
+		let splice_funding = FundingScope::for_splice(
+			&self.funding,
+			&self.context,
+			our_funding_contribution,
+			their_funding_contribution,
+			msg.funding_pubkey,
+			holder_pubkeys,
+		);
 
 		// Adjust for the feerate and clone so we can store it for future RBF re-use.
 		let (adjusted_contribution, our_funding_inputs, our_funding_outputs) =
-			if our_funding_contribution.is_some() {
+			if queued_net_value.is_some() {
 				let adjusted_contribution = self
 					.take_queued_funding_contribution()
 					.expect("queued_funding_contribution was Some")
@@ -12948,7 +12950,6 @@ where
 			} else {
 				(None, Default::default(), Default::default())
 			};
-		let our_funding_contribution = our_funding_contribution.unwrap_or(SignedAmount::ZERO);
 
 		log_info!(
 			logger,
@@ -12991,9 +12992,8 @@ where
 
 	/// Checks during handling tx_init_rbf for an existing splice
 	fn validate_tx_init_rbf<F: FeeEstimator>(
-		&self, msg: &msgs::TxInitRbf, our_funding_contribution: SignedAmount,
-		fee_estimator: &LowerBoundedFeeEstimator<F>,
-	) -> Result<FundingScope, ChannelError> {
+		&self, msg: &msgs::TxInitRbf, fee_estimator: &LowerBoundedFeeEstimator<F>,
+	) -> Result<(ChannelPublicKeys, PublicKey), ChannelError> {
 		if self.holder_commitment_point.current_point().is_none() {
 			return Err(ChannelError::WarnAndDisconnect(format!(
 				"Channel {} commitment point needs to be advanced once before RBF",
@@ -13059,36 +13059,26 @@ where
 			return Err(ChannelError::Abort(AbortReason::InsufficientRbfFeerate));
 		}
 
-		let their_funding_contribution = match msg.funding_output_contribution {
-			Some(value) => SignedAmount::from_sat(value),
-			None => SignedAmount::ZERO,
-		};
-
-		self.validate_splice_contributions(our_funding_contribution, their_funding_contribution)
-			.map_err(|e| ChannelError::WarnAndDisconnect(e))?;
-
 		// Reuse funding pubkeys from the last negotiated candidate since all RBF candidates
 		// for the same splice share the same funding output script.
-		let holder_pubkeys = last_candidate.get_holder_pubkeys().clone();
-		let counterparty_funding_pubkey = *last_candidate.counterparty_funding_pubkey();
-
-		Ok(FundingScope::for_splice(
-			&self.funding,
-			&self.context,
-			our_funding_contribution,
-			their_funding_contribution,
-			counterparty_funding_pubkey,
-			holder_pubkeys,
+		Ok((
+			last_candidate.get_holder_pubkeys().clone(),
+			*last_candidate.counterparty_funding_pubkey(),
 		))
 	}
 
 	pub(crate) fn tx_init_rbf<ES: EntropySource, F: FeeEstimator, L: Logger>(
 		&mut self, msg: &msgs::TxInitRbf, entropy_source: &ES, holder_node_id: &PublicKey,
 		fee_estimator: &LowerBoundedFeeEstimator<F>, logger: &L,
-	) -> Result<msgs::TxAckRbf, ChannelError> {
+	) -> Result<msgs::TxAckRbf, InteractiveTxMsgError> {
+		let (holder_pubkeys, counterparty_funding_pubkey) = self
+			.validate_tx_init_rbf(msg, fee_estimator)
+			.map_err(|e| self.quiescent_negotiation_err(e))?;
+
 		let feerate = FeeRate::from_sat_per_kwu(msg.feerate_sat_per_1000_weight as u64);
-		let (queued_net_value, holder_balance) =
-			self.resolve_queued_contribution(feerate, logger)?;
+		let (queued_net_value, holder_balance) = self
+			.resolve_queued_contribution(feerate, logger)
+			.map_err(|e| self.quiescent_negotiation_err(e))?;
 
 		// If no queued contribution, try prior contribution from previous negotiation.
 		// Failing here means the RBF would erase our splice — reject it.
@@ -13105,19 +13095,31 @@ where
 					prior
 						.net_value_for_acceptor_at_feerate(feerate, holder_balance)
 						.map_err(|_| ChannelError::Abort(AbortReason::InsufficientRbfFeerate))
-				})?;
+				})
+				.map_err(|e| self.quiescent_negotiation_err(e))?;
 			Some(net_value)
 		} else {
 			None
 		};
 
 		let our_funding_contribution = queued_net_value.or(prior_net_value);
+		let our_funding_contribution = our_funding_contribution.unwrap_or(SignedAmount::ZERO);
 
-		let rbf_funding = self.validate_tx_init_rbf(
-			msg,
-			our_funding_contribution.unwrap_or(SignedAmount::ZERO),
-			fee_estimator,
-		)?;
+		let their_funding_contribution = match msg.funding_output_contribution {
+			Some(value) => SignedAmount::from_sat(value),
+			None => SignedAmount::ZERO,
+		};
+		self.validate_splice_contributions(our_funding_contribution, their_funding_contribution)
+			.map_err(|e| self.quiescent_negotiation_err(ChannelError::WarnAndDisconnect(e)))?;
+
+		let rbf_funding = FundingScope::for_splice(
+			&self.funding,
+			&self.context,
+			our_funding_contribution,
+			their_funding_contribution,
+			counterparty_funding_pubkey,
+			holder_pubkeys,
+		);
 
 		// Consume the appropriate contribution source.
 		let (our_funding_inputs, our_funding_outputs) = if queued_net_value.is_some() {
@@ -13153,8 +13155,6 @@ where
 		} else {
 			Default::default()
 		};
-
-		let our_funding_contribution = our_funding_contribution.unwrap_or(SignedAmount::ZERO);
 
 		log_info!(
 			logger,
@@ -14283,6 +14283,16 @@ where
 		let was_quiescent = self.context.channel_state.is_quiescent();
 		self.context.channel_state.clear_quiescent();
 		was_quiescent
+	}
+
+	fn quiescent_negotiation_err(&mut self, err: ChannelError) -> InteractiveTxMsgError {
+		let exited_quiescence = if matches!(err, ChannelError::Abort(_)) {
+			debug_assert!(self.context.channel_state.is_quiescent());
+			self.exit_quiescence()
+		} else {
+			false
+		};
+		InteractiveTxMsgError { err, splice_funding_failed: None, exited_quiescence }
 	}
 
 	pub fn remove_legacy_scids_before_block(&mut self, height: u32) -> alloc::vec::Drain<'_, u64> {
