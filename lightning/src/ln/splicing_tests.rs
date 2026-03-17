@@ -4476,48 +4476,120 @@ fn test_splice_rbf_insufficient_feerate() {
 		.is_ok());
 
 	// Acceptor-side: tx_init_rbf with an insufficient feerate is also rejected.
-	reenter_quiescence(&nodes[0], &nodes[1], &channel_id);
+	// Node 0 initiates a proper RBF but we tamper the feerate to be insufficient.
+	provide_utxo_reserves(&nodes, 2, added_value * 2);
+	let _funding_contribution =
+		do_initiate_rbf_splice_in(&nodes[0], &nodes[1], channel_id, added_value, min_rbf_feerate);
 
-	let tx_init_rbf = msgs::TxInitRbf {
-		channel_id,
-		locktime: 0,
-		feerate_sat_per_1000_weight: FEERATE_FLOOR_SATS_PER_KW,
-		funding_output_contribution: Some(added_value.to_sat() as i64),
-	};
+	let stfu_0 = get_event_msg!(nodes[0], MessageSendEvent::SendStfu, node_id_1);
+	nodes[1].node.handle_stfu(node_id_0, &stfu_0);
+	let stfu_1 = get_event_msg!(nodes[1], MessageSendEvent::SendStfu, node_id_0);
+	nodes[0].node.handle_stfu(node_id_1, &stfu_1);
 
+	let mut tx_init_rbf = get_event_msg!(nodes[0], MessageSendEvent::SendTxInitRbf, node_id_1);
+	tx_init_rbf.feerate_sat_per_1000_weight = FEERATE_FLOOR_SATS_PER_KW;
 	nodes[1].node.handle_tx_init_rbf(node_id_0, &tx_init_rbf);
 
 	let tx_abort = get_event_msg!(nodes[1], MessageSendEvent::SendTxAbort, node_id_0);
 	assert_eq!(tx_abort.channel_id, channel_id);
+
+	// Queue a payment while quiescent. It should go to the holding cell and be freed once
+	// quiescence is exited by the tx_abort exchange.
+	let (route, payment_hash, _payment_preimage, payment_secret) =
+		get_route_and_payment_hash!(nodes[0], nodes[1], 1_000_000);
+	let onion = RecipientOnionFields::secret_only(payment_secret, 1_000_000);
+	let payment_id = PaymentId(payment_hash.0);
+	nodes[0].node.send_payment_with_route(route, payment_hash, onion, payment_id).unwrap();
+	assert!(nodes[0].node.get_and_clear_pending_msg_events().is_empty());
+
+	// Node 0 echoes tx_abort and exits quiescence, freeing the holding cell.
+	nodes[0].node.handle_tx_abort(node_id_1, &tx_abort);
+
+	// TODO: the RBF round's inputs are partially filtered against the prior round's committed
+	// UTXOs, so the DiscardFunding carries coin-selection-dependent residue. Revisit once
+	// #4514 lands to see if its semantics change what DiscardFunding contains here.
+	let events = nodes[0].node.get_and_clear_pending_events();
+	assert_eq!(events.len(), 2, "{events:?}");
+	assert!(
+		matches!(&events[0], Event::SpliceFailed { channel_id: cid, .. } if *cid == channel_id)
+	);
+	assert!(
+		matches!(&events[1], Event::DiscardFunding { channel_id: cid, .. } if *cid == channel_id)
+	);
+
+	let msg_events = nodes[0].node.get_and_clear_pending_msg_events();
+	assert_eq!(msg_events.len(), 2, "{msg_events:?}");
+	let tx_abort_echo = match &msg_events[0] {
+		MessageSendEvent::SendTxAbort { msg, .. } => msg.clone(),
+		other => panic!("Expected SendTxAbort, got {:?}", other),
+	};
+	match &msg_events[1] {
+		MessageSendEvent::UpdateHTLCs { updates, .. } => {
+			assert_eq!(updates.update_add_htlcs.len(), 1);
+		},
+		other => panic!("Expected UpdateHTLCs, got {:?}", other),
+	}
+
+	// Complete the HTLC commitment exchange so the channel is ready for the next RBF attempt.
+	// The holding cell free generated a monitor update for the outgoing HTLC.
+	check_added_monitors(&nodes[0], 1);
+	if let MessageSendEvent::UpdateHTLCs { updates, .. } = &msg_events[1] {
+		nodes[1].node.handle_update_add_htlc(node_id_0, &updates.update_add_htlcs[0]);
+		do_commitment_signed_dance(&nodes[1], &nodes[0], &updates.commitment_signed, false, false);
+	} else {
+		unreachable!();
+	}
+
+	// Node 1 handles the echo (no-op since it already aborted).
+	nodes[1].node.handle_tx_abort(node_id_0, &tx_abort_echo);
 
 	// Acceptor-side: a counterparty feerate that only satisfies the 25/24 rule (263) is
 	// rejected — the spec requires max(prev + 25, prev * 25/24) = 278 at low feerates.
-	// After tx_abort the channel remains quiescent, so no need to re-enter quiescence.
-	nodes[0].node.handle_tx_abort(node_id_1, &tx_abort);
+	// Node 0 initiates another proper RBF but we tamper the feerate to the 25/24 value.
+	provide_utxo_reserves(&nodes, 2, added_value * 2);
+	let _funding_contribution =
+		do_initiate_rbf_splice_in(&nodes[0], &nodes[1], channel_id, added_value, min_rbf_feerate);
 
+	let stfu_0 = get_event_msg!(nodes[0], MessageSendEvent::SendStfu, node_id_1);
+	nodes[1].node.handle_stfu(node_id_0, &stfu_0);
+	let stfu_1 = get_event_msg!(nodes[1], MessageSendEvent::SendStfu, node_id_0);
+	nodes[0].node.handle_stfu(node_id_1, &stfu_1);
+
+	let mut tx_init_rbf = get_event_msg!(nodes[0], MessageSendEvent::SendTxInitRbf, node_id_1);
 	let rbf_feerate_25_24 = ((FEERATE_FLOOR_SATS_PER_KW as u64) * 25 / 24) as u32;
-	let tx_init_rbf = msgs::TxInitRbf {
-		channel_id,
-		locktime: 0,
-		feerate_sat_per_1000_weight: rbf_feerate_25_24,
-		funding_output_contribution: Some(added_value.to_sat() as i64),
-	};
-
+	tx_init_rbf.feerate_sat_per_1000_weight = rbf_feerate_25_24;
 	nodes[1].node.handle_tx_init_rbf(node_id_0, &tx_init_rbf);
 	let tx_abort = get_event_msg!(nodes[1], MessageSendEvent::SendTxAbort, node_id_0);
 	assert_eq!(tx_abort.channel_id, channel_id);
 
-	// Acceptor-side: prev + 25 = 278 satisfies the combined BIP125 rule and is accepted.
+	// Node 0 echoes tx_abort and exits quiescence.
 	nodes[0].node.handle_tx_abort(node_id_1, &tx_abort);
+	let tx_abort_echo = get_event_msg!(nodes[0], MessageSendEvent::SendTxAbort, node_id_1);
 
-	let min_rbf_feerate = FEERATE_FLOOR_SATS_PER_KW + 25;
-	let tx_init_rbf = msgs::TxInitRbf {
-		channel_id,
-		locktime: 0,
-		feerate_sat_per_1000_weight: min_rbf_feerate,
-		funding_output_contribution: Some(added_value.to_sat() as i64),
-	};
+	// TODO: same as above — revisit once #4514 lands.
+	let events = nodes[0].node.get_and_clear_pending_events();
+	assert_eq!(events.len(), 2);
+	assert!(
+		matches!(&events[0], Event::SpliceFailed { channel_id: cid, .. } if *cid == channel_id)
+	);
+	assert!(
+		matches!(&events[1], Event::DiscardFunding { channel_id: cid, .. } if *cid == channel_id)
+	);
 
+	nodes[1].node.handle_tx_abort(node_id_0, &tx_abort_echo);
+
+	// Acceptor-side: prev + 25 = 278 satisfies the combined BIP125 rule and is accepted.
+	provide_utxo_reserves(&nodes, 2, added_value * 2);
+	let _funding_contribution =
+		do_initiate_rbf_splice_in(&nodes[0], &nodes[1], channel_id, added_value, min_rbf_feerate);
+
+	let stfu_0 = get_event_msg!(nodes[0], MessageSendEvent::SendStfu, node_id_1);
+	nodes[1].node.handle_stfu(node_id_0, &stfu_0);
+	let stfu_1 = get_event_msg!(nodes[1], MessageSendEvent::SendStfu, node_id_0);
+	nodes[0].node.handle_stfu(node_id_1, &stfu_1);
+
+	let tx_init_rbf = get_event_msg!(nodes[0], MessageSendEvent::SendTxInitRbf, node_id_1);
+	assert_eq!(tx_init_rbf.feerate_sat_per_1000_weight, FEERATE_FLOOR_SATS_PER_KW + 25);
 	nodes[1].node.handle_tx_init_rbf(node_id_0, &tx_init_rbf);
 	let _tx_ack_rbf = get_event_msg!(nodes[1], MessageSendEvent::SendTxAckRbf, node_id_0);
 }
@@ -4566,29 +4638,62 @@ fn test_splice_rbf_insufficient_feerate_high() {
 
 	// prev=1000: flat increment gives 1000+25=1025, 25/24 rule gives 1000*25/24=1041.
 	// Feerate 1025 satisfies the flat increment but not 25/24 — rejected.
-	reenter_quiescence(&nodes[0], &nodes[1], &channel_id);
+	// Node 0 initiates another proper RBF but we tamper the feerate to 1025.
+	provide_utxo_reserves(&nodes, 2, added_value * 2);
+	let min_rbf_feerate = FeeRate::from_sat_per_kwu(1041);
+	let _funding_contribution =
+		do_initiate_rbf_splice_in(&nodes[0], &nodes[1], channel_id, added_value, min_rbf_feerate);
 
-	let tx_init_rbf = msgs::TxInitRbf {
-		channel_id,
-		locktime: 0,
-		feerate_sat_per_1000_weight: 1025,
-		funding_output_contribution: Some(added_value.to_sat() as i64),
-	};
+	let stfu_0 = get_event_msg!(nodes[0], MessageSendEvent::SendStfu, node_id_1);
+	nodes[1].node.handle_stfu(node_id_0, &stfu_0);
+	let stfu_1 = get_event_msg!(nodes[1], MessageSendEvent::SendStfu, node_id_0);
+	nodes[0].node.handle_stfu(node_id_1, &stfu_1);
 
+	let mut tx_init_rbf = get_event_msg!(nodes[0], MessageSendEvent::SendTxInitRbf, node_id_1);
+	tx_init_rbf.feerate_sat_per_1000_weight = 1025;
 	nodes[1].node.handle_tx_init_rbf(node_id_0, &tx_init_rbf);
 	let tx_abort = get_event_msg!(nodes[1], MessageSendEvent::SendTxAbort, node_id_0);
 	assert_eq!(tx_abort.channel_id, channel_id);
 
-	// Feerate 1041 satisfies both rules — accepted.
+	// Node 0 echoes tx_abort and exits quiescence.
 	nodes[0].node.handle_tx_abort(node_id_1, &tx_abort);
+	let tx_abort_echo = get_event_msg!(nodes[0], MessageSendEvent::SendTxAbort, node_id_1);
 
-	let tx_init_rbf = msgs::TxInitRbf {
-		channel_id,
-		locktime: 0,
-		feerate_sat_per_1000_weight: 1041,
-		funding_output_contribution: Some(added_value.to_sat() as i64),
-	};
+	// TODO: the RBF round's inputs are fully filtered against the prior round's committed
+	// UTXOs, so this DiscardFunding is emitted with empty inputs and outputs. Once #4514
+	// lands, a fully-drained DiscardFunding should be suppressed entirely — expect
+	// `events.len() == 1`.
+	let events = nodes[0].node.get_and_clear_pending_events();
+	assert_eq!(events.len(), 2);
+	assert!(
+		matches!(&events[0], Event::SpliceFailed { channel_id: cid, .. } if *cid == channel_id)
+	);
+	match &events[1] {
+		Event::DiscardFunding {
+			channel_id: cid,
+			funding_info: FundingInfo::Contribution { inputs, outputs },
+		} => {
+			assert_eq!(*cid, channel_id);
+			assert!(inputs.is_empty(), "Expected inputs filtered, got {inputs:?}");
+			assert!(outputs.is_empty(), "Expected outputs filtered, got {outputs:?}");
+		},
+		other => panic!("Expected DiscardFunding with Contribution, got {other:?}"),
+	}
 
+	nodes[1].node.handle_tx_abort(node_id_0, &tx_abort_echo);
+
+	// Feerate 1041 satisfies both rules — accepted.
+	provide_utxo_reserves(&nodes, 2, added_value * 2);
+	let _funding_contribution =
+		do_initiate_rbf_splice_in(&nodes[0], &nodes[1], channel_id, added_value, min_rbf_feerate);
+
+	let stfu_0 = get_event_msg!(nodes[0], MessageSendEvent::SendStfu, node_id_1);
+	nodes[1].node.handle_stfu(node_id_0, &stfu_0);
+	let stfu_1 = get_event_msg!(nodes[1], MessageSendEvent::SendStfu, node_id_0);
+	nodes[0].node.handle_stfu(node_id_1, &stfu_1);
+
+	let tx_init_rbf = get_event_msg!(nodes[0], MessageSendEvent::SendTxInitRbf, node_id_1);
+	assert_eq!(tx_init_rbf.feerate_sat_per_1000_weight, 1041);
 	nodes[1].node.handle_tx_init_rbf(node_id_0, &tx_init_rbf);
 	let _tx_ack_rbf = get_event_msg!(nodes[1], MessageSendEvent::SendTxAckRbf, node_id_0);
 }
@@ -5276,10 +5381,25 @@ fn test_splice_rbf_tiebreak_feerate_too_high_rejected() {
 	assert_eq!(tx_init_rbf.feerate_sat_per_1000_weight, high_feerate.to_sat_per_kwu() as u32);
 
 	// Node 1 handles tx_init_rbf — TooHigh: target (100k) >> max (3k) and fair fee > budget.
+	// Node 1 exits quiescence upon rejecting with tx_abort, and since it has a pending
+	// QuiescentAction (from its own splice RBF attempt), it immediately re-proposes quiescence.
 	nodes[1].node.handle_tx_init_rbf(node_id_0, &tx_init_rbf);
 
-	let tx_abort = get_event_msg!(nodes[1], MessageSendEvent::SendTxAbort, node_id_0);
-	assert_eq!(tx_abort.channel_id, channel_id);
+	let msg_events = nodes[1].node.get_and_clear_pending_msg_events();
+	assert_eq!(msg_events.len(), 2);
+	match &msg_events[0] {
+		MessageSendEvent::SendTxAbort { node_id, msg } => {
+			assert_eq!(*node_id, node_id_0);
+			assert_eq!(msg.channel_id, channel_id);
+		},
+		_ => panic!("Expected SendTxAbort, got {:?}", msg_events[0]),
+	};
+	match &msg_events[1] {
+		MessageSendEvent::SendStfu { node_id, .. } => {
+			assert_eq!(*node_id, node_id_0);
+		},
+		_ => panic!("Expected SendStfu, got {:?}", msg_events[1]),
+	};
 }
 
 #[test]
