@@ -852,14 +852,26 @@ fn send_mpp_hop_payment(
 }
 
 #[inline]
-fn assert_action_timeout_awaiting_response(action: &msgs::ErrorAction) {
-	// Since sending/receiving messages may be delayed, `timer_tick_occurred` may cause a node to
-	// disconnect their counterparty if they're expecting a timely response.
-	assert!(matches!(
-		action,
+fn assert_expected_handle_error(action: &msgs::ErrorAction) {
+	match action {
+		// Since sending/receiving messages may be delayed, `timer_tick_occurred` may cause a
+		// node to disconnect their counterparty if they're expecting a timely response.
 		msgs::ErrorAction::DisconnectPeerWithWarning { msg }
-		if msg.data.contains("Disconnecting due to timeout awaiting response")
-	));
+			if msg.data.contains("Disconnecting due to timeout awaiting response") => {},
+		// Splice RBF may become invalid between the time the STFU is sent and the
+		// channel becomes quiescent (e.g. splice_locked was exchanged in between).
+		msgs::ErrorAction::DisconnectPeerWithWarning { msg } if msg.data.contains("cannot RBF") => {
+		},
+		// When a splice RBF fails after quiescence is reached, the node that initiated
+		// the quiescence may send an error message.
+		msgs::ErrorAction::SendErrorMessage { msg } if msg.data.contains("cannot RBF") => {},
+		// After a node restart, channel reestablishment may reference a channel ID
+		// that the peer doesn't recognize (e.g. from a splice that wasn't fully
+		// persisted before restart).
+		msgs::ErrorAction::SendErrorMessage { msg }
+			if msg.data.contains("Got a message for a channel from the wrong node") => {},
+		_ => panic!("Unexpected error action: {:?}", action),
+	}
 }
 
 #[inline]
@@ -1548,7 +1560,7 @@ pub fn do_test<Out: Output + MaybeSend + MaybeSync>(
 							*node_id == a_id
 						},
 						MessageSendEvent::HandleError { ref action, ref node_id } => {
-							assert_action_timeout_awaiting_response(action);
+							assert_expected_handle_error(action);
 							if Some(*node_id) == expect_drop_id { panic!("peer_disconnected should drop msgs bound for the disconnected peer"); }
 							*node_id == a_id
 						},
@@ -1778,7 +1790,7 @@ pub fn do_test<Out: Output + MaybeSend + MaybeSync>(
 							}
 						},
 						MessageSendEvent::HandleError { ref action, .. } => {
-							assert_action_timeout_awaiting_response(action);
+							assert_expected_handle_error(action);
 						},
 						MessageSendEvent::SendChannelReady { .. } => {
 							// Can be generated as a reestablish response
@@ -1835,7 +1847,7 @@ pub fn do_test<Out: Output + MaybeSend + MaybeSync>(
 							MessageSendEvent::SendAnnouncementSignatures { .. } => {},
 							MessageSendEvent::SendChannelUpdate { .. } => {},
 							MessageSendEvent::HandleError { ref action, .. } => {
-								assert_action_timeout_awaiting_response(action);
+								assert_expected_handle_error(action);
 							},
 							_ => {
 								if out.may_fail.load(atomic::Ordering::Acquire) {
@@ -1863,7 +1875,7 @@ pub fn do_test<Out: Output + MaybeSend + MaybeSync>(
 							MessageSendEvent::SendAnnouncementSignatures { .. } => {},
 							MessageSendEvent::SendChannelUpdate { .. } => {},
 							MessageSendEvent::HandleError { ref action, .. } => {
-								assert_action_timeout_awaiting_response(action);
+								assert_expected_handle_error(action);
 							},
 							_ => {
 								if out.may_fail.load(atomic::Ordering::Acquire) {
@@ -2025,6 +2037,23 @@ pub fn do_test<Out: Output + MaybeSend + MaybeSync>(
 
 		let complete_all_monitor_updates = |monitor: &Arc<TestChainMonitor>, chan_id| {
 			if let Some(state) = monitor.latest_monitors.lock().unwrap().get_mut(chan_id) {
+				assert!(
+					state.pending_monitors.windows(2).all(|pair| pair[0].0 < pair[1].0),
+					"updates should be sorted by id"
+				);
+				for (id, data) in state.pending_monitors.drain(..) {
+					monitor.chain_monitor.channel_monitor_updated(*chan_id, id).unwrap();
+					if id > state.persisted_monitor_id {
+						state.persisted_monitor_id = id;
+						state.persisted_monitor = data;
+					}
+				}
+			}
+		};
+
+		let complete_all_chan_monitor_updates = |monitor: &Arc<TestChainMonitor>| {
+			let mut map_lock = monitor.latest_monitors.lock().unwrap();
+			for (chan_id, state) in map_lock.iter_mut() {
 				assert!(
 					state.pending_monitors.windows(2).all(|pair| pair[0].0 < pair[1].0),
 					"updates should be sorted by id"
@@ -2685,6 +2714,12 @@ pub fn do_test<Out: Output + MaybeSend + MaybeSync>(
 				nodes[1].signer_unblocked(None);
 				nodes[2].signer_unblocked(None);
 
+				// Sync all nodes to chain tip so any pending splice transactions
+				// get confirmed, unblocking channels waiting for splice_locked.
+				sync_with_chain_state(&mut chain_state, &nodes[0], &mut node_height_a, None);
+				sync_with_chain_state(&mut chain_state, &nodes[1], &mut node_height_b, None);
+				sync_with_chain_state(&mut chain_state, &nodes[2], &mut node_height_c, None);
+
 				macro_rules! process_all_events {
 					() => { {
 						let mut last_pass_no_updates = false;
@@ -2692,15 +2727,13 @@ pub fn do_test<Out: Output + MaybeSend + MaybeSync>(
 							if i == 100 {
 								panic!("It may take may iterations to settle the state, but it should not take forever");
 							}
-							// Next, make sure no monitor updates are pending
-							for id in &chan_ab_ids {
-								complete_all_monitor_updates(&monitor_a, id);
-								complete_all_monitor_updates(&monitor_b, id);
-							}
-							for id in &chan_bc_ids {
-								complete_all_monitor_updates(&monitor_b, id);
-								complete_all_monitor_updates(&monitor_c, id);
-							}
+							// Next, make sure no monitor updates are pending.
+							// Complete monitors for all channel IDs (not just the
+							// original ones) since splicing may have added new
+							// monitor entries.
+							complete_all_chan_monitor_updates(&monitor_a);
+							complete_all_chan_monitor_updates(&monitor_b);
+							complete_all_chan_monitor_updates(&monitor_c);
 							// Then, make sure any current forwards make their way to their destination
 							if process_msg_events!(0, false, ProcessMessages::AllMessages) {
 								last_pass_no_updates = false;
@@ -2758,7 +2791,7 @@ pub fn do_test<Out: Output + MaybeSend + MaybeSync>(
 						pending.is_empty(),
 						"Node {} has {} stuck pending payments after settling all state",
 						idx,
-						pending.len()
+						pending.len(),
 					);
 				}
 

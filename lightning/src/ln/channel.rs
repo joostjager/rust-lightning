@@ -11935,6 +11935,10 @@ where
 			});
 		}
 
+		if self.pending_splice.is_some() {
+			self.can_initiate_rbf(min_feerate).map_err(|err| APIError::APIMisuseError { err })?;
+		}
+
 		let funding_txo = self.funding.get_funding_txo().expect("funding_txo should be set");
 		let previous_utxo =
 			self.funding.get_funding_output().expect("funding_output should be set");
@@ -12056,7 +12060,7 @@ where
 		if let Some(prev_feerate) = pending_splice.last_funding_feerate_sat_per_1000_weight {
 			if (new_feerate as u64) * 24 < (prev_feerate as u64) * 25 {
 				return Err(format!(
-					"Channel {} RBF feerate {} is less than 25/24 of the previous feerate {}",
+					"Channel {} splice RBF feerate {} is less than 25/24 of the previous feerate {}",
 					self.context.channel_id(),
 					new_feerate,
 					prev_feerate,
@@ -13688,6 +13692,11 @@ where
 					};
 
 					if self.pending_splice.is_some() {
+						if let Err(msg) = self.can_initiate_rbf(
+							FeeRate::from_sat_per_kwu(funding_feerate_per_kw as u64),
+						) {
+							return Err(ChannelError::WarnAndDisconnect(msg));
+						}
 						let tx_init_rbf = self.send_tx_init_rbf(context);
 						self.pending_splice.as_mut().unwrap()
 							.contributions.push(prior_contribution);
