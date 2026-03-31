@@ -183,9 +183,9 @@ impl<MR: MessageRouter, L: Logger> OffersMessageFlow<MR, L> {
 	}
 
 	fn duration_since_epoch(&self) -> Duration {
-		#[cfg(not(feature = "std"))]
+		#[cfg(any(not(feature = "std"), fuzzing))]
 		let now = Duration::from_secs(self.highest_seen_timestamp.load(Ordering::Acquire) as u64);
-		#[cfg(feature = "std")]
+		#[cfg(all(feature = "std", not(fuzzing)))]
 		let now = std::time::SystemTime::now()
 			.duration_since(std::time::SystemTime::UNIX_EPOCH)
 			.expect("SystemTime::now() should come after SystemTime::UNIX_EPOCH");
