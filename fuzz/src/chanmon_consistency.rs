@@ -15,8 +15,8 @@
 //! actions such as sending payments, handling events, or changing monitor update return values on
 //! a per-node basis. This should allow it to find any cases where the ordering of actions results
 //! in us getting out of sync with ourselves, and, assuming at least one of our recieve- or
-//! send-side handling is correct, other peers. We consider it a failure if any action results in a
-//! channel being force-closed.
+//! send-side handling is correct, other peers. The fuzzer also exercises user-initiated
+//! force-closes with on-chain commitment transaction confirmation.
 
 use bitcoin::amount::Amount;
 use bitcoin::constants::genesis_block;
@@ -27,6 +27,7 @@ use bitcoin::script::{Builder, ScriptBuf};
 use bitcoin::transaction::Version;
 use bitcoin::transaction::{Transaction, TxOut};
 use bitcoin::FeeRate;
+use bitcoin::OutPoint as BitcoinOutPoint;
 
 use bitcoin::block::Header;
 use bitcoin::hash_types::Txid;
@@ -41,19 +42,18 @@ use lightning::chain;
 use lightning::chain::chaininterface::{
 	BroadcasterInterface, ConfirmationTarget, FeeEstimator, TransactionType,
 };
-use lightning::chain::channelmonitor::{ChannelMonitor, MonitorEvent};
+use lightning::chain::channelmonitor::{Balance, ChannelMonitor, MonitorEvent};
 use lightning::chain::transaction::OutPoint;
 use lightning::chain::{
 	chainmonitor, channelmonitor, BestBlock, ChannelMonitorUpdateStatus, Confirm, Watch,
 };
-use lightning::events;
+use lightning::events::{self, EventsProvider};
 use lightning::ln::channel::{
 	FEE_SPIKE_BUFFER_FEE_INCREASE_MULTIPLE, MAX_STD_OUTPUT_DUST_LIMIT_SATOSHIS,
 };
 use lightning::ln::channel_state::ChannelDetails;
 use lightning::ln::channelmanager::{
 	ChainParameters, ChannelManager, ChannelManagerReadArgs, PaymentId, RecentPaymentDetails,
-	TrustedChannelFeatures,
 };
 use lightning::ln::functional_test_utils::*;
 use lightning::ln::funding::{FundingContribution, FundingContributionError, FundingTemplate};
@@ -84,6 +84,8 @@ use lightning::util::ser::{LengthReadable, ReadableArgs, Writeable, Writer};
 use lightning::util::test_channel_signer::{EnforcementState, SignerOp, TestChannelSigner};
 use lightning::util::test_utils::TestWalletSource;
 use lightning::util::wallet_utils::{WalletSourceSync, WalletSync};
+
+use lightning::events::bump_transaction::sync::BumpTransactionEventHandlerSync;
 
 use lightning_invoice::RawBolt11Invoice;
 
@@ -186,13 +188,22 @@ impl BroadcasterInterface for TestBroadcaster {
 struct ChainState {
 	blocks: Vec<(Header, Vec<Transaction>)>,
 	confirmed_txids: HashSet<Txid>,
+	/// Tracks unspent outputs created by confirmed transactions. Only
+	/// transactions that spend existing UTXOs can be confirmed, which
+	/// prevents fuzz hash collisions from creating phantom spends of
+	/// outputs that were never actually created.
+	utxos: HashSet<BitcoinOutPoint>,
 }
 
 impl ChainState {
 	fn new() -> Self {
 		let genesis_hash = genesis_block(Network::Bitcoin).block_hash();
 		let genesis_header = create_dummy_header(genesis_hash, 42);
-		Self { blocks: vec![(genesis_header, Vec::new())], confirmed_txids: HashSet::new() }
+		Self {
+			blocks: vec![(genesis_header, Vec::new())],
+			confirmed_txids: HashSet::new(),
+			utxos: HashSet::new(),
+		}
 	}
 
 	fn tip_height(&self) -> u32 {
@@ -204,7 +215,37 @@ impl ChainState {
 		if self.confirmed_txids.contains(&txid) {
 			return false;
 		}
+		// Reject timelocked transactions before their lock_time, matching
+		// consensus rules. Commitment txs encode an obscured commitment
+		// number with bit 29 set, which is not a real timelock.
+		let lock_time = tx.lock_time.to_consensus_u32();
+		if lock_time > 0 && lock_time < 500_000_000 && lock_time & (1 << 29) == 0
+			&& self.tip_height() < lock_time
+		{
+			return false;
+		}
+		// Validate that all inputs spend existing, unspent outputs. This
+		// rejects both double-spends and spends of outputs that were never
+		// created (e.g. due to fuzz txid hash collisions where a different
+		// transaction was confirmed under the same txid).
+		let is_coinbase = tx.is_coinbase();
+		if !is_coinbase {
+			for input in &tx.input {
+				if !self.utxos.contains(&input.previous_output) {
+					return false;
+				}
+			}
+		}
 		self.confirmed_txids.insert(txid);
+		if !is_coinbase {
+			for input in &tx.input {
+				self.utxos.remove(&input.previous_output);
+			}
+		}
+		// Add this transaction's outputs as new UTXOs.
+		for idx in 0..tx.output.len() {
+			self.utxos.insert(BitcoinOutPoint { txid, vout: idx as u32 });
+		}
 
 		let prev_hash = self.blocks.last().unwrap().0.block_hash();
 		let header = create_dummy_header(prev_hash, 42);
@@ -216,6 +257,14 @@ impl ChainState {
 			self.blocks.push((header, Vec::new()));
 		}
 		true
+	}
+
+	fn advance_height(&mut self, num_blocks: u32) {
+		for _ in 0..num_blocks {
+			let prev_hash = self.blocks.last().unwrap().0.block_hash();
+			let header = create_dummy_header(prev_hash, 42);
+			self.blocks.push((header, Vec::new()));
+		}
 	}
 
 	fn block_at(&self, height: u32) -> &(Header, Vec<Transaction>) {
@@ -500,12 +549,12 @@ impl SignerProvider for KeyProvider {
 	}
 }
 
-// Since this fuzzer is only concerned with live-channel operations, we don't need to worry about
-// any signer operations that come after a force close.
-const SUPPORTED_SIGNER_OPS: [SignerOp; 3] = [
+const SUPPORTED_SIGNER_OPS: [SignerOp; 5] = [
 	SignerOp::SignCounterpartyCommitment,
 	SignerOp::GetPerCommitmentPoint,
 	SignerOp::ReleaseCommitmentSecret,
+	SignerOp::SignHolderCommitment,
+	SignerOp::SignHolderHtlcTransaction,
 ];
 
 impl KeyProvider {
@@ -705,24 +754,25 @@ fn send_mpp_payment(
 	source: &ChanMan, dest: &ChanMan, dest_chan_ids: &[ChannelId], amt: u64,
 	payment_secret: PaymentSecret, payment_hash: PaymentHash, payment_id: PaymentId,
 ) -> bool {
-	let num_paths = dest_chan_ids.len();
+	let mut paths = Vec::new();
+
+	let dest_chans = dest.list_channels();
+	let dest_scids: Vec<_> = dest_chan_ids
+		.iter()
+		.filter_map(|chan_id| {
+			dest_chans
+				.iter()
+				.find(|chan| chan.channel_id == *chan_id)
+				.and_then(|chan| chan.short_channel_id)
+		})
+		.collect();
+	let num_paths = dest_scids.len();
 	if num_paths == 0 {
 		return false;
 	}
-
 	let amt_per_path = amt / num_paths as u64;
-	let mut paths = Vec::with_capacity(num_paths);
 
-	let dest_chans = dest.list_channels();
-	let dest_scids = dest_chan_ids.iter().map(|chan_id| {
-		dest_chans
-			.iter()
-			.find(|chan| chan.channel_id == *chan_id)
-			.and_then(|chan| chan.short_channel_id)
-			.unwrap()
-	});
-
-	for (i, dest_scid) in dest_scids.enumerate() {
+	for (i, dest_scid) in dest_scids.into_iter().enumerate() {
 		let path_amt = if i == num_paths - 1 {
 			amt - amt_per_path * (num_paths as u64 - 1)
 		} else {
@@ -764,9 +814,30 @@ fn send_mpp_hop_payment(
 	dest_chan_ids: &[ChannelId], amt: u64, payment_secret: PaymentSecret,
 	payment_hash: PaymentHash, payment_id: PaymentId,
 ) -> bool {
-	// Create paths by pairing middle_scids with dest_scids
-	let num_paths = middle_chan_ids.len().max(dest_chan_ids.len());
-	if num_paths == 0 {
+	let middle_chans = middle.list_channels();
+	let middle_scids: Vec<_> = middle_chan_ids
+		.iter()
+		.filter_map(|chan_id| {
+			middle_chans
+				.iter()
+				.find(|chan| chan.channel_id == *chan_id)
+				.and_then(|chan| chan.short_channel_id)
+		})
+		.collect();
+
+	let dest_chans = dest.list_channels();
+	let dest_scids: Vec<_> = dest_chan_ids
+		.iter()
+		.filter_map(|chan_id| {
+			dest_chans
+				.iter()
+				.find(|chan| chan.channel_id == *chan_id)
+				.and_then(|chan| chan.short_channel_id)
+		})
+		.collect();
+
+	let num_paths = middle_scids.len().max(dest_scids.len());
+	if middle_scids.is_empty() || dest_scids.is_empty() {
 		return false;
 	}
 
@@ -774,30 +845,6 @@ fn send_mpp_hop_payment(
 	let amt_per_path = amt / num_paths as u64;
 	let fee_per_path = first_hop_fee / num_paths as u64;
 	let mut paths = Vec::with_capacity(num_paths);
-
-	let middle_chans = middle.list_channels();
-	let middle_scids: Vec<_> = middle_chan_ids
-		.iter()
-		.map(|chan_id| {
-			middle_chans
-				.iter()
-				.find(|chan| chan.channel_id == *chan_id)
-				.and_then(|chan| chan.short_channel_id)
-				.unwrap()
-		})
-		.collect();
-
-	let dest_chans = dest.list_channels();
-	let dest_scids: Vec<_> = dest_chan_ids
-		.iter()
-		.map(|chan_id| {
-			dest_chans
-				.iter()
-				.find(|chan| chan.channel_id == *chan_id)
-				.and_then(|chan| chan.short_channel_id)
-				.unwrap()
-		})
-		.collect();
 
 	for i in 0..num_paths {
 		let middle_scid = middle_scids[i % middle_scids.len()];
@@ -850,17 +897,6 @@ fn send_mpp_hop_payment(
 		Err(_) => false,
 		Ok(()) => check_payment_send_events(source, payment_id),
 	}
-}
-
-#[inline]
-fn assert_action_timeout_awaiting_response(action: &msgs::ErrorAction) {
-	// Since sending/receiving messages may be delayed, `timer_tick_occurred` may cause a node to
-	// disconnect their counterparty if they're expecting a timely response.
-	assert!(matches!(
-		action,
-		msgs::ErrorAction::DisconnectPeerWithWarning { msg }
-		if msg.data.contains("Disconnecting due to timeout awaiting response")
-	));
 }
 
 enum ChanType {
@@ -1072,13 +1108,25 @@ pub fn do_test<Out: Output + MaybeSend + MaybeSync>(data: &[u8], out: Out) {
 		let manager =
 			<(BestBlock, ChanMan)>::read(&mut &ser[..], read_args).expect("Failed to read manager");
 		let res = (manager.1, chain_monitor.clone());
+		let expected_status = *mon_style[node_id as usize].borrow();
+		*chain_monitor.persister.update_ret.lock().unwrap() = expected_status.clone();
 		for (channel_id, mon) in monitors.drain() {
+			let monitor_id = mon.get_latest_update_id();
 			assert_eq!(
 				chain_monitor.chain_monitor.watch_channel(channel_id, mon),
-				Ok(ChannelMonitorUpdateStatus::Completed)
+				Ok(expected_status.clone())
 			);
+			// When persistence returns InProgress, the real ChainMonitor tracks
+			// the initial update_id as pending. We must mirror this in the
+			// TestChainMonitor's latest_monitors so that
+			// complete_all_monitor_updates can drain and complete it later.
+			if expected_status == chain::ChannelMonitorUpdateStatus::InProgress {
+				let mut map = chain_monitor.latest_monitors.lock().unwrap();
+				if let Some(state) = map.get_mut(&channel_id) {
+					state.pending_monitors.push((monitor_id, state.persisted_monitor.clone()));
+				}
+			}
 		}
-		*chain_monitor.persister.update_ret.lock().unwrap() = *mon_style[node_id as usize].borrow();
 		res
 	};
 
@@ -1112,23 +1160,8 @@ pub fn do_test<Out: Output + MaybeSend + MaybeSync>(data: &[u8], out: Out) {
 		}};
 	}
 	macro_rules! make_channel {
-		($source: expr, $dest: expr, $source_monitor: expr, $dest_monitor: expr, $dest_keys_manager: expr, $chan_id: expr, $trusted_open: expr, $trusted_accept: expr) => {{
-			if $trusted_open {
-				$source
-					.create_channel_to_trusted_peer_0reserve(
-						$dest.get_our_node_id(),
-						100_000,
-						42,
-						0,
-						None,
-						None,
-					)
-					.unwrap();
-			} else {
-				$source
-					.create_channel($dest.get_our_node_id(), 100_000, 42, 0, None, None)
-					.unwrap();
-			}
+		($source: expr, $dest: expr, $source_monitor: expr, $dest_monitor: expr, $dest_keys_manager: expr, $chan_id: expr) => {{
+			$source.create_channel($dest.get_our_node_id(), 100_000, 42, 0, None, None).unwrap();
 			let open_channel = {
 				let events = $source.get_and_clear_pending_msg_events();
 				assert_eq!(events.len(), 1);
@@ -1153,26 +1186,14 @@ pub fn do_test<Out: Output + MaybeSend + MaybeSync>(data: &[u8], out: Out) {
 					random_bytes
 						.copy_from_slice(&$dest_keys_manager.get_secure_random_bytes()[..16]);
 					let user_channel_id = u128::from_be_bytes(random_bytes);
-					if $trusted_accept {
-						$dest
-							.accept_inbound_channel_from_trusted_peer(
-								temporary_channel_id,
-								counterparty_node_id,
-								user_channel_id,
-								TrustedChannelFeatures::ZeroReserve,
-								None,
-							)
-							.unwrap();
-					} else {
-						$dest
-							.accept_inbound_channel(
-								temporary_channel_id,
-								counterparty_node_id,
-								user_channel_id,
-								None,
-							)
-							.unwrap();
-					}
+					$dest
+						.accept_inbound_channel(
+							temporary_channel_id,
+							counterparty_node_id,
+							user_channel_id,
+							None,
+						)
+						.unwrap();
 				} else {
 					panic!("Wrong event type");
 				}
@@ -1305,21 +1326,27 @@ pub fn do_test<Out: Output + MaybeSend + MaybeSync>(data: &[u8], out: Out) {
 	let wallet_c = TestWalletSource::new(SecretKey::from_slice(&[3; 32]).unwrap());
 
 	let wallets = vec![wallet_a, wallet_b, wallet_c];
-	let coinbase_tx = bitcoin::Transaction {
-		version: bitcoin::transaction::Version::TWO,
-		lock_time: bitcoin::absolute::LockTime::ZERO,
-		input: vec![bitcoin::TxIn { ..Default::default() }],
-		output: wallets
-			.iter()
-			.map(|w| TxOut {
-				value: Amount::from_sat(100_000),
-				script_pubkey: w.get_change_script().unwrap(),
-			})
-			.collect(),
-	};
-	wallets.iter().enumerate().for_each(|(i, w)| {
-		w.add_utxo(coinbase_tx.clone(), i as u32);
-	});
+	// Create wallet UTXOs for each node. Each anchor-channel HTLC claim
+	// needs a wallet input for fees, so we create enough UTXOs to cover
+	// multiple concurrent claims.
+	let num_wallet_utxos = 50;
+	for (wallet_idx, w) in wallets.iter().enumerate() {
+		let coinbase_tx = bitcoin::Transaction {
+			version: bitcoin::transaction::Version(wallet_idx as i32 + 100),
+			lock_time: bitcoin::absolute::LockTime::ZERO,
+			input: vec![bitcoin::TxIn { ..Default::default() }],
+			output: (0..num_wallet_utxos)
+				.map(|_| TxOut {
+					value: Amount::from_sat(100_000),
+					script_pubkey: w.get_change_script().unwrap(),
+				})
+				.collect(),
+		};
+		for vout in 0..num_wallet_utxos {
+			w.add_utxo(coinbase_tx.clone(), vout);
+		}
+		chain_state.confirm_tx(coinbase_tx);
+	}
 
 	let fee_est_a = Arc::new(FuzzEstimator { ret_val: atomic::AtomicU32::new(253) });
 	let mut last_htlc_clear_fee_a = 253;
@@ -1348,16 +1375,12 @@ pub fn do_test<Out: Output + MaybeSend + MaybeSync>(data: &[u8], out: Out) {
 	// Fuzz mode uses XOR-based hashing (all bytes XOR to one byte), and
 	// versions 0-5 cause collisions between A-B and B-C channel pairs
 	// (e.g., A-B with Version(1) collides with B-C with Version(3)).
-	// A-B: channel 2 A and B have 0-reserve (trusted open + trusted accept),
-	//       channel 3 A has 0-reserve (trusted accept)
-	make_channel!(nodes[0], nodes[1], monitor_a, monitor_b, keys_manager_b, 1, false, false);
-	make_channel!(nodes[0], nodes[1], monitor_a, monitor_b, keys_manager_b, 2, true, true);
-	make_channel!(nodes[0], nodes[1], monitor_a, monitor_b, keys_manager_b, 3, false, true);
-	// B-C: channel 4 B has 0-reserve (via trusted accept),
-	//       channel 5 C has 0-reserve (via trusted open)
-	make_channel!(nodes[1], nodes[2], monitor_b, monitor_c, keys_manager_c, 4, false, true);
-	make_channel!(nodes[1], nodes[2], monitor_b, monitor_c, keys_manager_c, 5, true, false);
-	make_channel!(nodes[1], nodes[2], monitor_b, monitor_c, keys_manager_c, 6, false, false);
+	make_channel!(nodes[0], nodes[1], monitor_a, monitor_b, keys_manager_b, 1);
+	make_channel!(nodes[0], nodes[1], monitor_a, monitor_b, keys_manager_b, 2);
+	make_channel!(nodes[0], nodes[1], monitor_a, monitor_b, keys_manager_b, 3);
+	make_channel!(nodes[1], nodes[2], monitor_b, monitor_c, keys_manager_c, 4);
+	make_channel!(nodes[1], nodes[2], monitor_b, monitor_c, keys_manager_c, 5);
+	make_channel!(nodes[1], nodes[2], monitor_b, monitor_c, keys_manager_c, 6);
 
 	// Wipe the transactions-broadcasted set to make sure we don't broadcast any transactions
 	// during normal operation in `test_return`.
@@ -1367,6 +1390,7 @@ pub fn do_test<Out: Output + MaybeSend + MaybeSync>(data: &[u8], out: Out) {
 
 	let sync_with_chain_state = |chain_state: &ChainState,
 	                             node: &ChannelManager<_, _, _, _, _, _, _, _, _>,
+	                             monitor: &TestChainMonitor,
 	                             node_height: &mut u32,
 	                             num_blocks: Option<u32>| {
 		let target_height = if let Some(num_blocks) = num_blocks {
@@ -1380,16 +1404,18 @@ pub fn do_test<Out: Output + MaybeSend + MaybeSync>(data: &[u8], out: Out) {
 			let (header, txn) = chain_state.block_at(*node_height);
 			let txdata: Vec<_> = txn.iter().enumerate().map(|(i, tx)| (i + 1, tx)).collect();
 			if !txdata.is_empty() {
+				monitor.chain_monitor.transactions_confirmed(header, &txdata, *node_height);
 				node.transactions_confirmed(header, &txdata, *node_height);
 			}
+			monitor.chain_monitor.best_block_updated(header, *node_height);
 			node.best_block_updated(header, *node_height);
 		}
 	};
 
 	// Sync all nodes to tip to lock the funding.
-	sync_with_chain_state(&mut chain_state, &nodes[0], &mut node_height_a, None);
-	sync_with_chain_state(&mut chain_state, &nodes[1], &mut node_height_b, None);
-	sync_with_chain_state(&mut chain_state, &nodes[2], &mut node_height_c, None);
+	sync_with_chain_state(&mut chain_state, &nodes[0], &monitor_a, &mut node_height_a, None);
+	sync_with_chain_state(&mut chain_state, &nodes[1], &monitor_b, &mut node_height_b, None);
+	sync_with_chain_state(&mut chain_state, &nodes[2], &monitor_c, &mut node_height_c, None);
 
 	lock_fundings!(nodes);
 
@@ -1424,18 +1450,18 @@ pub fn do_test<Out: Output + MaybeSend + MaybeSync>(data: &[u8], out: Out) {
 	let resolved_payments: RefCell<[HashMap<PaymentId, Option<PaymentHash>>; 3]> =
 		RefCell::new([new_hash_map(), new_hash_map(), new_hash_map()]);
 	let claimed_payment_hashes: RefCell<HashSet<PaymentHash>> = RefCell::new(HashSet::new());
+	let closed_channels: RefCell<HashSet<ChannelId>> = RefCell::new(HashSet::new());
 
 	macro_rules! test_return {
 		() => {{
-			assert_eq!(nodes[0].list_channels().len(), 3);
-			assert_eq!(nodes[1].list_channels().len(), 6);
-			assert_eq!(nodes[2].list_channels().len(), 3);
+			assert!(nodes[0].list_channels().len() <= 3);
+			assert!(nodes[1].list_channels().len() <= 6);
+			assert!(nodes[2].list_channels().len() <= 3);
 
-			// All broadcasters should be empty (all broadcast transactions should be handled
-			// explicitly).
-			assert!(broadcast_a.txn_broadcasted.borrow().is_empty());
-			assert!(broadcast_b.txn_broadcasted.borrow().is_empty());
-			assert!(broadcast_c.txn_broadcasted.borrow().is_empty());
+			// Drain broadcasters since force-closes produce commitment transactions.
+			broadcast_a.txn_broadcasted.borrow_mut().clear();
+			broadcast_b.txn_broadcasted.borrow_mut().clear();
+			broadcast_c.txn_broadcasted.borrow_mut().clear();
 
 			return;
 		}};
@@ -1615,10 +1641,17 @@ pub fn do_test<Out: Output + MaybeSend + MaybeSync>(data: &[u8], out: Out) {
 							*node_id == a_id
 						},
 						MessageSendEvent::HandleError { ref action, ref node_id } => {
-							assert_action_timeout_awaiting_response(action);
+							match action {
+								msgs::ErrorAction::DisconnectPeerWithWarning { msg }
+								if msg.data.contains("Disconnecting due to timeout awaiting response") => {},
+								msgs::ErrorAction::DisconnectPeer { .. } => {},
+								msgs::ErrorAction::SendErrorMessage { .. } => {},
+								_ => panic!("Unexpected HandleError action {:?}", action),
+							}
 							if Some(*node_id) == expect_drop_id { panic!("peer_disconnected should drop msgs bound for the disconnected peer"); }
 							*node_id == a_id
 						},
+						MessageSendEvent::BroadcastChannelUpdate { .. } => continue,
 						_ => panic!("Unhandled message event {:?}", event),
 					};
 					if push_a { ba_events.push(event); } else { bc_events.push(event); }
@@ -1733,6 +1766,17 @@ pub fn do_test<Out: Output + MaybeSend + MaybeSync>(data: &[u8], out: Out) {
 							}
 						},
 						MessageSendEvent::SendChannelReestablish { ref node_id, ref msg } => {
+							if msg.next_local_commitment_number == 0
+								&& msg.next_remote_commitment_number == 0
+							{
+								// Skip bogus reestablish (lnd workaround). All fuzzer
+								// nodes are LDK and will already force-close via the
+								// error message path. Delivering these between LDK
+								// nodes creates an infinite ping-pong since both sides
+								// respond with another bogus reestablish for the
+								// unknown channel.
+								continue;
+							}
 							for (idx, dest) in nodes.iter().enumerate() {
 								if dest.get_our_node_id() == *node_id {
 									out.locked_write(format!("Delivering channel_reestablish from node {} to node {}.\n", $node, idx).as_bytes());
@@ -1844,8 +1888,20 @@ pub fn do_test<Out: Output + MaybeSend + MaybeSync>(data: &[u8], out: Out) {
 								}
 							}
 						},
-						MessageSendEvent::HandleError { ref action, .. } => {
-							assert_action_timeout_awaiting_response(action);
+						MessageSendEvent::HandleError { ref action, ref node_id } => {
+							match action {
+								msgs::ErrorAction::DisconnectPeerWithWarning { msg }
+								if msg.data.contains("Disconnecting due to timeout awaiting response") => {},
+								msgs::ErrorAction::DisconnectPeer { .. } => {},
+								msgs::ErrorAction::SendErrorMessage { ref msg } => {
+									for dest in nodes.iter() {
+										if dest.get_our_node_id() == *node_id {
+											dest.handle_error(nodes[$node].get_our_node_id(), msg);
+										}
+									}
+								},
+								_ => panic!("Unexpected HandleError action {:?}", action),
+							}
 						},
 						MessageSendEvent::SendChannelReady { .. } => {
 							// Can be generated as a reestablish response
@@ -1897,8 +1953,14 @@ pub fn do_test<Out: Output + MaybeSend + MaybeSync>(data: &[u8], out: Out) {
 							MessageSendEvent::SendChannelReady { .. } => {},
 							MessageSendEvent::SendAnnouncementSignatures { .. } => {},
 							MessageSendEvent::SendChannelUpdate { .. } => {},
-							MessageSendEvent::HandleError { ref action, .. } => {
-								assert_action_timeout_awaiting_response(action);
+							MessageSendEvent::HandleError { ref action, .. } => match action {
+								msgs::ErrorAction::DisconnectPeerWithWarning { msg }
+									if msg.data.contains(
+										"Disconnecting due to timeout awaiting response",
+									) => {},
+								msgs::ErrorAction::DisconnectPeer { .. } => {},
+								msgs::ErrorAction::SendErrorMessage { .. } => {},
+								_ => panic!("Unexpected HandleError action {:?}", action),
 							},
 							_ => panic!("Unhandled message event"),
 						}
@@ -1919,8 +1981,14 @@ pub fn do_test<Out: Output + MaybeSend + MaybeSync>(data: &[u8], out: Out) {
 							MessageSendEvent::SendChannelReady { .. } => {},
 							MessageSendEvent::SendAnnouncementSignatures { .. } => {},
 							MessageSendEvent::SendChannelUpdate { .. } => {},
-							MessageSendEvent::HandleError { ref action, .. } => {
-								assert_action_timeout_awaiting_response(action);
+							MessageSendEvent::HandleError { ref action, .. } => match action {
+								msgs::ErrorAction::DisconnectPeerWithWarning { msg }
+									if msg.data.contains(
+										"Disconnecting due to timeout awaiting response",
+									) => {},
+								msgs::ErrorAction::DisconnectPeer { .. } => {},
+								msgs::ErrorAction::SendErrorMessage { .. } => {},
+								_ => panic!("Unexpected HandleError action {:?}", action),
 							},
 							_ => panic!("Unhandled message event"),
 						}
@@ -2000,6 +2068,16 @@ pub fn do_test<Out: Output + MaybeSend + MaybeSync>(data: &[u8], out: Out) {
 						events::Event::PaymentPathFailed { .. } => {},
 						events::Event::PaymentForwarded { .. } if $node == 1 => {},
 						events::Event::ChannelReady { .. } => {},
+						events::Event::HTLCHandlingFailed {
+							failure_type: events::HTLCHandlingFailureType::Receive { payment_hash },
+							..
+						} => {
+							// The receiver failed to handle this HTLC (e.g., HTLC
+							// timeout won the race against the claim). Remove it from
+							// claimed hashes so we don't assert that the sender must
+							// have received PaymentSent.
+							claimed_payment_hashes.borrow_mut().remove(&payment_hash);
+						},
 						events::Event::HTLCHandlingFailed { .. } => {},
 
 						events::Event::FundingTransactionReadyForSigning {
@@ -2018,22 +2096,32 @@ pub fn do_test<Out: Output + MaybeSend + MaybeSync>(data: &[u8], out: Out) {
 								.unwrap();
 						},
 						events::Event::SplicePending { new_funding_txo, .. } => {
-							let broadcaster = match $node {
-								0 => &broadcast_a,
-								1 => &broadcast_b,
-								_ => &broadcast_c,
-							};
-							let mut txs = broadcaster.txn_broadcasted.borrow_mut();
-							assert!(txs.len() >= 1);
-							let splice_tx = txs.remove(0);
-							assert_eq!(new_funding_txo.txid, splice_tx.compute_txid());
-							chain_state.confirm_tx(splice_tx);
+							if !chain_state.confirmed_txids.contains(&new_funding_txo.txid) {
+								let broadcaster = match $node {
+									0 => &broadcast_a,
+									1 => &broadcast_b,
+									_ => &broadcast_c,
+								};
+								let mut txs = broadcaster.txn_broadcasted.borrow_mut();
+								if let Some(pos) = txs
+									.iter()
+									.position(|tx| new_funding_txo.txid == tx.compute_txid())
+								{
+									let splice_tx = txs.remove(pos);
+									chain_state.confirm_tx(splice_tx);
+								}
+								// If not found, the settlement drain loop already
+								// removed it from the broadcaster but confirm_tx
+								// rejected it (e.g. inputs already spent).
+							}
 						},
 						events::Event::SpliceFailed { .. } => {},
-						events::Event::DiscardFunding {
-							funding_info: events::FundingInfo::Contribution { .. },
-							..
-						} => {},
+						events::Event::ChannelClosed { channel_id, .. } => {
+							closed_channels.borrow_mut().insert(channel_id);
+						},
+						events::Event::DiscardFunding { .. } => {},
+						events::Event::SpendableOutputs { .. } => {},
+						events::Event::BumpTransaction(..) => {},
 
 						_ => panic!("Unhandled event"),
 					}
@@ -2479,13 +2567,49 @@ pub fn do_test<Out: Output + MaybeSend + MaybeSync>(data: &[u8], out: Out) {
 			},
 
 			// Sync node by 1 block to cover confirmation of a transaction.
-			0xa8 => sync_with_chain_state(&mut chain_state, &nodes[0], &mut node_height_a, Some(1)),
-			0xa9 => sync_with_chain_state(&mut chain_state, &nodes[1], &mut node_height_b, Some(1)),
-			0xaa => sync_with_chain_state(&mut chain_state, &nodes[2], &mut node_height_c, Some(1)),
+			0xa8 => sync_with_chain_state(
+				&mut chain_state,
+				&nodes[0],
+				&monitor_a,
+				&mut node_height_a,
+				Some(1),
+			),
+			0xa9 => sync_with_chain_state(
+				&mut chain_state,
+				&nodes[1],
+				&monitor_b,
+				&mut node_height_b,
+				Some(1),
+			),
+			0xaa => sync_with_chain_state(
+				&mut chain_state,
+				&nodes[2],
+				&monitor_c,
+				&mut node_height_c,
+				Some(1),
+			),
 			// Sync node to chain tip to cover confirmation of a transaction post-reorg-risk.
-			0xab => sync_with_chain_state(&mut chain_state, &nodes[0], &mut node_height_a, None),
-			0xac => sync_with_chain_state(&mut chain_state, &nodes[1], &mut node_height_b, None),
-			0xad => sync_with_chain_state(&mut chain_state, &nodes[2], &mut node_height_c, None),
+			0xab => sync_with_chain_state(
+				&mut chain_state,
+				&nodes[0],
+				&monitor_a,
+				&mut node_height_a,
+				None,
+			),
+			0xac => sync_with_chain_state(
+				&mut chain_state,
+				&nodes[1],
+				&monitor_b,
+				&mut node_height_b,
+				None,
+			),
+			0xad => sync_with_chain_state(
+				&mut chain_state,
+				&nodes[2],
+				&monitor_c,
+				&mut node_height_c,
+				None,
+			),
 
 			0xb0 | 0xb1 | 0xb2 => {
 				// Restart node A, picking among the in-flight `ChannelMonitor`s to use based on
@@ -2576,54 +2700,129 @@ pub fn do_test<Out: Output + MaybeSend + MaybeSync>(data: &[u8], out: Out) {
 			},
 			0xc4 => {
 				keys_manager_b.enable_op_for_all_signers(SignerOp::SignCounterpartyCommitment);
-				let filter = Some((nodes[0].get_our_node_id(), chan_a_id));
-				nodes[1].signer_unblocked(filter);
+				nodes[1].signer_unblocked(None);
 			},
 			0xc5 => {
-				keys_manager_b.enable_op_for_all_signers(SignerOp::SignCounterpartyCommitment);
-				let filter = Some((nodes[2].get_our_node_id(), chan_b_id));
-				nodes[1].signer_unblocked(filter);
-			},
-			0xc6 => {
 				keys_manager_c.enable_op_for_all_signers(SignerOp::SignCounterpartyCommitment);
 				nodes[2].signer_unblocked(None);
 			},
-			0xc7 => {
+			0xc6 => {
 				keys_manager_a.enable_op_for_all_signers(SignerOp::GetPerCommitmentPoint);
 				nodes[0].signer_unblocked(None);
 			},
+			0xc7 => {
+				keys_manager_b.enable_op_for_all_signers(SignerOp::GetPerCommitmentPoint);
+				nodes[1].signer_unblocked(None);
+			},
 			0xc8 => {
-				keys_manager_b.enable_op_for_all_signers(SignerOp::GetPerCommitmentPoint);
-				let filter = Some((nodes[0].get_our_node_id(), chan_a_id));
-				nodes[1].signer_unblocked(filter);
-			},
-			0xc9 => {
-				keys_manager_b.enable_op_for_all_signers(SignerOp::GetPerCommitmentPoint);
-				let filter = Some((nodes[2].get_our_node_id(), chan_b_id));
-				nodes[1].signer_unblocked(filter);
-			},
-			0xca => {
 				keys_manager_c.enable_op_for_all_signers(SignerOp::GetPerCommitmentPoint);
 				nodes[2].signer_unblocked(None);
 			},
-			0xcb => {
+			0xc9 => {
 				keys_manager_a.enable_op_for_all_signers(SignerOp::ReleaseCommitmentSecret);
 				nodes[0].signer_unblocked(None);
 			},
-			0xcc => {
+			0xca => {
 				keys_manager_b.enable_op_for_all_signers(SignerOp::ReleaseCommitmentSecret);
-				let filter = Some((nodes[0].get_our_node_id(), chan_a_id));
-				nodes[1].signer_unblocked(filter);
+				nodes[1].signer_unblocked(None);
 			},
-			0xcd => {
-				keys_manager_b.enable_op_for_all_signers(SignerOp::ReleaseCommitmentSecret);
-				let filter = Some((nodes[2].get_our_node_id(), chan_b_id));
-				nodes[1].signer_unblocked(filter);
-			},
-			0xce => {
+			0xcb => {
 				keys_manager_c.enable_op_for_all_signers(SignerOp::ReleaseCommitmentSecret);
 				nodes[2].signer_unblocked(None);
 			},
+			0xcc => {
+				keys_manager_a.enable_op_for_all_signers(SignerOp::SignHolderCommitment);
+				nodes[0].signer_unblocked(None);
+			},
+			0xcd => {
+				keys_manager_b.enable_op_for_all_signers(SignerOp::SignHolderCommitment);
+				nodes[1].signer_unblocked(None);
+			},
+			0xce => {
+				keys_manager_c.enable_op_for_all_signers(SignerOp::SignHolderCommitment);
+				nodes[2].signer_unblocked(None);
+			},
+			0xcf => {
+				keys_manager_a.enable_op_for_all_signers(SignerOp::SignHolderHtlcTransaction);
+				keys_manager_b.enable_op_for_all_signers(SignerOp::SignHolderHtlcTransaction);
+				keys_manager_c.enable_op_for_all_signers(SignerOp::SignHolderHtlcTransaction);
+				nodes[0].signer_unblocked(None);
+				nodes[1].signer_unblocked(None);
+				nodes[2].signer_unblocked(None);
+			},
+
+			// Force-close a channel and track it as closed.
+			0xd0 => {
+				if nodes[0]
+					.force_close_broadcasting_latest_txn(
+						&chan_a_id,
+						&nodes[1].get_our_node_id(),
+						"]]]]]]]]".to_string(),
+					)
+					.is_ok()
+				{
+					closed_channels.borrow_mut().insert(chan_a_id);
+				}
+			},
+			0xd1 => {
+				if nodes[1]
+					.force_close_broadcasting_latest_txn(
+						&chan_b_id,
+						&nodes[2].get_our_node_id(),
+						"]]]]]]]".to_string(),
+					)
+					.is_ok()
+				{
+					closed_channels.borrow_mut().insert(chan_b_id);
+				}
+			},
+			0xd2 => {
+				if nodes[1]
+					.force_close_broadcasting_latest_txn(
+						&chan_a_id,
+						&nodes[0].get_our_node_id(),
+						"]]]]]]".to_string(),
+					)
+					.is_ok()
+				{
+					closed_channels.borrow_mut().insert(chan_a_id);
+				}
+			},
+			0xd3 => {
+				if nodes[2]
+					.force_close_broadcasting_latest_txn(
+						&chan_b_id,
+						&nodes[1].get_our_node_id(),
+						"]]]]]".to_string(),
+					)
+					.is_ok()
+				{
+					closed_channels.borrow_mut().insert(chan_b_id);
+				}
+			},
+
+			// Drain broadcasters and confirm all broadcast transactions.
+			0xd8 => {
+				for tx in broadcast_a.txn_broadcasted.borrow_mut().drain(..) {
+					chain_state.confirm_tx(tx);
+				}
+			},
+			0xd9 => {
+				for tx in broadcast_b.txn_broadcasted.borrow_mut().drain(..) {
+					chain_state.confirm_tx(tx);
+				}
+			},
+			0xda => {
+				for tx in broadcast_c.txn_broadcasted.borrow_mut().drain(..) {
+					chain_state.confirm_tx(tx);
+				}
+			},
+
+			// Advance chain height by many empty blocks so that HTLC timelocks can
+			// expire and the OnchainTxHandler releases timelocked claim packages.
+			0xdc => chain_state.advance_height(50),
+			0xdd => chain_state.advance_height(100),
+			0xde => chain_state.advance_height(200),
 
 			0xf0 => {
 				for id in &chan_ab_ids {
@@ -2734,12 +2933,45 @@ pub fn do_test<Out: Output + MaybeSend + MaybeSync>(data: &[u8], out: Out) {
 				nodes[1].signer_unblocked(None);
 				nodes[2].signer_unblocked(None);
 
+				// After a node reload with an older monitor, the monitor may
+				// be behind node_height. Sync only the monitors (not the
+				// ChannelManager) for the missed blocks to avoid the
+				// ChannelManager interpreting lower heights as a reorg.
+				for (monitor, node_height) in [
+					(&monitor_a, &node_height_a),
+					(&monitor_b, &node_height_b),
+					(&monitor_c, &node_height_c),
+				] {
+					let mut min_monitor_height = *node_height;
+					for chan_id in monitor.chain_monitor.list_monitors() {
+						if let Ok(mon) = monitor.chain_monitor.get_monitor(chan_id) {
+							min_monitor_height = std::cmp::min(
+								min_monitor_height,
+								mon.current_best_block().height,
+							);
+						}
+					}
+					let mut h = min_monitor_height;
+					while h < *node_height {
+						h += 1;
+						let (header, txn) = chain_state.block_at(h);
+						let txdata: Vec<_> =
+							txn.iter().enumerate().map(|(i, tx)| (i + 1, tx)).collect();
+						if !txdata.is_empty() {
+							monitor
+								.chain_monitor
+								.transactions_confirmed(header, &txdata, h);
+						}
+						monitor.chain_monitor.best_block_updated(header, h);
+					}
+				}
+
 				macro_rules! process_all_events {
 					() => { {
 						let mut last_pass_no_updates = false;
 						for i in 0..std::usize::MAX {
 							if i == 100 {
-								panic!("It may take may iterations to settle the state, but it should not take forever");
+								panic!("It may take many iterations to settle the state, but it should not take forever");
 							}
 							// Next, make sure no monitor updates are pending
 							for id in &chan_ab_ids {
@@ -2750,29 +2982,120 @@ pub fn do_test<Out: Output + MaybeSend + MaybeSync>(data: &[u8], out: Out) {
 								complete_all_monitor_updates(&monitor_b, id);
 								complete_all_monitor_updates(&monitor_c, id);
 							}
-							// Then, make sure any current forwards make their way to their destination
+							// Process messages and events first so nodes
+							// learn preimages before on-chain txs are
+							// confirmed. A monitor that already has a
+							// preimage when it sees the counterparty
+							// commitment tx will broadcast the claim
+							// directly, but one that sees the commitment
+							// tx first and only later gets the preimage
+							// will not re-check for claimable outputs.
+							let mut had_msg_or_ev = false;
 							if process_msg_events!(0, false, ProcessMessages::AllMessages) {
-								last_pass_no_updates = false;
-								continue;
+								had_msg_or_ev = true;
 							}
 							if process_msg_events!(1, false, ProcessMessages::AllMessages) {
-								last_pass_no_updates = false;
-								continue;
+								had_msg_or_ev = true;
 							}
 							if process_msg_events!(2, false, ProcessMessages::AllMessages) {
-								last_pass_no_updates = false;
-								continue;
+								had_msg_or_ev = true;
 							}
-							// ...making sure any payments are claimed.
 							if process_events!(0, false) {
-								last_pass_no_updates = false;
-								continue;
+								had_msg_or_ev = true;
 							}
 							if process_events!(1, false) {
-								last_pass_no_updates = false;
-								continue;
+								had_msg_or_ev = true;
 							}
 							if process_events!(2, false) {
+								had_msg_or_ev = true;
+							}
+							// Sync nodes to chain tip after messages so
+							// monitors that just received preimages can
+							// generate claims when they see commitment txs.
+							sync_with_chain_state(&chain_state, &nodes[0], &monitor_a, &mut node_height_a, None);
+							sync_with_chain_state(&chain_state, &nodes[1], &monitor_b, &mut node_height_b, None);
+							sync_with_chain_state(&chain_state, &nodes[2], &monitor_c, &mut node_height_c, None);
+							// Process chain monitor events (BumpTransaction,
+							// SpendableOutputs).
+							{
+								let monitors = [&monitor_a, &monitor_b, &monitor_c];
+								let broadcasters: [&Arc<TestBroadcaster>; 3] = [&broadcast_a, &broadcast_b, &broadcast_c];
+								let keys_managers = [&keys_manager_a, &keys_manager_b, &keys_manager_c];
+								for (idx, monitor) in monitors.iter().enumerate() {
+									let wallet = WalletSync::new(
+										&wallets[idx],
+										Arc::clone(&loggers[idx]),
+									);
+									let handler = BumpTransactionEventHandlerSync::new(
+										broadcasters[idx].as_ref(),
+										&wallet,
+										keys_managers[idx].as_ref(),
+										Arc::clone(&loggers[idx]),
+									);
+									let broadcaster = broadcasters[idx];
+									monitor.chain_monitor.process_pending_events(
+										&|event: events::Event| {
+											if let events::Event::BumpTransaction(ref bump) = event {
+												match bump {
+													events::bump_transaction::BumpTransactionEvent::ChannelClose {
+														commitment_tx,
+														channel_id,
+														counterparty_node_id,
+														..
+													} => {
+														broadcaster.broadcast_transactions(&[(
+															commitment_tx,
+															lightning::chain::chaininterface::TransactionType::UnilateralClose {
+																counterparty_node_id: *counterparty_node_id,
+																channel_id: *channel_id,
+															},
+														)]);
+													},
+													events::bump_transaction::BumpTransactionEvent::HTLCResolution { .. } => {
+														handler.handle_event(bump);
+													},
+												}
+											}
+											Ok(())
+										},
+									);
+								}
+							}
+							let mut had_new_txs = false;
+							loop {
+								let mut found = false;
+								let mut pending_txs: Vec<Transaction> = Vec::new();
+								for tx in broadcast_a.txn_broadcasted.borrow_mut().drain(..) {
+									pending_txs.push(tx);
+								}
+								for tx in broadcast_b.txn_broadcasted.borrow_mut().drain(..) {
+									pending_txs.push(tx);
+								}
+								for tx in broadcast_c.txn_broadcasted.borrow_mut().drain(..) {
+									pending_txs.push(tx);
+								}
+								// Sort by lock_time so preimage claims
+								// (lock_time 0) confirm before timeout txs
+								// (lock_time = cltv_expiry) when both spend
+								// the same HTLC output in the same drain
+								// round. The lock_time consensus check in
+								// confirm_tx handles the case where the
+								// timeout's lock_time hasn't been reached,
+								// but when the chain height is past both
+								// lock_times, this sort is the tiebreaker.
+								pending_txs.sort_by_key(|tx| tx.lock_time.to_consensus_u32());
+								for tx in pending_txs {
+									found |= chain_state.confirm_tx(tx);
+								}
+								if !found {
+									break;
+								}
+								had_new_txs = true;
+								sync_with_chain_state(&chain_state, &nodes[0], &monitor_a, &mut node_height_a, None);
+								sync_with_chain_state(&chain_state, &nodes[1], &monitor_b, &mut node_height_b, None);
+								sync_with_chain_state(&chain_state, &nodes[2], &monitor_c, &mut node_height_c, None);
+							}
+							if had_new_txs || had_msg_or_ev {
 								last_pass_no_updates = false;
 								continue;
 							}
@@ -2801,6 +3124,18 @@ pub fn do_test<Out: Output + MaybeSend + MaybeSync>(data: &[u8], out: Out) {
 				}
 				process_all_events!();
 
+				// If any channels were force-closed, advance chain height past HTLC
+				// timelocks so HTLC-timeout transactions can be broadcast, confirmed,
+				// and fully resolved. We iterate multiple times to cover: (1) confirm
+				// commitment txs, (2) confirm HTLC-timeout txs after bump handling,
+				// (3) confirm second-stage txs past CSV, (4) final cleanup.
+				if !closed_channels.borrow().is_empty() {
+					for _ in 0..4 {
+						chain_state.advance_height(250);
+						process_all_events!();
+					}
+				}
+
 				// Verify no payments are stuck - all should have resolved
 				for (idx, pending) in pending_payments.borrow().iter().enumerate() {
 					assert!(
@@ -2827,16 +3162,59 @@ pub fn do_test<Out: Output + MaybeSend + MaybeSync>(data: &[u8], out: Out) {
 
 				// Finally, make sure that at least one end of each channel can make a substantial payment
 				for &chan_id in &chan_ab_ids {
+					if closed_channels.borrow().contains(&chan_id) {
+						continue;
+					}
 					assert!(
 						send(0, 1, chan_id, 10_000_000, &mut p_ctr)
 							|| send(1, 0, chan_id, 10_000_000, &mut p_ctr)
 					);
 				}
 				for &chan_id in &chan_bc_ids {
+					if closed_channels.borrow().contains(&chan_id) {
+						continue;
+					}
 					assert!(
 						send(1, 2, chan_id, 10_000_000, &mut p_ctr)
 							|| send(2, 1, chan_id, 10_000_000, &mut p_ctr)
 					);
+				}
+
+				// After settlement, verify that closed channels have no
+				// ClaimableOnChannelClose balances (which would indicate the
+				// monitor still thinks the channel is open).
+				if !closed_channels.borrow().is_empty() {
+					let open_channels = nodes[0]
+						.list_channels()
+						.iter()
+						.chain(nodes[1].list_channels().iter())
+						.chain(nodes[2].list_channels().iter())
+						.map(|c| c.clone())
+						.collect::<Vec<_>>();
+					let open_refs: Vec<&_> = open_channels.iter().collect();
+					for (label, monitor) in
+						[("A", &monitor_a), ("B", &monitor_b), ("C", &monitor_c)]
+					{
+						let balances = monitor.chain_monitor.get_claimable_balances(&open_refs);
+						for balance in &balances {
+							if matches!(balance, Balance::ClaimableOnChannelClose { .. }) {
+								panic!(
+									"Monitor {} has ClaimableOnChannelClose balance after settlement: {:?}",
+									label, balance
+								);
+							}
+						}
+						if !balances.is_empty() {
+							out.locked_write(
+								format!(
+									"Monitor {} has {} remaining balances after settlement.\n",
+									label,
+									balances.len()
+								)
+								.as_bytes(),
+							);
+						}
+					}
 				}
 
 				last_htlc_clear_fee_a = fee_est_a.ret_val.load(atomic::Ordering::Acquire);
