@@ -55,6 +55,9 @@ name = "lightning_fuzz"
 path = "src/lib.rs"
 crate-type = ["rlib", "staticlib"]
 
+[patch.crates-io]
+bitcoin_hashes = { git = "https://github.com/joostjager/rust-bitcoin", branch = "fuzz-hash-reduce-collisions" }
+
 [lints.rust.unexpected_cfgs]
 level = "forbid"
 # When adding a new cfg attribute, ensure that it is added to this list.
