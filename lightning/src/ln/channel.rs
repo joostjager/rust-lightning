@@ -131,6 +131,8 @@ pub struct AvailableBalances {
 	///
 	/// See [`ChannelConfig::max_dust_htlc_exposure`] for more information on the dust calculation and to configure a limit.
 	pub dust_exposure_msat: u64,
+	/// The maximum value of the next splice-out
+	pub next_splice_out_maximum_sat: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -6765,7 +6767,7 @@ pub(crate) fn get_legacy_default_holder_selected_channel_reserve_satoshis(
 ///
 /// This is used both for outbound and inbound channels and has lower bound
 /// of `dust_limit_satoshis`.
-fn get_v2_channel_reserve_satoshis(
+pub(crate) fn get_v2_channel_reserve_satoshis(
 	channel_value_satoshis: u64, dust_limit_satoshis: u64, is_0reserve: bool,
 ) -> u64 {
 	if is_0reserve {
@@ -12400,9 +12402,8 @@ where
 					.as_ref()
 					.and_then(|pending_splice| pending_splice.contributions.last())
 				{
-					let holder_balance = self
-						.get_holder_counterparty_balances_floor_incl_fee(&self.funding)
-						.map(|(h, _)| h)
+					let spliceable_balance = self
+						.get_next_splice_out_maximum(&self.funding)
 						.map_err(|e| APIError::ChannelUnavailable {
 							err: format!(
 								"Channel {} cannot be spliced at this time: {}",
@@ -12410,7 +12411,7 @@ where
 								e
 							),
 						})?;
-					Some(PriorContribution::new(prior.clone(), holder_balance))
+					Some(PriorContribution::new(prior.clone(), spliceable_balance))
 				} else {
 					None
 				}
@@ -12506,16 +12507,13 @@ where
 			return contribution;
 		}
 
-		let holder_balance = match self
-			.get_holder_counterparty_balances_floor_incl_fee(&self.funding)
-			.map(|(holder, _)| holder)
-		{
+		let spliceable_balance = match self.get_next_splice_out_maximum(&self.funding) {
 			Ok(balance) => balance,
 			Err(_) => return contribution,
 		};
 
 		if let Err(e) =
-			contribution.net_value_for_initiator_at_feerate(min_rbf_feerate, holder_balance)
+			contribution.net_value_for_initiator_at_feerate(min_rbf_feerate, spliceable_balance)
 		{
 			log_info!(
 				logger,
@@ -12536,7 +12534,7 @@ where
 			min_rbf_feerate,
 		);
 		contribution
-			.for_initiator_at_feerate(min_rbf_feerate, holder_balance)
+			.for_initiator_at_feerate(min_rbf_feerate, spliceable_balance)
 			.expect("feerate compatibility already checked")
 	}
 
@@ -12881,9 +12879,8 @@ where
 	fn resolve_queued_contribution<L: Logger>(
 		&self, feerate: FeeRate, logger: &L,
 	) -> Result<(Option<SignedAmount>, Option<Amount>), ChannelError> {
-		let holder_balance = self
-			.get_holder_counterparty_balances_floor_incl_fee(&self.funding)
-			.map(|(holder, _)| holder)
+		let spliceable_balance = self
+			.get_next_splice_out_maximum(&self.funding)
 			.map_err(|e| {
 				log_info!(
 					logger,
@@ -12895,9 +12892,9 @@ where
 			})
 			.ok();
 
-		let net_value = match holder_balance.and_then(|_| self.queued_funding_contribution()) {
+		let net_value = match spliceable_balance.and_then(|_| self.queued_funding_contribution()) {
 			Some(c) => {
-				match c.net_value_for_acceptor_at_feerate(feerate, holder_balance.unwrap()) {
+				match c.net_value_for_acceptor_at_feerate(feerate, spliceable_balance.unwrap()) {
 					Ok(net_value) => Some(net_value),
 					Err(FeeRateAdjustmentError::FeeRateTooHigh { .. }) => {
 						return Err(ChannelError::Abort(AbortReason::FeeRateTooHigh));
@@ -12917,7 +12914,7 @@ where
 			None => None,
 		};
 
-		Ok((net_value, holder_balance))
+		Ok((net_value, spliceable_balance))
 	}
 
 	pub(crate) fn splice_init<ES: EntropySource, L: Logger>(
@@ -13348,6 +13345,9 @@ where
 	/// of the channel due to the v2 reserve, and the zero-reserve-at-least-one-output
 	/// requirements. Note you cannot simply subtract out the reserve, as splicing funds out
 	/// of the channel changes the reserve the holder must keep in the channel.
+	///
+	/// See [`FundedChannel::get_next_splice_out_maximum`] for the maximum value of the next
+	/// splice out of the holder's balance.
 	fn get_holder_counterparty_balances_floor_incl_fee(
 		&self, funding: &FundingScope,
 	) -> Result<(Amount, Amount), String> {
@@ -13416,6 +13416,55 @@ where
 		);
 
 		Ok((holder_balance_floor, counterparty_balance_floor))
+	}
+
+	/// Determines the maximum value that the holder can splice out of the channel, accounting
+	/// for the updated reserves after said splice. This maximum also makes sure the local
+	/// commitment retains at least one output after the splice, which is particularly relevant
+	/// for zero-reserve channels.
+	fn get_next_splice_out_maximum(&self, funding: &FundingScope) -> Result<Amount, String> {
+		let include_counterparty_unknown_htlcs = true;
+		// We are not interested in dust exposure
+		let dust_exposure_limiting_feerate = None;
+
+		// When reading the available balances, we take the remote's view of the pending
+		// HTLCs, see `tx_builder` for further details
+		let (remote_stats, _remote_htlcs) = self
+			.context
+			.get_next_remote_commitment_stats(
+				funding,
+				None, // htlc_candidate
+				include_counterparty_unknown_htlcs,
+				0,
+				self.context.feerate_per_kw,
+				dust_exposure_limiting_feerate,
+			)
+			.map_err(|()| "Balance exhausted on remote commitment")?;
+
+		let next_splice_out_maximum_sat =
+			remote_stats.available_balances.next_splice_out_maximum_sat;
+
+		#[cfg(debug_assertions)]
+		{
+			// After this max splice out, validation passes, accounting for the updated reserves
+			self.validate_splice_contributions(
+				SignedAmount::from_sat(-(next_splice_out_maximum_sat as i64)),
+				SignedAmount::ZERO,
+				funding.counterparty_funding_pubkey().clone(),
+				funding.get_holder_pubkeys().clone(),
+			)
+			.unwrap();
+			// Splice-out an additional satoshi, and validation fails!
+			self.validate_splice_contributions(
+				SignedAmount::from_sat(-((next_splice_out_maximum_sat + 1) as i64)),
+				SignedAmount::ZERO,
+				funding.counterparty_funding_pubkey().clone(),
+				funding.get_holder_pubkeys().clone(),
+			)
+			.unwrap_err();
+		}
+
+		Ok(Amount::from_sat(next_splice_out_maximum_sat))
 	}
 
 	pub fn splice_locked<NS: NodeSigner, L: Logger>(
@@ -13644,6 +13693,9 @@ where
 					.next_outbound_htlc_minimum_msat
 					.max(e.next_outbound_htlc_minimum_msat),
 				dust_exposure_msat: acc.dust_exposure_msat.max(e.dust_exposure_msat),
+				next_splice_out_maximum_sat: acc
+					.next_splice_out_maximum_sat
+					.min(e.next_splice_out_maximum_sat),
 			})
 		})
 	}

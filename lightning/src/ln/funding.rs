@@ -192,7 +192,7 @@ impl core::fmt::Display for FundingContributionError {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct PriorContribution {
 	contribution: FundingContribution,
-	/// The holder's balance, used for feerate adjustment.
+	/// The holder's spliceable balance, used for feerate adjustment.
 	///
 	/// This value is captured at [`ChannelManager::splice_channel`] time and may become stale
 	/// if balances change before the contribution is used. Staleness is acceptable here because
@@ -203,12 +203,12 @@ pub(super) struct PriorContribution {
 	///
 	/// [`ChannelManager::splice_channel`]: crate::ln::channelmanager::ChannelManager::splice_channel
 	/// [`ChannelManager::funding_contributed`]: crate::ln::channelmanager::ChannelManager::funding_contributed
-	holder_balance: Amount,
+	spliceable_balance: Amount,
 }
 
 impl PriorContribution {
-	pub(super) fn new(contribution: FundingContribution, holder_balance: Amount) -> Self {
-		Self { contribution, holder_balance }
+	pub(super) fn new(contribution: FundingContribution, spliceable_balance: Amount) -> Self {
+		Self { contribution, spliceable_balance }
 	}
 }
 
@@ -632,14 +632,14 @@ impl FundingContribution {
 	/// `target_feerate`. If dropping change leaves surplus value, that surplus remains in the
 	/// channel contribution.
 	///
-	/// For input-less contributions, `holder_balance` must be provided to cover the outputs and
+	/// For input-less contributions, `spliceable_balance` must be provided to cover the outputs and
 	/// fees from the channel balance.
 	///
 	/// Returns `None` if the request would require new wallet inputs or cannot accommodate the
 	/// requested feerate.
 	fn amend_without_coin_selection(
 		self, inputs: FundingInputs, outputs: &[TxOut], target_feerate: FeeRate,
-		max_feerate: FeeRate, holder_balance: Amount,
+		max_feerate: FeeRate, spliceable_balance: Amount,
 	) -> Option<Self> {
 		// NOTE: The contribution returned is not guaranteed to be valid. We defer doing so until
 		// `compute_feerate_adjustment`.
@@ -717,7 +717,7 @@ impl FundingContribution {
 		let new_contribution_at_current_feerate =
 			adjust_for_inputs_and_outputs(self, inputs, outputs)?;
 		let mut new_contribution_at_target_feerate = new_contribution_at_current_feerate
-			.at_feerate(target_feerate, holder_balance, true)
+			.at_feerate(target_feerate, spliceable_balance, true)
 			.ok()?;
 		new_contribution_at_target_feerate.max_feerate = max_feerate;
 
@@ -771,7 +771,7 @@ impl FundingContribution {
 	///
 	/// Returns `Err` if the contribution cannot accommodate the target feerate.
 	fn compute_feerate_adjustment(
-		&self, target_feerate: FeeRate, holder_balance: Amount, is_initiator: bool,
+		&self, target_feerate: FeeRate, spliceable_balance: Amount, is_initiator: bool,
 	) -> Result<(Amount, Option<Amount>), FeeRateAdjustmentError> {
 		if target_feerate < self.feerate {
 			return Err(FeeRateAdjustmentError::FeeRateTooLow {
@@ -864,10 +864,12 @@ impl FundingContribution {
 			let total_cost = target_fee
 				.checked_add(value_removed)
 				.ok_or(FeeRateAdjustmentError::FeeBufferOverflow)?;
-			if total_cost > holder_balance {
+			if total_cost > spliceable_balance {
 				return Err(FeeRateAdjustmentError::FeeBufferInsufficient {
 					source: "channel balance - withdrawal outputs",
-					available: holder_balance.checked_sub(value_removed).unwrap_or(Amount::ZERO),
+					available: spliceable_balance
+						.checked_sub(value_removed)
+						.unwrap_or(Amount::ZERO),
 					required: target_fee,
 				});
 			}
@@ -879,10 +881,10 @@ impl FundingContribution {
 	/// estimate, and feerate. Returns the adjusted contribution, or an error if the feerate
 	/// can't be accommodated.
 	fn at_feerate(
-		mut self, feerate: FeeRate, holder_balance: Amount, is_initiator: bool,
+		mut self, feerate: FeeRate, spliceable_balance: Amount, is_initiator: bool,
 	) -> Result<Self, FeeRateAdjustmentError> {
 		let (new_estimated_fee, new_change) =
-			self.compute_feerate_adjustment(feerate, holder_balance, is_initiator)?;
+			self.compute_feerate_adjustment(feerate, spliceable_balance, is_initiator)?;
 		match new_change {
 			Some(value) => self.change_output.as_mut().unwrap().value = value,
 			None => self.change_output = None,
@@ -899,9 +901,9 @@ impl FundingContribution {
 	/// This adjusts the change output so the acceptor pays their target fee at the target
 	/// feerate.
 	pub(super) fn for_acceptor_at_feerate(
-		self, feerate: FeeRate, holder_balance: Amount,
+		self, feerate: FeeRate, spliceable_balance: Amount,
 	) -> Result<Self, FeeRateAdjustmentError> {
-		self.at_feerate(feerate, holder_balance, false)
+		self.at_feerate(feerate, spliceable_balance, false)
 	}
 
 	/// Adjusts the contribution's change output for the minimum RBF feerate.
@@ -910,9 +912,9 @@ impl FundingContribution {
 	/// below the minimum RBF feerate, this adjusts the change output so the initiator pays fees
 	/// at the minimum RBF feerate.
 	pub(super) fn for_initiator_at_feerate(
-		self, feerate: FeeRate, holder_balance: Amount,
+		self, feerate: FeeRate, spliceable_balance: Amount,
 	) -> Result<Self, FeeRateAdjustmentError> {
-		self.at_feerate(feerate, holder_balance, true)
+		self.at_feerate(feerate, spliceable_balance, true)
 	}
 
 	/// Returns the net value at the given target feerate without mutating `self`.
@@ -921,10 +923,10 @@ impl FundingContribution {
 	/// can't be accommodated) and computes the adjusted net value (returning `Ok` with the value
 	/// accounting for the target feerate).
 	fn net_value_at_feerate(
-		&self, target_feerate: FeeRate, holder_balance: Amount, is_initiator: bool,
+		&self, target_feerate: FeeRate, spliceable_balance: Amount, is_initiator: bool,
 	) -> Result<SignedAmount, FeeRateAdjustmentError> {
 		let (new_estimated_fee, new_change) =
-			self.compute_feerate_adjustment(target_feerate, holder_balance, is_initiator)?;
+			self.compute_feerate_adjustment(target_feerate, spliceable_balance, is_initiator)?;
 
 		let prev_fee = self
 			.estimated_fee
@@ -952,17 +954,17 @@ impl FundingContribution {
 	/// Returns the net value at the given target feerate without mutating `self`,
 	/// assuming acceptor fee responsibility.
 	pub(super) fn net_value_for_acceptor_at_feerate(
-		&self, target_feerate: FeeRate, holder_balance: Amount,
+		&self, target_feerate: FeeRate, spliceable_balance: Amount,
 	) -> Result<SignedAmount, FeeRateAdjustmentError> {
-		self.net_value_at_feerate(target_feerate, holder_balance, false)
+		self.net_value_at_feerate(target_feerate, spliceable_balance, false)
 	}
 
 	/// Returns the net value at the given target feerate without mutating `self`,
 	/// assuming initiator fee responsibility.
 	pub(super) fn net_value_for_initiator_at_feerate(
-		&self, target_feerate: FeeRate, holder_balance: Amount,
+		&self, target_feerate: FeeRate, spliceable_balance: Amount,
 	) -> Result<SignedAmount, FeeRateAdjustmentError> {
-		self.net_value_at_feerate(target_feerate, holder_balance, true)
+		self.net_value_at_feerate(target_feerate, spliceable_balance, true)
 	}
 
 	/// The net value contributed to a channel by the splice.
@@ -1059,13 +1061,13 @@ impl<State> FundingBuilderInner<State> {
 	fn build_from_prior_contribution(
 		&mut self, contribution: PriorContribution,
 	) -> Result<FundingContribution, FundingContributionError> {
-		let PriorContribution { contribution, holder_balance } = contribution;
+		let PriorContribution { contribution, spliceable_balance } = contribution;
 
 		if self.request_matches_prior(&contribution) {
 			// Same request, but the feerate may have changed. Adjust the prior contribution
 			// to the new feerate if possible.
 			return contribution
-				.for_initiator_at_feerate(self.feerate, holder_balance)
+				.for_initiator_at_feerate(self.feerate, spliceable_balance)
 				.map(|mut adjusted| {
 					adjusted.max_feerate = self.max_feerate;
 					adjusted
@@ -1084,7 +1086,7 @@ impl<State> FundingBuilderInner<State> {
 				&self.outputs,
 				self.feerate,
 				self.max_feerate,
-				holder_balance,
+				spliceable_balance,
 			)
 			.ok_or_else(|| FundingContributionError::MissingCoinSelectionSource);
 	}
@@ -2181,8 +2183,8 @@ mod tests {
 		};
 
 		// Balance of 55,000 sats can't cover outputs (50,000) + target_fee at 50k sat/kwu.
-		let holder_balance = Amount::from_sat(55_000);
-		let result = contribution.for_acceptor_at_feerate(target_feerate, holder_balance);
+		let spliceable_balance = Amount::from_sat(55_000);
+		let result = contribution.for_acceptor_at_feerate(target_feerate, spliceable_balance);
 		assert!(matches!(result, Err(FeeRateAdjustmentError::FeeBufferInsufficient { .. })));
 	}
 
@@ -2601,8 +2603,8 @@ mod tests {
 		};
 
 		// Balance of 40,000 sats is less than outputs (50,000) + target_fee.
-		let holder_balance = Amount::from_sat(40_000);
-		let result = contribution.for_acceptor_at_feerate(target_feerate, holder_balance);
+		let spliceable_balance = Amount::from_sat(40_000);
+		let result = contribution.for_acceptor_at_feerate(target_feerate, spliceable_balance);
 		assert!(matches!(result, Err(FeeRateAdjustmentError::FeeBufferInsufficient { .. })));
 	}
 
@@ -2627,9 +2629,9 @@ mod tests {
 		};
 
 		// Balance of 100,000 sats is more than outputs (50,000) + target_fee.
-		let holder_balance = Amount::from_sat(100_000);
+		let spliceable_balance = Amount::from_sat(100_000);
 		let contribution =
-			contribution.for_acceptor_at_feerate(target_feerate, holder_balance).unwrap();
+			contribution.for_acceptor_at_feerate(target_feerate, spliceable_balance).unwrap();
 		let expected_target_fee =
 			estimate_transaction_fee(&[], &outputs, None, false, true, target_feerate);
 		assert_eq!(contribution.estimated_fee, expected_target_fee);
@@ -2657,8 +2659,9 @@ mod tests {
 		};
 
 		// Balance of 40,000 sats is less than outputs (50,000) + target_fee.
-		let holder_balance = Amount::from_sat(40_000);
-		let result = contribution.net_value_for_acceptor_at_feerate(target_feerate, holder_balance);
+		let spliceable_balance = Amount::from_sat(40_000);
+		let result =
+			contribution.net_value_for_acceptor_at_feerate(target_feerate, spliceable_balance);
 		assert!(matches!(result, Err(FeeRateAdjustmentError::FeeBufferInsufficient { .. })));
 	}
 
