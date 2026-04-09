@@ -12605,13 +12605,14 @@ where
 		}
 
 		let our_funding_contribution = contribution.net_value();
-
-		if let Err(e) = self.validate_splice_contributions(
-			our_funding_contribution,
-			SignedAmount::ZERO,
-			self.funding.get_counterparty_pubkeys().funding_pubkey,
-			self.funding.get_holder_pubkeys().clone(),
-		) {
+		let unsigned_contribution = our_funding_contribution.unsigned_abs();
+		if let Err(e) = self.get_next_splice_out_maximum(&self.funding)
+			.and_then(|splice_max| splice_max
+				.to_sat()
+				.checked_add_signed(our_funding_contribution.to_sat())
+				.ok_or(format!("Our splice-out value of {unsigned_contribution} is greater than the maximum {splice_max}"))
+			)
+		{
 			log_error!(logger, "Channel {} cannot be funded: {}", self.context.channel_id(), e);
 			return Err(QuiescentError::FailSplice(self.splice_funding_failed_for(contribution)));
 		}
@@ -14232,12 +14233,14 @@ where
 					// balance. If invalid, disconnect and return the contribution so
 					// the user can reclaim their inputs.
 					let our_funding_contribution = contribution.net_value();
-					if let Err(e) = self.validate_splice_contributions(
-						our_funding_contribution,
-						SignedAmount::ZERO,
-						self.funding.get_counterparty_pubkeys().funding_pubkey,
-						self.funding.get_holder_pubkeys().clone(),
-					) {
+					let unsigned_contribution = our_funding_contribution.unsigned_abs();
+					if let Err(e) = self.get_next_splice_out_maximum(&self.funding)
+						.and_then(|splice_max| splice_max
+							.to_sat()
+							.checked_add_signed(our_funding_contribution.to_sat())
+							.ok_or(format!("Our splice-out value of {unsigned_contribution} is greater than the maximum {splice_max}"))
+						)
+					{
 						let failed = self.splice_funding_failed_for(contribution);
 						return Err((
 							ChannelError::WarnAndDisconnect(format!(
