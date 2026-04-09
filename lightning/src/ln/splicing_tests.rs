@@ -16,8 +16,8 @@ use crate::chain::ChannelMonitorUpdateStatus;
 use crate::events::{ClosureReason, Event, FundingInfo, HTLCHandlingFailureType};
 use crate::ln::chan_utils;
 use crate::ln::channel::{
-	CHANNEL_ANNOUNCEMENT_PROPAGATION_DELAY, DISCONNECT_PEER_AWAITING_RESPONSE_TICKS,
-	FEE_SPIKE_BUFFER_FEE_INCREASE_MULTIPLE,
+	ANCHOR_OUTPUT_VALUE_SATOSHI, CHANNEL_ANNOUNCEMENT_PROPAGATION_DELAY,
+	DISCONNECT_PEER_AWAITING_RESPONSE_TICKS, FEE_SPIKE_BUFFER_FEE_INCREASE_MULTIPLE,
 };
 use crate::ln::channelmanager::{provided_init_features, PaymentId, BREAKDOWN_TIMEOUT};
 use crate::ln::functional_test_utils::*;
@@ -7476,4 +7476,354 @@ fn test_no_disconnect_after_quiescence_on_reconnect() {
 	};
 	assert!(!has_disconnect(&nodes[0].node.get_and_clear_pending_msg_events()));
 	assert!(!has_disconnect(&nodes[1].node.get_and_clear_pending_msg_events()));
+}
+
+#[test]
+fn test_0reserve_splice() {
+	let mut config = test_default_channel_config();
+	config.channel_handshake_config.negotiate_anchors_zero_fee_htlc_tx = false;
+	config.channel_handshake_config.negotiate_anchor_zero_fee_commitments = false;
+	let a = do_test_0reserve_splice_holder_validation(false, false, false, config.clone());
+	let _b = do_test_0reserve_splice_holder_validation(true, false, false, config.clone());
+	let _c = do_test_0reserve_splice_holder_validation(false, true, false, config.clone());
+	let _d = do_test_0reserve_splice_holder_validation(true, true, false, config.clone());
+
+	let _e = do_test_0reserve_splice_holder_validation(false, false, true, config.clone());
+	let _f = do_test_0reserve_splice_holder_validation(true, false, true, config.clone());
+	let _g = do_test_0reserve_splice_holder_validation(false, true, true, config.clone());
+	let _h = do_test_0reserve_splice_holder_validation(true, true, true, config.clone());
+
+	assert_eq!(a, ChannelTypeFeatures::only_static_remote_key());
+
+	config.channel_handshake_config.negotiate_anchors_zero_fee_htlc_tx = true;
+	config.channel_handshake_config.negotiate_anchor_zero_fee_commitments = false;
+	let a = do_test_0reserve_splice_holder_validation(false, false, false, config.clone());
+	let _b = do_test_0reserve_splice_holder_validation(true, false, false, config.clone());
+	let _c = do_test_0reserve_splice_holder_validation(false, true, false, config.clone());
+	let _d = do_test_0reserve_splice_holder_validation(true, true, false, config.clone());
+
+	let _e = do_test_0reserve_splice_holder_validation(false, false, true, config.clone());
+	let _f = do_test_0reserve_splice_holder_validation(true, false, true, config.clone());
+	let _g = do_test_0reserve_splice_holder_validation(false, true, true, config.clone());
+	let _h = do_test_0reserve_splice_holder_validation(true, true, true, config.clone());
+
+	assert_eq!(a, ChannelTypeFeatures::anchors_zero_htlc_fee_and_dependencies());
+
+	let mut config = test_default_channel_config();
+	config.channel_handshake_config.negotiate_anchors_zero_fee_htlc_tx = false;
+	config.channel_handshake_config.negotiate_anchor_zero_fee_commitments = false;
+	let a = do_test_0reserve_splice_counterparty_validation(false, false, false, config.clone());
+	let _b = do_test_0reserve_splice_counterparty_validation(true, false, false, config.clone());
+	let _c = do_test_0reserve_splice_counterparty_validation(false, true, false, config.clone());
+	let _d = do_test_0reserve_splice_counterparty_validation(true, true, false, config.clone());
+
+	let _e = do_test_0reserve_splice_counterparty_validation(false, false, true, config.clone());
+	let _f = do_test_0reserve_splice_counterparty_validation(true, false, true, config.clone());
+	let _g = do_test_0reserve_splice_counterparty_validation(false, true, true, config.clone());
+	let _h = do_test_0reserve_splice_counterparty_validation(true, true, true, config.clone());
+	assert_eq!(a, ChannelTypeFeatures::only_static_remote_key());
+
+	config.channel_handshake_config.negotiate_anchors_zero_fee_htlc_tx = true;
+	config.channel_handshake_config.negotiate_anchor_zero_fee_commitments = false;
+	let a = do_test_0reserve_splice_counterparty_validation(false, false, false, config.clone());
+	let _b = do_test_0reserve_splice_counterparty_validation(true, false, false, config.clone());
+	let _c = do_test_0reserve_splice_counterparty_validation(false, true, false, config.clone());
+	let _d = do_test_0reserve_splice_counterparty_validation(true, true, false, config.clone());
+
+	let _e = do_test_0reserve_splice_counterparty_validation(false, false, true, config.clone());
+	let _f = do_test_0reserve_splice_counterparty_validation(true, false, true, config.clone());
+	let _g = do_test_0reserve_splice_counterparty_validation(false, true, true, config.clone());
+	let _h = do_test_0reserve_splice_counterparty_validation(true, true, true, config.clone());
+	assert_eq!(a, ChannelTypeFeatures::anchors_zero_htlc_fee_and_dependencies());
+
+	// TODO: Skip 0FC channels for now as these always have an output on the commitment, the P2A
+	// output. We will be able to withdraw up to the dust limit of the funding script, which
+	// is checked in interactivetx. Still need to double check whether that's what we actually
+	// want.
+}
+
+#[cfg(test)]
+fn do_test_0reserve_splice_holder_validation(
+	splice_passes: bool, counterparty_has_output: bool, node_0_is_initiator: bool,
+	mut config: UserConfig,
+) -> ChannelTypeFeatures {
+	use crate::ln::htlc_reserve_unit_tests::setup_0reserve_no_outputs_channels;
+
+	let chanmon_cfgs = create_chanmon_cfgs(2);
+	let node_cfgs = create_node_cfgs(2, &chanmon_cfgs);
+	config.channel_handshake_config.announced_channel_max_inbound_htlc_value_in_flight_percentage =
+		100;
+	let node_chanmgrs =
+		create_node_chanmgrs(2, &node_cfgs, &[Some(config.clone()), Some(config.clone())]);
+	let nodes = create_network(2, &node_cfgs, &node_chanmgrs);
+
+	let _node_id_0 = nodes[0].node.get_our_node_id();
+	let _node_id_1 = nodes[1].node.get_our_node_id();
+
+	let channel_value_sat = 100_000;
+	// Some dust limit, does not matter
+	let dust_limit_satoshis = 546;
+
+	let (channel_id, _tx) =
+		setup_0reserve_no_outputs_channels(&nodes, channel_value_sat, dust_limit_satoshis);
+	let details = &nodes[0].node.list_channels()[0];
+	let channel_type = details.channel_type.clone().unwrap();
+
+	let feerate = 253;
+	let spiked_feerate = if channel_type == ChannelTypeFeatures::only_static_remote_key() {
+		feerate * FEE_SPIKE_BUFFER_FEE_INCREASE_MULTIPLE as u32
+	} else if channel_type == ChannelTypeFeatures::anchors_zero_htlc_fee_and_dependencies() {
+		feerate
+	} else {
+		panic!("Unexpected channel type");
+	};
+	let anchors_sat =
+		if channel_type == ChannelTypeFeatures::anchors_zero_htlc_fee_and_dependencies() {
+			ANCHOR_OUTPUT_VALUE_SATOSHI * 2
+		} else {
+			0
+		};
+
+	let initiator_value_to_self_sat = if counterparty_has_output {
+		send_payment(&nodes[0], &[&nodes[1]], channel_value_sat / 2 * 1_000);
+		channel_value_sat / 2
+	} else if !node_0_is_initiator {
+		let tx_fee_msat = chan_utils::commit_tx_fee_sat(spiked_feerate, 2, &channel_type) * 1000;
+		let node_0_details = &nodes[0].node.list_channels()[0];
+		let outbound_capacity_msat = node_0_details.outbound_capacity_msat;
+		let available_capacity_msat = node_0_details.next_outbound_htlc_limit_msat;
+		assert_eq!(outbound_capacity_msat, (channel_value_sat - anchors_sat) * 1000);
+		assert_eq!(available_capacity_msat, outbound_capacity_msat - tx_fee_msat);
+		send_payment(&nodes[0], &[&nodes[1]], available_capacity_msat);
+
+		// Make sure node 0 has no output on the commitment at this point
+		let node_0_to_local_output_msat = channel_value_sat * 1000
+			- available_capacity_msat
+			- anchors_sat * 1000
+			- chan_utils::commit_tx_fee_sat(feerate, 0, &channel_type) * 1000;
+		assert!(node_0_to_local_output_msat / 1000 < dust_limit_satoshis);
+		let commit_tx = &get_local_commitment_txn!(nodes[0], channel_id)[0];
+		assert_eq!(commit_tx.output.len(), if anchors_sat == 0 { 1 } else { 2 });
+		assert_eq!(
+			commit_tx.output.last().unwrap().value,
+			Amount::from_sat(available_capacity_msat / 1000)
+		);
+		if anchors_sat != 0 {
+			assert_eq!(commit_tx.output[0].value, Amount::from_sat(330));
+		}
+
+		available_capacity_msat / 1000
+	} else {
+		channel_value_sat
+	};
+
+	// The estimated fees to splice out a single output at 253sat/kw
+	let estimated_fees = 183;
+	let splice_out_max_value = if counterparty_has_output && node_0_is_initiator {
+		let commit_tx_fee_sat = chan_utils::commit_tx_fee_sat(spiked_feerate, 1, &channel_type);
+		Amount::from_sat(
+			initiator_value_to_self_sat - commit_tx_fee_sat - anchors_sat - estimated_fees,
+		)
+	} else if !counterparty_has_output && node_0_is_initiator {
+		let commit_tx_fee_sat = chan_utils::commit_tx_fee_sat(spiked_feerate, 0, &channel_type);
+		Amount::from_sat(
+			initiator_value_to_self_sat
+				- commit_tx_fee_sat
+				- anchors_sat - estimated_fees
+				- dust_limit_satoshis,
+		)
+	} else if counterparty_has_output && !node_0_is_initiator {
+		Amount::from_sat(initiator_value_to_self_sat - estimated_fees)
+	} else if !counterparty_has_output && !node_0_is_initiator {
+		Amount::from_sat(initiator_value_to_self_sat - estimated_fees - dust_limit_satoshis)
+	} else {
+		panic!("unexpected case!");
+	};
+	let outputs = vec![TxOut {
+		value: splice_out_max_value + if splice_passes { Amount::ZERO } else { Amount::ONE_SAT },
+		script_pubkey: nodes[0].wallet_source.get_change_script().unwrap(),
+	}];
+
+	let (initiator, acceptor) =
+		if node_0_is_initiator { (&nodes[0], &nodes[1]) } else { (&nodes[1], &nodes[0]) };
+
+	let initiator_details = &initiator.node.list_channels()[0];
+	assert_eq!(
+		initiator_details.next_splice_out_maximum_sat,
+		splice_out_max_value.to_sat() + estimated_fees
+	);
+
+	if splice_passes {
+		let contribution = initiate_splice_out(initiator, acceptor, channel_id, outputs).unwrap();
+
+		let (splice_tx, _) = splice_channel(initiator, acceptor, channel_id, contribution);
+		mine_transaction(initiator, &splice_tx);
+		mine_transaction(acceptor, &splice_tx);
+		lock_splice_after_blocks(initiator, acceptor, ANTI_REORG_DELAY - 1);
+	} else {
+		assert!(initiate_splice_out(initiator, acceptor, channel_id, outputs).is_err());
+		let splice_out_value =
+			splice_out_max_value + Amount::from_sat(estimated_fees) + Amount::ONE_SAT;
+		let splice_out_max_value = splice_out_max_value + Amount::from_sat(estimated_fees);
+		let cannot_be_funded = format!(
+			"Channel {channel_id} cannot be funded: Our \
+			splice-out value of {splice_out_value} is greater than the maximum \
+			{splice_out_max_value}"
+		);
+		initiator.logger.assert_log("lightning::ln::channel", cannot_be_funded, 1);
+	}
+
+	channel_type
+}
+
+#[cfg(test)]
+fn do_test_0reserve_splice_counterparty_validation(
+	splice_passes: bool, counterparty_has_output: bool, node_0_is_initiator: bool,
+	mut config: UserConfig,
+) -> ChannelTypeFeatures {
+	use crate::ln::htlc_reserve_unit_tests::setup_0reserve_no_outputs_channels;
+
+	let chanmon_cfgs = create_chanmon_cfgs(2);
+	let node_cfgs = create_node_cfgs(2, &chanmon_cfgs);
+	config.channel_handshake_config.announced_channel_max_inbound_htlc_value_in_flight_percentage =
+		100;
+	let node_chanmgrs =
+		create_node_chanmgrs(2, &node_cfgs, &[Some(config.clone()), Some(config.clone())]);
+	let nodes = create_network(2, &node_cfgs, &node_chanmgrs);
+
+	let _node_id_0 = nodes[0].node.get_our_node_id();
+	let _node_id_1 = nodes[1].node.get_our_node_id();
+
+	let channel_value_sat = 100_000;
+	// Some dust limit, does not matter
+	let dust_limit_satoshis = 546;
+
+	let (channel_id, _tx) =
+		setup_0reserve_no_outputs_channels(&nodes, channel_value_sat, dust_limit_satoshis);
+	let details = &nodes[0].node.list_channels()[0];
+	let channel_type = details.channel_type.clone().unwrap();
+
+	let feerate = 253;
+	let spiked_feerate = if channel_type == ChannelTypeFeatures::only_static_remote_key() {
+		feerate * FEE_SPIKE_BUFFER_FEE_INCREASE_MULTIPLE as u32
+	} else if channel_type == ChannelTypeFeatures::anchors_zero_htlc_fee_and_dependencies() {
+		feerate
+	} else {
+		panic!("Unexpected channel type");
+	};
+	let anchors_sat =
+		if channel_type == ChannelTypeFeatures::anchors_zero_htlc_fee_and_dependencies() {
+			ANCHOR_OUTPUT_VALUE_SATOSHI * 2
+		} else {
+			0
+		};
+
+	let initiator_value_to_self_sat = if counterparty_has_output {
+		send_payment(&nodes[0], &[&nodes[1]], channel_value_sat / 2 * 1_000);
+		channel_value_sat / 2
+	} else if !node_0_is_initiator {
+		let tx_fee_msat = chan_utils::commit_tx_fee_sat(spiked_feerate, 2, &channel_type) * 1000;
+		let node_0_details = &nodes[0].node.list_channels()[0];
+		let outbound_capacity_msat = node_0_details.outbound_capacity_msat;
+		let available_capacity_msat = node_0_details.next_outbound_htlc_limit_msat;
+		assert_eq!(outbound_capacity_msat, (channel_value_sat - anchors_sat) * 1000);
+		assert_eq!(available_capacity_msat, outbound_capacity_msat - tx_fee_msat);
+		send_payment(&nodes[0], &[&nodes[1]], available_capacity_msat);
+
+		// Make sure node 0 has no output on the commitment at this point
+		let node_0_to_local_output_msat = channel_value_sat * 1000
+			- available_capacity_msat
+			- anchors_sat * 1000
+			- chan_utils::commit_tx_fee_sat(spiked_feerate, 0, &channel_type) * 1000;
+		assert!(node_0_to_local_output_msat / 1000 < dust_limit_satoshis);
+		let commit_tx = &get_local_commitment_txn!(nodes[0], channel_id)[0];
+		assert_eq!(commit_tx.output.len(), if anchors_sat == 0 { 1 } else { 2 });
+		assert_eq!(
+			commit_tx.output.last().unwrap().value,
+			Amount::from_sat(available_capacity_msat / 1000)
+		);
+		if anchors_sat != 0 {
+			assert_eq!(commit_tx.output[0].value, Amount::from_sat(330));
+		}
+
+		available_capacity_msat / 1000
+	} else {
+		channel_value_sat
+	};
+
+	let splice_out_value_incl_fees = if counterparty_has_output && node_0_is_initiator {
+		let commit_tx_fee_sat = chan_utils::commit_tx_fee_sat(spiked_feerate, 1, &channel_type);
+		Amount::from_sat(initiator_value_to_self_sat - commit_tx_fee_sat - anchors_sat)
+	} else if !counterparty_has_output && node_0_is_initiator {
+		let commit_tx_fee_sat = chan_utils::commit_tx_fee_sat(spiked_feerate, 0, &channel_type);
+		Amount::from_sat(
+			initiator_value_to_self_sat - commit_tx_fee_sat - anchors_sat - dust_limit_satoshis,
+		)
+	} else if counterparty_has_output && !node_0_is_initiator {
+		Amount::from_sat(initiator_value_to_self_sat)
+	} else if !counterparty_has_output && !node_0_is_initiator {
+		Amount::from_sat(initiator_value_to_self_sat - dust_limit_satoshis)
+	} else {
+		panic!("unexpected case!");
+	};
+
+	let (initiator, acceptor) =
+		if node_0_is_initiator { (&nodes[0], &nodes[1]) } else { (&nodes[1], &nodes[0]) };
+
+	let initiator_details = &initiator.node.list_channels()[0];
+	assert_eq!(initiator_details.next_splice_out_maximum_sat, splice_out_value_incl_fees.to_sat());
+
+	let funding_contribution_sat =
+		-(splice_out_value_incl_fees.to_sat() as i64) - if splice_passes { 0 } else { 1 };
+	let outputs = vec![TxOut {
+		// Splice out some dummy amount to get past the initiator's validation,
+		// we'll modify the message in-flight.
+		value: Amount::from_sat(1_000),
+		script_pubkey: nodes[0].wallet_source.get_change_script().unwrap(),
+	}];
+	let _contribution = initiate_splice_out(initiator, acceptor, channel_id, outputs).unwrap();
+
+	let node_id_initiator = initiator.node.get_our_node_id();
+	let node_id_acceptor = acceptor.node.get_our_node_id();
+
+	let stfu_init = get_event_msg!(initiator, MessageSendEvent::SendStfu, node_id_acceptor);
+	acceptor.node.handle_stfu(node_id_initiator, &stfu_init);
+	let stfu_ack = get_event_msg!(acceptor, MessageSendEvent::SendStfu, node_id_initiator);
+	initiator.node.handle_stfu(node_id_acceptor, &stfu_ack);
+
+	let mut splice_init =
+		get_event_msg!(initiator, MessageSendEvent::SendSpliceInit, node_id_acceptor);
+	// Make the modification here
+	splice_init.funding_contribution_satoshis = funding_contribution_sat;
+
+	if splice_passes {
+		acceptor.node.handle_splice_init(node_id_initiator, &splice_init);
+		let _splice_ack =
+			get_event_msg!(acceptor, MessageSendEvent::SendSpliceAck, node_id_initiator);
+	} else {
+		acceptor.node.handle_splice_init(node_id_initiator, &splice_init);
+		let msg_events = acceptor.node.get_and_clear_pending_msg_events();
+		assert_eq!(msg_events.len(), 1);
+		if let MessageSendEvent::HandleError { action, .. } = &msg_events[0] {
+			assert!(matches!(action, msgs::ErrorAction::DisconnectPeerWithWarning { .. }));
+		} else {
+			panic!("Expected MessageSendEvent::HandleError");
+		}
+		let cannot_splice_out = if u64::try_from(funding_contribution_sat.abs()).unwrap()
+			> initiator_value_to_self_sat
+		{
+			format!(
+				"Got non-closing error: Their contribution candidate {funding_contribution_sat}sat \
+				is greater than their total balance in the channel {initiator_value_to_self_sat}sat"
+			)
+		} else {
+			format!(
+				"Got non-closing error: Channel {channel_id} cannot \
+				be spliced; Balance exhausted on local commitment"
+			)
+		};
+		acceptor.logger.assert_log("lightning::ln::channelmanager", cannot_splice_out, 1);
+	}
+
+	channel_type
 }
