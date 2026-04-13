@@ -56,6 +56,9 @@ pub enum LSPS5ServiceEvent {
 		///
 		/// This is the [`webhook URL`] provided by the client during registration.
 		///
+		/// Obviously as the URL provided here is untrusted you should check whether it would
+		/// access any internal or private resources and decline to send the request if it is.
+		///
 		/// [`webhook URL`]: super::msgs::LSPS5WebhookUrl
 		url: LSPS5WebhookUrl,
 		/// Notification method with its parameters.
