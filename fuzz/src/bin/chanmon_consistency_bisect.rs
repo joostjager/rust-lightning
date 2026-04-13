@@ -5,6 +5,7 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
+use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::Deserialize;
@@ -17,9 +18,7 @@ const DEFAULT_CACHE_DIR: &str = ".chanmon-bisect-cache";
 const DEFAULT_RUSTFLAGS: &str = "--cfg=fuzzing --cfg=secp256k1_fuzz --cfg=hashes_fuzz";
 const DEFAULT_TOOLCHAIN: &str = "1.75.0";
 const DEFAULT_BRANCH: &str = "HEAD";
-const TIP_REPLAY_RUNS: usize = 10;
-const STABLE_REPLAY_RUNS: usize = 1;
-const FLAKY_REPLAY_RUNS: usize = 100;
+const REPLAY_RUNS: usize = 10;
 
 fn main() {
 	if let Err(err) = real_main() {
@@ -290,12 +289,12 @@ fn commit_info_path(commit: &str) -> Result<PathBuf, String> {
 	Ok(commit_cache_dir(commit)?.join("build-info.txt"))
 }
 
-fn commit_results_dir(commit: &str, runs: usize) -> Result<PathBuf, String> {
-	Ok(commit_cache_dir(commit)?.join("results").join(runs.to_string()))
+fn commit_results_dir(commit: &str) -> Result<PathBuf, String> {
+	Ok(commit_cache_dir(commit)?.join("results"))
 }
 
-fn replay_result_path(commit: &str, runs: usize, case_hex: &str) -> Result<PathBuf, String> {
-	Ok(commit_results_dir(commit, runs)?.join(case_hex))
+fn replay_result_path(commit: &str, case_hex: &str) -> Result<PathBuf, String> {
+	Ok(commit_results_dir(commit)?.join(case_hex))
 }
 
 fn write_build_info(commit: &str) -> Result<(), String> {
@@ -475,7 +474,7 @@ fn replay_commit(
 	rev: &OsStr, input_file: &Path, inherit_stdio: bool,
 ) -> Result<ReplayOutcome, String> {
 	let commit = cache_commit(rev, None)?;
-	replay_cached_commit(&commit, input_file, inherit_stdio, STABLE_REPLAY_RUNS)
+	replay_cached_commit(&commit, input_file, inherit_stdio, REPLAY_RUNS)
 }
 
 fn replay_cached_commit(
@@ -489,7 +488,7 @@ fn replay_cached_commit(
 	let input_hex = case_hex(&input_abs)?;
 
 	if !inherit_stdio {
-		if let Some(outcome) = read_replay_result(commit, runs, &input_hex)? {
+		if let Some(outcome) = read_replay_result(commit, &input_hex)? {
 			return Ok(outcome);
 		}
 	}
@@ -500,10 +499,19 @@ fn replay_cached_commit(
 		return Ok(ReplayOutcome { verdict, exit_code: exit_code(status), cached: false });
 	}
 
+	let mut handles = Vec::with_capacity(runs);
+	for _ in 0..runs {
+		let binary_path = binary_path.clone();
+		let input_abs = input_abs.clone();
+		handles.push(thread::spawn(move || run_replay_once(&binary_path, &input_abs, false)));
+	}
+
 	let mut saw_pass = false;
 	let mut saw_fail = false;
-	for _ in 0..runs {
-		let status = run_replay_once(&binary_path, &input_abs, false)?;
+	for handle in handles {
+		let status = handle
+			.join()
+			.map_err(|_| format!("replay thread panicked for {commit}"))??;
 		if status.success() {
 			saw_pass = true;
 		} else {
@@ -521,7 +529,7 @@ fn replay_cached_commit(
 			))
 		},
 	};
-	write_replay_result(commit, runs, &input_hex, verdict)?;
+	write_replay_result(commit, &input_hex, verdict)?;
 	Ok(ReplayOutcome { verdict, exit_code: verdict.exit_code(), cached: false })
 }
 
@@ -558,10 +566,8 @@ fn run_replay_once(
 	Ok(status)
 }
 
-fn read_replay_result(
-	commit: &str, runs: usize, case_hex: &str,
-) -> Result<Option<ReplayOutcome>, String> {
-	let path = replay_result_path(commit, runs, case_hex)?;
+fn read_replay_result(commit: &str, case_hex: &str) -> Result<Option<ReplayOutcome>, String> {
+	let path = replay_result_path(commit, case_hex)?;
 	if !path.is_file() {
 		return Ok(None);
 	}
@@ -582,13 +588,11 @@ fn read_replay_result(
 	Ok(Some(ReplayOutcome { verdict, exit_code: verdict.exit_code(), cached: true }))
 }
 
-fn write_replay_result(
-	commit: &str, runs: usize, case_hex: &str, verdict: ReplayVerdict,
-) -> Result<(), String> {
-	let dir = commit_results_dir(commit, runs)?;
+fn write_replay_result(commit: &str, case_hex: &str, verdict: ReplayVerdict) -> Result<(), String> {
+	let dir = commit_results_dir(commit)?;
 	fs::create_dir_all(&dir)
 		.map_err(|err| format!("failed to create replay result dir {}: {err}", dir.display()))?;
-	let path = replay_result_path(commit, runs, case_hex)?;
+	let path = replay_result_path(commit, case_hex)?;
 	let contents = format!("{}\n", verdict.as_str());
 	fs::write(&path, contents)
 		.map_err(|err| format!("failed to write replay result {}: {err}", path.display()))
@@ -689,11 +693,11 @@ fn first_breaking_commit_for_case(
 	};
 
 	let latest_idx = cached.len() - 1;
-	let latest = replay_at(latest_idx, TIP_REPLAY_RUNS)?;
+	let latest = replay_at(latest_idx, REPLAY_RUNS)?;
 	println!(
 		"  latest {} ({} runs): {}{}",
 		short_commit(&cached[latest_idx].commit)?,
-		TIP_REPLAY_RUNS,
+		REPLAY_RUNS,
 		describe_case_outcome(latest.verdict),
 		cache_suffix(latest)
 	);
@@ -706,9 +710,7 @@ fn first_breaking_commit_for_case(
 		});
 	}
 
-	let bisect_runs =
-		if latest.verdict == ReplayVerdict::Flake { FLAKY_REPLAY_RUNS } else { STABLE_REPLAY_RUNS };
-	println!("  using {bisect_runs} run(s) for older commits");
+	let bisect_runs = REPLAY_RUNS;
 
 	let oldest = replay_at(0, bisect_runs)?;
 	println!(
