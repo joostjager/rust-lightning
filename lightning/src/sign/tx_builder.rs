@@ -336,12 +336,13 @@ fn get_available_balances(
 		if channel_type.supports_anchor_zero_fee_commitments() { 0 } else { 1 };
 
 	// Note that the feerate is 0 in zero-fee commitment channels, so this statement is a noop
-	let spiked_feerate = feerate_per_kw
-		* if is_outbound_from_holder && !channel_type.supports_anchors_zero_fee_htlc_tx() {
+	let spiked_feerate = feerate_per_kw.saturating_mul(
+		if is_outbound_from_holder && !channel_type.supports_anchors_zero_fee_htlc_tx() {
 			crate::ln::channel::FEE_SPIKE_BUFFER_FEE_INCREASE_MULTIPLE as u32
 		} else {
 			1
-		};
+		},
+	);
 
 	let local_nondust_htlc_count = pending_htlcs
 		.iter()
