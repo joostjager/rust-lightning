@@ -658,6 +658,7 @@ fn bisect_cached(branch: &OsStr, since: &OsStr) -> Result<(), String> {
 			format!("{} {}", short_commit(&entry.commit)?, commit_summary(&entry.commit)?)
 		};
 		println!("\n{heading}");
+		println!("{}", "-".repeat(heading.len()));
 		for summary in matching_cases {
 			let status_suffix = summary
 				.result
