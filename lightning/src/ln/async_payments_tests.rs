@@ -1886,8 +1886,9 @@ fn expired_static_invoice_payment_path() {
 		}
 	};
 
-	// Mine a bunch of blocks so the hardcoded path's `max_cltv_expiry` is expired at the recipient's
-	// end by the time the payment arrives.
+	// Mine a bunch of blocks on the sender so the hardcoded path's `max_cltv_expiry` is expired.
+	// Note that the path expires "all at once" and will be invalid at the intro point so will be
+	// rejected before it reaches the destination.
 	let min_cltv_expiry_delta = test_default_channel_config().channel_config.cltv_expiry_delta;
 	connect_blocks(
 		&nodes[0],
@@ -1902,7 +1903,6 @@ fn expired_static_invoice_payment_path() {
 		&nodes[1],
 		final_max_cltv_expiry
 			- nodes[1].best_block_info().1
-			// Don't expire the path for nodes[1]
 			- min_cltv_expiry_delta as u32
 			- HTLC_FAIL_BACK_BUFFER
 			- LATENCY_GRACE_PERIOD_BLOCKS
@@ -1939,18 +1939,17 @@ fn expired_static_invoice_payment_path() {
 	let payment_hash = extract_payment_hash(&ev);
 	check_added_monitors(&nodes[0], 1);
 
-	let route: &[&[&Node]] = &[&[&nodes[1], &nodes[2]]];
-	let args = PassAlongPathArgs::new(&nodes[0], route[0], amt_msat, payment_hash, ev)
-		.without_claimable_event()
-		.expect_failure(HTLCHandlingFailureType::Receive { payment_hash })
-		.with_dummy_tlvs(&[DummyTlvs::default(); DEFAULT_PAYMENT_DUMMY_HOPS]);
-	do_pass_along_path(args);
-	fail_blinded_htlc_backwards(payment_hash, 1, &[&nodes[0], &nodes[1], &nodes[2]], false);
-	nodes[2].logger.assert_log_contains(
-		"lightning::ln::channelmanager",
-		"violated blinded payment constraints",
-		1,
+	let payment_event = SendEvent::from_event(ev);
+	nodes[1].node.handle_update_add_htlc(nodes[0].node.get_our_node_id(), &payment_event.msgs[0]);
+	check_added_monitors(&nodes[1], 0);
+	do_commitment_signed_dance(&nodes[1], &nodes[0], &payment_event.commitment_msg, false, true);
+	expect_and_process_pending_htlcs(&nodes[1], false);
+	expect_htlc_handling_failed_destinations!(
+		nodes[1].node.get_and_clear_pending_events(),
+		&[HTLCHandlingFailureType::InvalidOnion]
 	);
+	check_added_monitors(&nodes[1], 1);
+	fail_blinded_htlc_backwards(payment_hash, 1, &[&nodes[0], &nodes[1]], false);
 }
 
 #[cfg_attr(feature = "std", ignore)]
