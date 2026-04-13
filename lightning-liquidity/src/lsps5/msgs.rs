@@ -457,7 +457,11 @@ impl Writeable for LSPS5WebhookUrl {
 
 impl Readable for LSPS5WebhookUrl {
 	fn read<R: lightning::io::Read>(reader: &mut R) -> Result<Self, DecodeError> {
-		Ok(Self(Readable::read(reader)?))
+		let url: LSPSUrl = Readable::read(reader)?;
+		if url.url().len() > MAX_WEBHOOK_URL_LENGTH {
+			return Err(DecodeError::InvalidValue);
+		}
+		Ok(Self(url))
 	}
 }
 
@@ -900,6 +904,58 @@ mod tests {
 				},
 			}
 		}
+	}
+
+	#[test]
+	fn test_lsps_url_readable_rejects_http() {
+		use lightning::util::ser::Writeable;
+
+		let raw =
+			lightning_types::string::UntrustedString("http://example.com/webhook".to_string());
+		let encoded = raw.encode();
+		let result = LSPSUrl::read(&mut lightning::io::Cursor::new(&encoded));
+		assert!(result.is_err(), "LSPSUrl::Readable should reject http:// URLs");
+	}
+
+	#[test]
+	fn test_lsps_url_readable_accepts_https() {
+		use lightning::util::ser::Writeable;
+
+		let https_url = LSPSUrl::parse("https://example.com/webhook".to_string()).unwrap();
+		let encoded = https_url.encode();
+		let decoded = LSPSUrl::read(&mut lightning::io::Cursor::new(&encoded)).unwrap();
+		assert_eq!(decoded.url(), "https://example.com/webhook");
+	}
+
+	#[test]
+	fn test_webhook_url_readable_rejects_http() {
+		use lightning::util::ser::Writeable;
+
+		let raw =
+			lightning_types::string::UntrustedString("http://example.com/webhook".to_string());
+		let encoded = raw.encode();
+		let result = LSPS5WebhookUrl::read(&mut lightning::io::Cursor::new(&encoded));
+		assert!(result.is_err(), "Readable should reject http:// webhook URLs");
+	}
+
+	#[test]
+	fn test_webhook_url_readable_rejects_too_long() {
+		use lightning::util::ser::Writeable;
+
+		let long_url = LSPSUrl::parse(format!("https://example.com/{}", "a".repeat(2000))).unwrap();
+		let encoded = long_url.encode();
+		let result = LSPS5WebhookUrl::read(&mut lightning::io::Cursor::new(&encoded));
+		assert!(result.is_err(), "Readable should reject URLs exceeding MAX_WEBHOOK_URL_LENGTH");
+	}
+
+	#[test]
+	fn test_webhook_url_readable_accepts_valid_https() {
+		use lightning::util::ser::Writeable;
+
+		let valid_url = LSPS5WebhookUrl::new("https://example.com/webhook".to_string()).unwrap();
+		let encoded = valid_url.encode();
+		let decoded = LSPS5WebhookUrl::read(&mut lightning::io::Cursor::new(&encoded)).unwrap();
+		assert_eq!(decoded.as_str(), "https://example.com/webhook");
 	}
 
 	#[test]
