@@ -78,13 +78,15 @@ pub fn sign<C: Signing>(ctx: &Secp256k1<C>, msg: &Message, sk: &SecretKey) -> Si
 pub fn sign_with_aux_rand<C: Signing, ES: EntropySource>(
 	ctx: &Secp256k1<C>, msg: &Message, sk: &SecretKey, entropy_source: &ES,
 ) -> Signature {
-	#[cfg(feature = "grind_signatures")]
+	#[cfg(all(feature = "grind_signatures", not(fuzzing)))]
 	let sig = loop {
 		let sig = ctx.sign_ecdsa_with_noncedata(msg, sk, &entropy_source.get_secure_random_bytes());
 		if sig.serialize_compact()[0] < 0x80 {
 			break sig;
 		}
 	};
+	#[cfg(all(feature = "grind_signatures", fuzzing))]
+	let sig = ctx.sign_ecdsa_with_noncedata(msg, sk, &entropy_source.get_secure_random_bytes());
 	#[cfg(all(not(feature = "grind_signatures"), not(ldk_test_vectors)))]
 	let sig = ctx.sign_ecdsa_with_noncedata(msg, sk, &entropy_source.get_secure_random_bytes());
 	#[cfg(all(not(feature = "grind_signatures"), ldk_test_vectors))]

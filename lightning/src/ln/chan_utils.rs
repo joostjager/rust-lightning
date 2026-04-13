@@ -464,6 +464,7 @@ impl CounterpartyCommitmentSecrets {
 	/// was generated in accordance with BOLT 3 and is consistent with previous secrets.
 	pub fn provide_secret(&mut self, idx: u64, secret: [u8; 32]) -> Result<(), ()> {
 		let pos = Self::place_secret(idx);
+		#[cfg(not(fuzzing))]
 		for i in 0..pos {
 			let (old_secret, old_idx) = self.old_secrets[i as usize];
 			if Self::derive_secret(secret, pos, old_idx) != old_secret {
