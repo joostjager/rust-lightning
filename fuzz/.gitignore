@@ -2,3 +2,4 @@ hfuzz_target
 target
 hfuzz_workspace
 corpus
+.chanmon-bisect-cache
