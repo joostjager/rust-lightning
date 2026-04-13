@@ -69,9 +69,12 @@ impl LSPSUrl {
 		Ok(LSPSUrl(UntrustedString(url_str)))
 	}
 
-	/// Returns URL length.
+	/// Returns URL length in bytes.
+	///
+	/// Since [`LSPSUrl::parse`] only accepts ASCII characters, this is equivalent
+	/// to the character count.
 	pub fn url_length(&self) -> usize {
-		self.0 .0.chars().count()
+		self.0 .0.len()
 	}
 
 	/// Returns the full URL string.
@@ -99,6 +102,7 @@ impl Writeable for LSPSUrl {
 
 impl Readable for LSPSUrl {
 	fn read<R: lightning::io::Read>(reader: &mut R) -> Result<Self, DecodeError> {
-		Ok(Self(Readable::read(reader)?))
+		let s: UntrustedString = Readable::read(reader)?;
+		Self::parse(s.0).map_err(|_| DecodeError::InvalidValue)
 	}
 }
