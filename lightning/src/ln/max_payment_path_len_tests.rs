@@ -149,7 +149,7 @@ fn large_payment_metadata() {
 	.unwrap_err();
 	match err {
 		APIError::InvalidRoute { err } => {
-			assert_eq!(err, "Route size too large considering onion data");
+			assert_eq!(err, "Route size too large (or empty) considering onion data");
 		},
 		_ => panic!(),
 	}
@@ -441,7 +441,7 @@ fn blinded_path_with_custom_tlv() {
 	.unwrap_err();
 	match err {
 		APIError::InvalidRoute { err } => {
-			assert_eq!(err, "Route size too large considering onion data");
+			assert_eq!(err, "Route size too large (or empty) considering onion data");
 		},
 		_ => panic!(),
 	}
