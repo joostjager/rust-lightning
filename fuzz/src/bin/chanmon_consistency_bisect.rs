@@ -6,7 +6,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
 use std::thread;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde::Deserialize;
 
@@ -606,6 +606,8 @@ struct CaseResult {
 	first_nonpass_commit: Option<String>,
 	first_nonpass_verdict: Option<ReplayVerdict>,
 	nonpassing_from_start: bool,
+	commits_tested: usize,
+	cached_commits_tested: usize,
 }
 
 struct CaseSummary {
@@ -629,10 +631,40 @@ fn bisect_cached(branch: &OsStr, since: &OsStr) -> Result<(), String> {
 
 	let mut summaries = Vec::new();
 	let total_cases = cases.len();
+	let max_case_hex_len = cases
+		.iter()
+		.map(|case_path| case_hex(case_path).map(|hex| hex.len()))
+		.collect::<Result<Vec<_>, _>>()?
+		.into_iter()
+		.max()
+		.unwrap_or(0);
+	let bisect_start = Instant::now();
 	for (idx, case_path) in cases.iter().enumerate() {
 		let case_hex = case_hex(case_path)?;
-		println!("[{}/{}] bisecting {}", idx + 1, total_cases, case_hex);
-		let result = first_breaking_commit_for_case(&case_hex, case_path, &cached)?;
+		let result = first_breaking_commit_for_case(case_path, &cached)?;
+		let elapsed = bisect_start.elapsed();
+		let completed_cases = idx + 1;
+		let remaining_cases = total_cases - completed_cases;
+		let eta = if remaining_cases == 0 {
+			None
+		} else {
+			let average_case_secs = elapsed.as_secs_f64() / completed_cases as f64;
+			Some(Duration::from_secs_f64(average_case_secs * remaining_cases as f64))
+		};
+		let eta_suffix =
+			eta.map(|eta| format!(" (eta {})", format_duration(eta))).unwrap_or_default();
+		println!(
+			"[{}/{}] {:width$} {:<5} {} (commits {}, cached {}){}",
+			completed_cases,
+			total_cases,
+			case_hex,
+			case_result_status(&result),
+			describe_case_result_detail(&result)?,
+			result.commits_tested,
+			result.cached_commits_tested,
+			eta_suffix,
+			width = max_case_hex_len
+		);
 		summaries.push(CaseSummary {
 			case_hex,
 			result,
@@ -680,69 +712,52 @@ fn bisect_cached(branch: &OsStr, since: &OsStr) -> Result<(), String> {
 }
 
 fn first_breaking_commit_for_case(
-	case_hex: &str, case_path: &Path, cached: &[CachedCommit],
+	case_path: &Path, cached: &[CachedCommit],
 ) -> Result<CaseResult, String> {
 	let mut outcomes = HashMap::new();
+	let mut commits_tested = 0usize;
+	let mut cached_commits_tested = 0usize;
 	let mut replay_at = |idx: usize, runs: usize| -> Result<ReplayOutcome, String> {
 		if let Some(result) = outcomes.get(&(idx, runs)) {
 			return Ok(*result);
 		}
 		let outcome = replay_cached_commit(&cached[idx].commit, case_path, false, runs)?;
+		commits_tested += 1;
+		if outcome.cached {
+			cached_commits_tested += 1;
+		}
 		outcomes.insert((idx, runs), outcome);
 		Ok(outcome)
 	};
 
 	let latest_idx = cached.len() - 1;
 	let latest = replay_at(latest_idx, REPLAY_RUNS)?;
-	println!(
-		"  latest {} ({} runs): {}{}",
-		short_commit(&cached[latest_idx].commit)?,
-		REPLAY_RUNS,
-		describe_case_outcome(latest.verdict),
-		cache_suffix(latest)
-	);
 	if latest.verdict.is_pass() {
-		println!("  {case_hex}: not failing or flaky on latest cached merge commit");
 		return Ok(CaseResult {
 			first_nonpass_commit: None,
 			first_nonpass_verdict: None,
 			nonpassing_from_start: false,
+			commits_tested,
+			cached_commits_tested,
 		});
 	}
 
 	let bisect_runs = REPLAY_RUNS;
 
 	let oldest = replay_at(0, bisect_runs)?;
-	println!(
-		"  oldest {} ({} runs): {}{}",
-		short_commit(&cached[0].commit)?,
-		bisect_runs,
-		describe_case_outcome(oldest.verdict),
-		cache_suffix(oldest)
-	);
 	if !oldest.verdict.is_pass() {
-		println!("  {case_hex}: already non-passing at oldest cached merge commit");
 		return Ok(CaseResult {
 			first_nonpass_commit: Some(cached[0].commit.clone()),
 			first_nonpass_verdict: Some(oldest.verdict),
 			nonpassing_from_start: true,
+			commits_tested,
+			cached_commits_tested,
 		});
 	}
 
 	let mut transition_idx = latest_idx;
-	let mut probes = 0usize;
 	for idx in (0..latest_idx).rev() {
 		let outcome = replay_at(idx, bisect_runs)?;
-		probes += 1;
-		if probes == 1 || probes % 10 == 0 || outcome.verdict.is_pass() {
-			println!(
-				"  probe {probes} {} ({} runs): {}{}",
-				short_commit(&cached[idx].commit)?,
-				bisect_runs,
-				describe_case_outcome(outcome.verdict),
-				cache_suffix(outcome)
-			);
-		}
 		if outcome.verdict.is_pass() {
 			break;
 		}
@@ -750,26 +765,58 @@ fn first_breaking_commit_for_case(
 	}
 
 	let nonpass = replay_at(transition_idx, bisect_runs)?;
-	println!(
-		"  {case_hex}: newest pass -> non-pass transition at {} [{}{}]",
-		short_commit(&cached[transition_idx].commit)?,
-		nonpass.verdict.as_str(),
-		if nonpass.cached { ", cached" } else { "" }
-	);
-
 	Ok(CaseResult {
 		first_nonpass_commit: Some(cached[transition_idx].commit.clone()),
 		first_nonpass_verdict: Some(nonpass.verdict),
 		nonpassing_from_start: false,
+		commits_tested,
+		cached_commits_tested,
 	})
 }
 
-fn describe_case_outcome(verdict: ReplayVerdict) -> &'static str {
-	verdict.as_str()
+fn case_result_status(result: &CaseResult) -> &'static str {
+	if result.first_nonpass_commit.is_none() {
+		return "PASS";
+	}
+
+	match result.first_nonpass_verdict {
+		Some(ReplayVerdict::Pass) | None => "PASS",
+		Some(ReplayVerdict::Fail) => "FAIL",
+		Some(ReplayVerdict::Flake) => "FLAKE",
+	}
 }
 
-fn cache_suffix(outcome: ReplayOutcome) -> &'static str {
-	if outcome.cached { " [cached]" } else { "" }
+fn describe_case_result_detail(result: &CaseResult) -> Result<String, String> {
+	if result.first_nonpass_commit.is_none() {
+		return Ok("latest".to_string());
+	}
+
+	let commit = result
+		.first_nonpass_commit
+		.as_deref()
+		.ok_or_else(|| "missing first non-pass commit".to_string())?;
+	result
+		.first_nonpass_verdict
+		.ok_or_else(|| "missing first non-pass verdict".to_string())?;
+	if result.nonpassing_from_start {
+		Ok(format!("oldest {}", short_commit(commit)?))
+	} else {
+		Ok(short_commit(commit)?)
+	}
+}
+
+fn format_duration(duration: Duration) -> String {
+	let total_secs = duration.as_secs();
+	let hours = total_secs / 3600;
+	let minutes = (total_secs % 3600) / 60;
+	let seconds = total_secs % 60;
+	if hours > 0 {
+		format!("{hours}h{minutes:02}m{seconds:02}s")
+	} else if minutes > 0 {
+		format!("{minutes}m{seconds:02}s")
+	} else {
+		format!("{seconds}s")
+	}
 }
 
 fn cached_commits_sorted(branch: &OsStr) -> Result<Vec<CachedCommit>, String> {
