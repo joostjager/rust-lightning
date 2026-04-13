@@ -435,9 +435,11 @@ struct CargoDiagnosticMessage {
 	rendered: Option<String>,
 }
 
+#[derive(Clone, Copy)]
 struct ReplayOutcome {
 	verdict: ReplayVerdict,
 	exit_code: i32,
+	cached: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -495,7 +497,7 @@ fn replay_cached_commit(
 	if inherit_stdio {
 		let status = run_replay_once(&binary_path, &input_abs, true)?;
 		let verdict = if status.success() { ReplayVerdict::Pass } else { ReplayVerdict::Fail };
-		return Ok(ReplayOutcome { verdict, exit_code: exit_code(status) });
+		return Ok(ReplayOutcome { verdict, exit_code: exit_code(status), cached: false });
 	}
 
 	let mut saw_pass = false;
@@ -520,7 +522,7 @@ fn replay_cached_commit(
 		},
 	};
 	write_replay_result(commit, runs, &input_hex, verdict)?;
-	Ok(ReplayOutcome { verdict, exit_code: verdict.exit_code() })
+	Ok(ReplayOutcome { verdict, exit_code: verdict.exit_code(), cached: false })
 }
 
 fn run_replay_once(
@@ -577,7 +579,7 @@ fn read_replay_result(
 			))
 		},
 	};
-	Ok(Some(ReplayOutcome { verdict, exit_code: verdict.exit_code() }))
+	Ok(Some(ReplayOutcome { verdict, exit_code: verdict.exit_code(), cached: true }))
 }
 
 fn write_replay_result(
@@ -603,7 +605,6 @@ struct CaseResult {
 }
 
 struct CaseSummary {
-	case_name: String,
 	case_hex: String,
 	result: CaseResult,
 }
@@ -625,15 +626,11 @@ fn bisect_cached(branch: &OsStr, since: &OsStr) -> Result<(), String> {
 	let mut summaries = Vec::new();
 	let total_cases = cases.len();
 	for (idx, case_path) in cases.iter().enumerate() {
-		let case_name = case_path
-			.file_name()
-			.and_then(|name| name.to_str())
-			.ok_or_else(|| format!("invalid testcase path {}", case_path.display()))?;
-		println!("[{}/{}] bisecting {}", idx + 1, total_cases, case_name);
-		let result = first_breaking_commit_for_case(case_name, case_path, &cached)?;
+		let case_hex = case_hex(case_path)?;
+		println!("[{}/{}] bisecting {}", idx + 1, total_cases, case_hex);
+		let result = first_breaking_commit_for_case(&case_hex, case_path, &cached)?;
 		summaries.push(CaseSummary {
-			case_name: case_name.to_string(),
-			case_hex: case_hex(&case_path)?,
+			case_hex,
 			result,
 		});
 	}
@@ -667,7 +664,7 @@ fn bisect_cached(branch: &OsStr, since: &OsStr) -> Result<(), String> {
 				.first_nonpass_verdict
 				.map(|verdict| format!(" [{}]", verdict.as_str()))
 				.unwrap_or_default();
-			println!("{}: {}{}", summary.case_name, summary.case_hex, status_suffix);
+			println!("{}{}", summary.case_hex, status_suffix);
 		}
 	}
 
@@ -678,29 +675,29 @@ fn bisect_cached(branch: &OsStr, since: &OsStr) -> Result<(), String> {
 }
 
 fn first_breaking_commit_for_case(
-	case_name: &str, case_path: &Path, cached: &[CachedCommit],
+	case_hex: &str, case_path: &Path, cached: &[CachedCommit],
 ) -> Result<CaseResult, String> {
 	let mut outcomes = HashMap::new();
-	let mut replay_at = |idx: usize, runs: usize| -> Result<ReplayVerdict, String> {
+	let mut replay_at = |idx: usize, runs: usize| -> Result<ReplayOutcome, String> {
 		if let Some(result) = outcomes.get(&(idx, runs)) {
 			return Ok(*result);
 		}
 		let outcome = replay_cached_commit(&cached[idx].commit, case_path, false, runs)?;
-		let result = outcome.verdict;
-		outcomes.insert((idx, runs), result);
-		Ok(result)
+		outcomes.insert((idx, runs), outcome);
+		Ok(outcome)
 	};
 
 	let latest_idx = cached.len() - 1;
 	let latest = replay_at(latest_idx, TIP_REPLAY_RUNS)?;
 	println!(
-		"  latest {} ({} runs): {}",
+		"  latest {} ({} runs): {}{}",
 		short_commit(&cached[latest_idx].commit)?,
 		TIP_REPLAY_RUNS,
-		describe_case_outcome(latest)
+		describe_case_outcome(latest.verdict),
+		cache_suffix(latest)
 	);
-	if latest.is_pass() {
-		println!("  {case_name}: not failing or flaky on latest cached merge commit");
+	if latest.verdict.is_pass() {
+		println!("  {case_hex}: not failing or flaky on latest cached merge commit");
 		return Ok(CaseResult {
 			first_nonpass_commit: None,
 			first_nonpass_verdict: None,
@@ -709,21 +706,22 @@ fn first_breaking_commit_for_case(
 	}
 
 	let bisect_runs =
-		if latest == ReplayVerdict::Flake { FLAKY_REPLAY_RUNS } else { STABLE_REPLAY_RUNS };
+		if latest.verdict == ReplayVerdict::Flake { FLAKY_REPLAY_RUNS } else { STABLE_REPLAY_RUNS };
 	println!("  using {bisect_runs} run(s) for older commits");
 
 	let oldest = replay_at(0, bisect_runs)?;
 	println!(
-		"  oldest {} ({} runs): {}",
+		"  oldest {} ({} runs): {}{}",
 		short_commit(&cached[0].commit)?,
 		bisect_runs,
-		describe_case_outcome(oldest)
+		describe_case_outcome(oldest.verdict),
+		cache_suffix(oldest)
 	);
-	if !oldest.is_pass() {
-		println!("  {case_name}: already non-passing at oldest cached merge commit");
+	if !oldest.verdict.is_pass() {
+		println!("  {case_hex}: already non-passing at oldest cached merge commit");
 		return Ok(CaseResult {
 			first_nonpass_commit: Some(cached[0].commit.clone()),
-			first_nonpass_verdict: Some(oldest),
+			first_nonpass_verdict: Some(oldest.verdict),
 			nonpassing_from_start: true,
 		});
 	}
@@ -733,15 +731,16 @@ fn first_breaking_commit_for_case(
 	for idx in (0..latest_idx).rev() {
 		let outcome = replay_at(idx, bisect_runs)?;
 		probes += 1;
-		if probes == 1 || probes % 10 == 0 || outcome.is_pass() {
+		if probes == 1 || probes % 10 == 0 || outcome.verdict.is_pass() {
 			println!(
-				"  probe {probes} {} ({} runs): {}",
+				"  probe {probes} {} ({} runs): {}{}",
 				short_commit(&cached[idx].commit)?,
 				bisect_runs,
-				describe_case_outcome(outcome)
+				describe_case_outcome(outcome.verdict),
+				cache_suffix(outcome)
 			);
 		}
-		if outcome.is_pass() {
+		if outcome.verdict.is_pass() {
 			break;
 		}
 		transition_idx = idx;
@@ -749,20 +748,25 @@ fn first_breaking_commit_for_case(
 
 	let nonpass = replay_at(transition_idx, bisect_runs)?;
 	println!(
-		"  {case_name}: newest pass -> non-pass transition at {} [{}]",
+		"  {case_hex}: newest pass -> non-pass transition at {} [{}{}]",
 		short_commit(&cached[transition_idx].commit)?,
-		nonpass.as_str()
+		nonpass.verdict.as_str(),
+		if nonpass.cached { ", cached" } else { "" }
 	);
 
 	Ok(CaseResult {
 		first_nonpass_commit: Some(cached[transition_idx].commit.clone()),
-		first_nonpass_verdict: Some(nonpass),
+		first_nonpass_verdict: Some(nonpass.verdict),
 		nonpassing_from_start: false,
 	})
 }
 
 fn describe_case_outcome(verdict: ReplayVerdict) -> &'static str {
 	verdict.as_str()
+}
+
+fn cache_suffix(outcome: ReplayOutcome) -> &'static str {
+	if outcome.cached { " [cached]" } else { "" }
 }
 
 fn cached_commits_sorted(branch: &OsStr) -> Result<Vec<CachedCommit>, String> {
