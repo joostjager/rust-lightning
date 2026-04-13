@@ -832,6 +832,10 @@ fn construct_onion_packet_with_init_noise<HD: Writeable, P: Packet>(
 	mut payloads: Vec<HD>, onion_keys: Vec<OnionKeys>, mut packet_data: P::Data,
 	associated_data: Option<&PaymentHash>,
 ) -> Result<P, ()> {
+	if payloads.is_empty() {
+		return Err(());
+	}
+
 	let filler = {
 		let packet_data = packet_data.as_mut();
 		const ONION_HOP_DATA_LEN: usize = 65; // We may decrease this eventually after TLV is common
@@ -2682,7 +2686,7 @@ pub(crate) fn create_payment_onion_internal<T: secp256k1::Signing>(
 				None,
 			)
 			.map_err(|_| APIError::InvalidRoute {
-				err: "Route size too large considering onion data".to_owned(),
+				err: "Route size too large (or empty) considering onion data".to_owned(),
 			})?;
 
 			(&trampoline_outer_onion, Some(trampoline_packet))
@@ -2706,7 +2710,7 @@ pub(crate) fn create_payment_onion_internal<T: secp256k1::Signing>(
 	let onion_keys = construct_onion_keys(&secp_ctx, &path, session_priv);
 	let onion_packet = construct_onion_packet(onion_payloads, onion_keys, prng_seed, payment_hash)
 		.map_err(|_| APIError::InvalidRoute {
-			err: "Route size too large considering onion data".to_owned(),
+			err: "Route size too large (or empty) considering onion data".to_owned(),
 		})?;
 	Ok((onion_packet, htlc_msat, htlc_cltv))
 }
@@ -4103,5 +4107,34 @@ mod tests {
 		msg.write(&mut buffer).unwrap();
 
 		assert_eq!(buffer.len(), 65535);
+	}
+
+	#[test]
+	fn create_payment_onion_fails_for_empty_route() {
+		let secp_ctx = Secp256k1::new();
+		let session_priv = get_test_session_key();
+		let recipient_onion = RecipientOnionFields::spontaneous_empty(1000);
+		let payment_hash = PaymentHash([0; 32]);
+		let empty_path = Path { hops: vec![], blinded_tail: None };
+
+		let err = super::create_payment_onion(
+			&secp_ctx,
+			&empty_path,
+			&session_priv,
+			&recipient_onion,
+			100,
+			&payment_hash,
+			&None,
+			None,
+			[0; 32],
+		)
+		.unwrap_err();
+
+		match err {
+			APIError::InvalidRoute { err } => {
+				assert_eq!(err, "Route size too large (or empty) considering onion data");
+			},
+			_ => panic!("Expected InvalidRoute error, got {:?}", err),
+		}
 	}
 }
