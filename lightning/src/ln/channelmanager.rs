@@ -8878,27 +8878,24 @@ impl<
 						debug_assert!(false);
 						return false;
 					}
-					if let OnionPayload::Invoice { .. } = payment.htlcs[0].onion_payload {
-						// Check if we've received all the parts we need for an MPP (the value of the parts adds to total_msat).
-						// In this case we're not going to handle any timeouts of the parts here.
-						// This condition determining whether the MPP is complete here must match
-						// exactly the condition used in `process_pending_htlc_forwards`.
-						let total_intended_recvd_value =
-							payment.htlcs.iter().map(|h| h.sender_intended_value).sum();
-						let total_mpp_value = payment.onion_fields.total_mpp_amount_msat;
-						if total_mpp_value <= total_intended_recvd_value {
-							return true;
-						} else if payment.htlcs.iter_mut().any(|htlc| {
-							htlc.timer_ticks += 1;
-							return htlc.timer_ticks >= MPP_TIMEOUT_TICKS;
-						}) {
-							let htlcs = payment
-								.htlcs
-								.drain(..)
-								.map(|htlc: ClaimableHTLC| (htlc.prev_hop, *payment_hash));
-							timed_out_mpp_htlcs.extend(htlcs);
-							return false;
-						}
+					// Check if we've received all the parts we need for an MPP.
+					// This condition determining whether the MPP is complete here must match
+					// exactly the condition used in `process_pending_htlc_forwards`.
+					let total_intended_recvd_value =
+						payment.htlcs.iter().map(|h| h.sender_intended_value).sum();
+					let total_mpp_value = payment.onion_fields.total_mpp_amount_msat;
+					if total_mpp_value <= total_intended_recvd_value {
+						return true;
+					} else if payment.htlcs.iter_mut().any(|htlc| {
+						htlc.timer_ticks += 1;
+						return htlc.timer_ticks >= MPP_TIMEOUT_TICKS;
+					}) {
+						let htlcs = payment
+							.htlcs
+							.drain(..)
+							.map(|htlc: ClaimableHTLC| (htlc.prev_hop, *payment_hash));
+						timed_out_mpp_htlcs.extend(htlcs);
+						return false;
 					}
 					true
 				},
