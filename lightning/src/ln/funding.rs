@@ -59,8 +59,8 @@ pub(super) enum FeeRateAdjustmentError {
 	FeeBufferOverflow,
 	/// The re-estimated fee exceeds the available fee buffer regardless of `max_feerate`. The fee
 	/// buffer is the maximum fee that can be accommodated:
-	/// - **splice-in**: the selected inputs' value minus the contributed amount
-	/// - **splice-out**: the channel balance minus the withdrawal outputs
+	/// - **input-backed contributions**: the original fee plus any change output value
+	/// - **input-less contributions**: the channel balance minus the withdrawal outputs
 	FeeBufferInsufficient { source: &'static str, available: Amount, required: Amount },
 }
 
@@ -288,7 +288,7 @@ macro_rules! build_funding_contribution {
 		let max_feerate: FeeRate = $max_feerate;
 		let force_coin_selection: bool = $force_coin_selection;
 
-		let value_removed = validate_funding_contribution_params(
+		let _value_removed = validate_funding_contribution_params(
 			value_added,
 			&outputs,
 			min_rbf_feerate,
@@ -312,8 +312,6 @@ macro_rules! build_funding_contribution {
 					.map(|shared_input| shared_input.previous_utxo.value)
 					.unwrap_or(Amount::ZERO)
 					.checked_add(value_added)
-					.ok_or(FundingContributionError::InvalidSpliceValue)?
-					.checked_sub(value_removed)
 					.ok_or(FundingContributionError::InvalidSpliceValue)?,
 				script_pubkey: make_funding_redeemscript(&dummy_pubkey, &dummy_pubkey).to_p2wsh(),
 			};
@@ -469,7 +467,8 @@ impl FundingTemplate {
 	/// `value_added` and `outputs` are the complete parameters for this contribution, not
 	/// increments on top of a prior contribution. When replacing a prior contribution via RBF,
 	/// use [`FundingTemplate::prior_contribution`] to inspect the prior parameters and combine
-	/// them as needed.
+	/// them as needed. The withdrawal `outputs` are funded by the selected wallet inputs and do
+	/// not reduce the requested `value_added` to the channel.
 	pub async fn splice_in_and_out<W: CoinSelectionSource + MaybeSend>(
 		self, value_added: Amount, outputs: Vec<TxOut>, min_feerate: FeeRate, max_feerate: FeeRate,
 		wallet: W,
@@ -528,9 +527,9 @@ impl FundingTemplate {
 	///   the fee difference. For splice-out (no wallet inputs), the holder's channel balance
 	///   covers the higher fees.
 	/// - If adjustment fails, coin selection is re-run using the prior contribution's
-	///   parameters and the caller's `max_feerate`. For splice-out contributions, this changes
-	///   the fee source: wallet inputs are selected to cover fees instead of deducting them
-	///   from the channel balance.
+	///   parameters and the caller's `max_feerate`. For prior contributions without inputs,
+	///   this changes the funding source: wallet inputs are selected to cover the outputs and
+	///   fees instead of deducting them from the channel balance.
 	/// - If no prior contribution exists, coin selection is run for a fee-bump-only contribution
 	///   (`value_added = 0`), covering fees for the common fields and shared input/output via
 	///   a newly selected input. Check [`FundingTemplate::prior_contribution`] to see if this
@@ -712,8 +711,10 @@ pub struct FundingContribution {
 	/// excess amount will be sent to a change output.
 	inputs: Vec<FundingTxInput>,
 
-	/// The outputs to include in the funding transaction. The total value of all outputs plus fees
-	/// will be the amount that is removed.
+	/// The outputs to include in the funding transaction.
+	///
+	/// When no wallet inputs are contributed, these outputs are paid from the channel balance.
+	/// Otherwise, they are paid by the contributed inputs.
 	outputs: Vec<TxOut>,
 
 	/// The output where any change will be sent.
@@ -912,54 +913,35 @@ impl FundingContribution {
 			}
 		}
 
+		let target_fee = estimate_transaction_fee(
+			&self.inputs,
+			&self.outputs,
+			self.change_output.as_ref(),
+			is_initiator,
+			self.is_splice,
+			target_feerate,
+		);
+
 		if !self.inputs.is_empty() {
-			if let Some(ref change_output) = self.change_output {
-				let old_change_value = change_output.value;
+			let fee_buffer = self
+				.estimated_fee
+				.checked_add(
+					self.change_output.as_ref().map_or(Amount::ZERO, |output| output.value),
+				)
+				.ok_or(FeeRateAdjustmentError::FeeBufferOverflow)?;
+
+			if let Some(change_output) = self.change_output.as_ref() {
 				let dust_limit = change_output.script_pubkey.minimal_non_dust();
+				if let Some(new_change_value) = fee_buffer.checked_sub(target_fee) {
+					if new_change_value >= dust_limit {
+						return Ok((target_fee, Some(new_change_value)));
+					}
 
-				// Target fee including the change output's weight.
-				let target_fee = estimate_transaction_fee(
-					&self.inputs,
-					&self.outputs,
-					self.change_output.as_ref(),
-					is_initiator,
-					self.is_splice,
-					target_feerate,
-				);
-
-				let fee_buffer = self
-					.estimated_fee
-					.checked_add(old_change_value)
-					.ok_or(FeeRateAdjustmentError::FeeBufferOverflow)?;
-
-				match fee_buffer.checked_sub(target_fee) {
-					Some(new_change_value) if new_change_value >= dust_limit => {
-						Ok((target_fee, Some(new_change_value)))
-					},
-					_ => {
-						// Change would be below dust or negative. Try without change.
-						let target_fee_no_change = estimate_transaction_fee(
-							&self.inputs,
-							&self.outputs,
-							None,
-							is_initiator,
-							self.is_splice,
-							target_feerate,
-						);
-						if target_fee_no_change > fee_buffer {
-							Err(FeeRateAdjustmentError::FeeBufferInsufficient {
-								source: "estimated fee + change value",
-								available: fee_buffer,
-								required: target_fee_no_change,
-							})
-						} else {
-							Ok((target_fee_no_change, None))
-						}
-					},
+					// Our remaining change was not enough to be a valid output, fallthrough to the
+					// no remaining change case.
 				}
-			} else {
-				// No change output.
-				let target_fee = estimate_transaction_fee(
+
+				let target_fee_no_change = estimate_transaction_fee(
 					&self.inputs,
 					&self.outputs,
 					None,
@@ -967,27 +949,27 @@ impl FundingContribution {
 					self.is_splice,
 					target_feerate,
 				);
-				if target_fee > self.estimated_fee {
-					return Err(FeeRateAdjustmentError::FeeBufferInsufficient {
-						source: "estimated fee",
-						available: self.estimated_fee,
-						required: target_fee,
-					});
+				if target_fee_no_change > fee_buffer {
+					Err(FeeRateAdjustmentError::FeeBufferInsufficient {
+						source: "estimated fee + change value",
+						available: fee_buffer,
+						required: target_fee_no_change,
+					})
+				} else {
+					Ok((target_fee_no_change, None))
 				}
+			} else if let Some(_surplus) = fee_buffer.checked_sub(target_fee) {
 				Ok((target_fee, None))
+			} else {
+				Err(FeeRateAdjustmentError::FeeBufferInsufficient {
+					source: "estimated fee",
+					available: fee_buffer,
+					required: target_fee,
+				})
 			}
 		} else {
-			// No inputs (splice-out): fees paid from channel balance.
-			let target_fee = estimate_transaction_fee(
-				&[],
-				&self.outputs,
-				None,
-				is_initiator,
-				self.is_splice,
-				target_feerate,
-			);
-
-			// Check that the channel balance can cover the withdrawal outputs plus fees.
+			// Without coin-selected inputs, both the withdrawals and the fee come from the channel
+			// balance.
 			let value_removed: Amount = self.outputs.iter().map(|o| o.value).sum();
 			let total_cost = target_fee
 				.checked_add(value_removed)
@@ -999,7 +981,6 @@ impl FundingContribution {
 					required: target_fee,
 				});
 			}
-			// Surplus goes back to the channel balance.
 			Ok((target_fee, None))
 		}
 	}

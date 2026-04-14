@@ -6638,20 +6638,32 @@ impl<
 	/// The splice initiator is responsible for paying fees for common fields, shared inputs, and
 	/// shared outputs along with any contributed inputs and outputs. When building a
 	/// [`FundingContribution`], fees are estimated at `min_feerate` assuming initiator
-	/// responsibility and must be covered by the supplied inputs for splice-in or the channel
-	/// balance for splice-out. If the counterparty also initiates a splice and wins the
-	/// tie-break, they become the initiator and choose the feerate. The fee is then
-	/// re-estimated at the counterparty's feerate for only our contributed inputs and outputs,
-	/// which may be higher or lower than the original estimate. The contribution is dropped and
-	/// the splice proceeds without it when:
+	/// responsibility. Contributions fall into two cases:
+	/// - **input-backed contributions**: when wallet inputs are selected, those inputs pay for both
+	///   the requested value added to the channel and any explicit withdrawal outputs. For
+	///   example, a 60,000 sat input might add 50,000 sat to the channel, pay a 2,000 sat fee,
+	///   and return 8,000 sat as change. A later RBF first tries to preserve that 50,000 sat
+	///   value added and cover any higher fee or newly requested withdrawal from the original
+	///   10,000 sat fee buffer (2,000 sat fee + 8,000 sat change). If that buffer is not enough,
+	///   the prior contribution cannot be reused without selecting new wallet inputs.
+	/// - **input-less contributions**: when no wallet inputs are selected, fees and explicit
+	///   withdrawal outputs are paid from the channel balance. For example, a pure splice-out that
+	///   withdraws 20,000 sat from a 100,000 sat holder balance leaves up to 80,000 sat available
+	///   for fees. A later RBF keeps the 20,000 sat withdrawal only while that remaining balance
+	///   can still cover the re-estimated fee.
+	///
+	/// If the counterparty also initiates a splice and wins the tie-break, they become the
+	/// initiator and choose the feerate. The fee is then re-estimated at the counterparty's
+	/// feerate for only our contributed inputs and outputs, which may be higher or lower than the
+	/// original estimate. The contribution is dropped and the splice proceeds without it when:
 	/// - the counterparty's feerate is below `min_feerate`
 	/// - the counterparty's feerate is above `max_feerate` and the re-estimated fee exceeds the
 	///   original fee estimate
 	/// - the re-estimated fee exceeds the *fee buffer* regardless of `max_feerate`
 	///
 	/// The fee buffer is the maximum fee that can be accommodated:
-	/// - **splice-in**: the selected inputs' value minus the contributed amount
-	/// - **splice-out**: the channel balance minus the withdrawal outputs
+	/// - **input-backed contributions**: the original fee plus any change output value
+	/// - **input-less contributions**: the channel balance minus the withdrawal outputs
 	///
 	/// # Events
 	///

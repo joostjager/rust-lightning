@@ -1177,7 +1177,7 @@ fn test_splice_out() {
 }
 
 #[test]
-fn test_splice_in_and_out() {
+fn test_splice_in_and_out_funds_outputs_from_inputs() {
 	let chanmon_cfgs = create_chanmon_cfgs(2);
 	let node_cfgs = create_node_cfgs(2, &chanmon_cfgs);
 	let mut config = test_default_channel_config();
@@ -1190,118 +1190,40 @@ fn test_splice_in_and_out() {
 	let (_, _, channel_id, _) =
 		create_announced_chan_between_nodes_with_value(&nodes, 0, 1, initial_channel_value_sat, 0);
 
-	let _ = send_payment(&nodes[0], &[&nodes[1]], 100_000);
-
-	// Contribute a net negative value, with fees taken from the contributed inputs and the
-	// remaining value sent to change
-	let htlc_limit_msat = nodes[0].node.list_channels()[0].next_outbound_htlc_limit_msat;
-	let added_value = Amount::from_sat(htlc_limit_msat / 1000);
-	let removed_value = added_value * 2;
-	let utxo_value = added_value * 3 / 4;
-	let fees = if cfg!(feature = "grind_signatures") {
-		Amount::from_sat(385)
-	} else {
-		Amount::from_sat(385)
-	};
-
-	assert!(htlc_limit_msat > initial_channel_value_sat / 2 * 1000);
-
-	provide_utxo_reserves(&nodes, 2, utxo_value);
-
+	let value_added = Amount::from_sat(20_000);
+	let utxo_value = Amount::from_sat(50_000);
 	let outputs = vec![
 		TxOut {
-			value: removed_value / 2,
+			value: Amount::from_sat(20_000),
 			script_pubkey: nodes[0].wallet_source.get_change_script().unwrap(),
 		},
 		TxOut {
-			value: removed_value / 2,
+			value: Amount::from_sat(20_000),
 			script_pubkey: nodes[1].wallet_source.get_change_script().unwrap(),
 		},
 	];
-	let funding_contribution =
-		do_initiate_splice_in_and_out(&nodes[0], &nodes[1], channel_id, added_value, outputs);
-
-	let (splice_tx, new_funding_script) =
-		splice_channel(&nodes[0], &nodes[1], channel_id, funding_contribution);
-	let expected_change = utxo_value * 2 - added_value - fees;
-	assert_eq!(
-		splice_tx
-			.output
-			.iter()
-			.filter(|txout| txout.value != removed_value / 2)
-			.find(|txout| txout.script_pubkey != new_funding_script)
-			.unwrap()
-			.value,
-		expected_change,
-	);
-
-	mine_transaction(&nodes[0], &splice_tx);
-	mine_transaction(&nodes[1], &splice_tx);
-
-	let htlc_limit_msat = nodes[0].node.list_channels()[0].next_outbound_htlc_limit_msat;
-	assert!(htlc_limit_msat < added_value.to_sat() * 1000);
-	let _ = send_payment(&nodes[0], &[&nodes[1]], htlc_limit_msat);
-
-	lock_splice_after_blocks(&nodes[0], &nodes[1], ANTI_REORG_DELAY - 1);
-
-	let htlc_limit_msat = nodes[0].node.list_channels()[0].next_outbound_htlc_limit_msat;
-	assert!(htlc_limit_msat < added_value.to_sat() * 1000);
-	let _ = send_payment(&nodes[0], &[&nodes[1]], htlc_limit_msat);
-
-	// Contribute a net positive value, with fees taken from the contributed inputs and the
-	// remaining value sent to change
-	let added_value = Amount::from_sat(initial_channel_value_sat * 2);
-	let removed_value = added_value / 2;
-	let utxo_value = added_value * 3 / 4;
-	let fees = if cfg!(feature = "grind_signatures") {
-		Amount::from_sat(385)
-	} else {
-		Amount::from_sat(385)
-	};
-
-	// Clear UTXOs so that the change output from the previous splice isn't considered
-	nodes[0].wallet_source.clear_utxos();
-
 	provide_utxo_reserves(&nodes, 2, utxo_value);
 
-	let outputs = vec![
-		TxOut {
-			value: removed_value / 2,
-			script_pubkey: nodes[0].wallet_source.get_change_script().unwrap(),
-		},
-		TxOut {
-			value: removed_value / 2,
-			script_pubkey: nodes[1].wallet_source.get_change_script().unwrap(),
-		},
-	];
 	let funding_contribution =
-		do_initiate_splice_in_and_out(&nodes[0], &nodes[1], channel_id, added_value, outputs);
+		initiate_splice_in_and_out(&nodes[0], &nodes[1], channel_id, value_added, outputs);
+	let fees = Amount::from_sat(385);
+	let total_output_value: Amount =
+		funding_contribution.outputs().iter().map(|output| output.value).sum();
+	let expected_change = utxo_value * 2 - value_added - total_output_value - fees;
+	assert_eq!(funding_contribution.change_output().unwrap().value, expected_change);
+	assert!(funding_contribution.net_value() >= value_added.to_signed().unwrap());
 
-	let (splice_tx, new_funding_script) =
-		splice_channel(&nodes[0], &nodes[1], channel_id, funding_contribution);
-	let expected_change = utxo_value * 2 - added_value - fees;
-	assert_eq!(
-		splice_tx
-			.output
-			.iter()
-			.filter(|txout| txout.value != removed_value / 2)
-			.find(|txout| txout.script_pubkey != new_funding_script)
-			.unwrap()
-			.value,
-		expected_change,
-	);
-
+	let (splice_tx, _) =
+		splice_channel(&nodes[0], &nodes[1], channel_id, funding_contribution.clone());
 	mine_transaction(&nodes[0], &splice_tx);
 	mine_transaction(&nodes[1], &splice_tx);
-
-	let htlc_limit_msat = nodes[0].node.list_channels()[0].next_outbound_htlc_limit_msat;
-	assert_eq!(htlc_limit_msat, 0);
-
 	lock_splice_after_blocks(&nodes[0], &nodes[1], ANTI_REORG_DELAY - 1);
 
-	let htlc_limit_msat = nodes[0].node.list_channels()[0].next_outbound_htlc_limit_msat;
-	assert!(htlc_limit_msat > initial_channel_value_sat / 2 * 1000);
-	let _ = send_payment(&nodes[0], &[&nodes[1]], htlc_limit_msat);
+	let channel = &nodes[0].node.list_channels()[0];
+	assert_eq!(
+		channel.channel_value_satoshis,
+		initial_channel_value_sat + funding_contribution.net_value().to_sat() as u64,
+	);
 }
 
 #[test]
