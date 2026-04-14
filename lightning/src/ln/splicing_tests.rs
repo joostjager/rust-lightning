@@ -4600,8 +4600,8 @@ fn test_splice_rbf_insufficient_feerate() {
 	let tx_abort = get_event_msg!(nodes[1], MessageSendEvent::SendTxAbort, node_id_0);
 	assert_eq!(tx_abort.channel_id, channel_id);
 
-	// Acceptor-side: a counterparty feerate that satisfies the spec's 25/24 rule (264) is
-	// accepted, even though our own RBF floor (+25 sat/kwu = 278) is higher.
+	// Acceptor-side: a counterparty feerate that only satisfies the 25/24 rule (264) is
+	// rejected — the spec requires max(prev + 25, ceil(prev * 25/24)) = 278 at low feerates.
 	// After tx_abort the channel remains quiescent, so no need to re-enter quiescence.
 	nodes[0].node.handle_tx_abort(node_id_1, &tx_abort);
 
@@ -4610,6 +4610,92 @@ fn test_splice_rbf_insufficient_feerate() {
 		channel_id,
 		locktime: 0,
 		feerate_sat_per_1000_weight: rbf_feerate_25_24,
+		funding_output_contribution: Some(added_value.to_sat() as i64),
+	};
+
+	nodes[1].node.handle_tx_init_rbf(node_id_0, &tx_init_rbf);
+	let tx_abort = get_event_msg!(nodes[1], MessageSendEvent::SendTxAbort, node_id_0);
+	assert_eq!(tx_abort.channel_id, channel_id);
+
+	// Acceptor-side: prev + 25 = 278 satisfies the combined BIP125 rule and is accepted.
+	nodes[0].node.handle_tx_abort(node_id_1, &tx_abort);
+
+	let min_rbf_feerate = FEERATE_FLOOR_SATS_PER_KW + 25;
+	let tx_init_rbf = msgs::TxInitRbf {
+		channel_id,
+		locktime: 0,
+		feerate_sat_per_1000_weight: min_rbf_feerate,
+		funding_output_contribution: Some(added_value.to_sat() as i64),
+	};
+
+	nodes[1].node.handle_tx_init_rbf(node_id_0, &tx_init_rbf);
+	let _tx_ack_rbf = get_event_msg!(nodes[1], MessageSendEvent::SendTxAckRbf, node_id_0);
+}
+
+#[test]
+fn test_splice_rbf_insufficient_feerate_high() {
+	// At high feerates (above ~600 sat/kwu) the 25/24 multiplicative rule dominates the +25
+	// flat increment. Verify that the counterparty validation rejects a feerate satisfying only
+	// the flat increment and accepts one satisfying the 25/24 rule.
+	let chanmon_cfgs = create_chanmon_cfgs(2);
+	let node_cfgs = create_node_cfgs(2, &chanmon_cfgs);
+	let node_chanmgrs = create_node_chanmgrs(2, &node_cfgs, &[None, None]);
+	let nodes = create_network(2, &node_cfgs, &node_chanmgrs);
+
+	let node_id_0 = nodes[0].node.get_our_node_id();
+	let node_id_1 = nodes[1].node.get_our_node_id();
+
+	let initial_channel_value_sat = 100_000;
+	let (_, _, channel_id, _) =
+		create_announced_chan_between_nodes_with_value(&nodes, 0, 1, initial_channel_value_sat, 0);
+
+	let added_value = Amount::from_sat(50_000);
+	provide_utxo_reserves(&nodes, 2, added_value * 2);
+
+	// Complete a splice-in at floor feerate, then RBF to 1000 sat/kwu.
+	let funding_contribution = do_initiate_splice_in(&nodes[0], &nodes[1], channel_id, added_value);
+	let (_splice_tx, new_funding_script) =
+		splice_channel(&nodes[0], &nodes[1], channel_id, funding_contribution);
+
+	provide_utxo_reserves(&nodes, 2, added_value * 2);
+	let high_feerate = FeeRate::from_sat_per_kwu(1000);
+	let contribution =
+		do_initiate_rbf_splice_in(&nodes[0], &nodes[1], channel_id, added_value, high_feerate);
+	complete_rbf_handshake(&nodes[0], &nodes[1]);
+	complete_interactive_funding_negotiation(
+		&nodes[0],
+		&nodes[1],
+		channel_id,
+		contribution,
+		new_funding_script,
+	);
+	let (_, splice_locked) = sign_interactive_funding_tx(&nodes[0], &nodes[1], false);
+	assert!(splice_locked.is_none());
+	expect_splice_pending_event(&nodes[0], &node_id_1);
+	expect_splice_pending_event(&nodes[1], &node_id_0);
+
+	// prev=1000: flat increment gives 1000+25=1025, 25/24 rule gives ceil(1000*25/24)=1042.
+	// Feerate 1025 satisfies the flat increment but not 25/24 — rejected.
+	reenter_quiescence(&nodes[0], &nodes[1], &channel_id);
+
+	let tx_init_rbf = msgs::TxInitRbf {
+		channel_id,
+		locktime: 0,
+		feerate_sat_per_1000_weight: 1025,
+		funding_output_contribution: Some(added_value.to_sat() as i64),
+	};
+
+	nodes[1].node.handle_tx_init_rbf(node_id_0, &tx_init_rbf);
+	let tx_abort = get_event_msg!(nodes[1], MessageSendEvent::SendTxAbort, node_id_0);
+	assert_eq!(tx_abort.channel_id, channel_id);
+
+	// Feerate 1042 satisfies both rules — accepted.
+	nodes[0].node.handle_tx_abort(node_id_1, &tx_abort);
+
+	let tx_init_rbf = msgs::TxInitRbf {
+		channel_id,
+		locktime: 0,
+		feerate_sat_per_1000_weight: 1042,
 		funding_output_contribution: Some(added_value.to_sat() as i64),
 	};
 
