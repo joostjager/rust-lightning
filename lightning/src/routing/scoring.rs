@@ -1871,6 +1871,21 @@ impl<G: Deref<Target = NetworkGraph<L>> + Clone, L: Logger + Clone> CombinedScor
 	}
 }
 
+impl<G: Deref<Target = NetworkGraph<L>>, L: Logger> CombinedScorer<G, L> {
+	/// Returns a reference to the merged [`ProbabilisticScorer`] used for routing decisions,
+	/// which combines locally acquired data with any externally supplied scores.
+	pub fn scorer(&self) -> &ProbabilisticScorer<G, L> {
+		&self.scorer
+	}
+
+	/// Returns a reference to the [`ProbabilisticScorer`] tracking only locally acquired data
+	/// (i.e. excluding any externally supplied scores merged via [`Self::merge`] or
+	/// [`Self::set_scores`]).
+	pub fn local_only_scorer(&self) -> &ProbabilisticScorer<G, L> {
+		&self.local_only_scorer
+	}
+}
+
 impl<G: Deref<Target = NetworkGraph<L>>, L: Logger> ScoreLookUp for CombinedScorer<G, L> {
 	type ScoreParams = ProbabilisticScoringFeeParameters;
 
