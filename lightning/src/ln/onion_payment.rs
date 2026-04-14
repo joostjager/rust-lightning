@@ -66,7 +66,7 @@ fn check_blinded_forward(
 	let outgoing_cltv_value = inbound_cltv_expiry.checked_sub(
 		payment_relay.cltv_expiry_delta as u32
 	).ok_or(())?;
-	check_blinded_payment_constraints(inbound_amt_msat, outgoing_cltv_value, payment_constraints)?;
+	check_blinded_payment_constraints(inbound_amt_msat, inbound_cltv_expiry, payment_constraints)?;
 
 	if features.requires_unknown_bits_from(&BlindedHopFeatures::empty()) { return Err(()) }
 	Ok((amt_to_forward, outgoing_cltv_value))
