@@ -16,14 +16,14 @@
 #[cfg(not(fuzzing))]
 compile_error!("Fuzz targets need cfg=fuzzing");
 
-#[cfg(HASHES_FLAG)]
-compile_error!("Fuzz target does not support cfg(HASHES_FLAG)");
+#[cfg(not(hashes_fuzz))]
+compile_error!("Fuzz target does not support cfg(not(hashes_fuzz))");
 
 #[cfg(not(secp256k1_fuzz))]
 compile_error!("Fuzz targets need cfg=secp256k1_fuzz");
 
 extern crate lightning_fuzz;
-use lightning_fuzz::TARGET_MOD::*;
+use lightning_fuzz::msg_targets::msg_open_channel_v2::*;
 use lightning_fuzz::utils::test_logger;
 
 #[cfg(feature = "afl")]
@@ -31,7 +31,7 @@ use lightning_fuzz::utils::test_logger;
 #[cfg(feature = "afl")]
 fn main() {
 	fuzz!(|data| {
-		TARGET_NAME_test(&data, test_logger::DevNull {});
+		msg_open_channel_v2_test(&data, test_logger::DevNull {});
 	});
 }
 
@@ -41,7 +41,7 @@ fn main() {
 fn main() {
 	loop {
 		fuzz!(|data| {
-			TARGET_NAME_test(&data, test_logger::DevNull {});
+			msg_open_channel_v2_test(&data, test_logger::DevNull {});
 		});
 	}
 }
@@ -50,7 +50,7 @@ fn main() {
 #[macro_use] extern crate libfuzzer_sys;
 #[cfg(feature = "libfuzzer_fuzz")]
 fuzz_target!(|data: &[u8]| {
-	TARGET_NAME_test(data, test_logger::DevNull {});
+	msg_open_channel_v2_test(data, test_logger::DevNull {});
 });
 
 #[cfg(feature = "stdin_fuzz")]
@@ -71,7 +71,7 @@ fn main() {
 
 	let mut data = Vec::with_capacity(8192);
 	std::io::stdin().read_to_end(&mut data).unwrap();
-	TARGET_NAME_test(&data, test_logger::Stdout {});
+	msg_open_channel_v2_test(&data, test_logger::Stdout {});
 }
 
 #[test]
@@ -83,11 +83,11 @@ fn run_test_cases() {
 	use std::sync::{atomic, Arc};
 	{
 		let data: Vec<u8> = vec![0];
-		TARGET_NAME_test(&data, test_logger::DevNull {});
+		msg_open_channel_v2_test(&data, test_logger::DevNull {});
 	}
 	let mut threads = Vec::new();
 	let threads_running = Arc::new(atomic::AtomicUsize::new(0));
-	if let Ok(tests) = fs::read_dir("../test_cases/TARGET_NAME") {
+	if let Ok(tests) = fs::read_dir("../test_cases/msg_open_channel_v2") {
 		for test in tests {
 			let mut data: Vec<u8> = Vec::new();
 			let path = test.unwrap().path();
@@ -102,7 +102,7 @@ fn run_test_cases() {
 
 					let panic_logger = string_logger.clone();
 					let res = if ::std::panic::catch_unwind(move || {
-						TARGET_NAME_test(&data, panic_logger);
+						msg_open_channel_v2_test(&data, panic_logger);
 					}).is_err() {
 						Some(string_logger.into_string())
 					} else { None };

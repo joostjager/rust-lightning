@@ -93,7 +93,8 @@ jobs:
           # Could you use this to fake the coverage report for your PR? Sure.
           # Will anyone be impressed by your amazing coverage? No
           # Maybe if codecov wasn't broken we wouldn't need to do this...
-          ./codecov --verbose upload-process --disable-search --fail-on-error -f fuzz-codecov.json -t "f421b687-4dc2-4387-ac3d-dc3b2528af57" -F 'fuzzing'
+          ./codecov --verbose upload-process --disable-search --fail-on-error -f fuzz-fake-hashes-codecov.json -t "f421b687-4dc2-4387-ac3d-dc3b2528af57" -F 'fuzzing-fake-hashes'
+          ./codecov --verbose upload-process --disable-search --fail-on-error -f fuzz-real-hashes-codecov.json -t "f421b687-4dc2-4387-ac3d-dc3b2528af57" -F 'fuzzing-real-hashes'
 
   benchmark:
     runs-on: ubuntu-latest
@@ -218,7 +219,9 @@ jobs:
       - name: Sanity check fuzz targets on Rust ${{ env.TOOLCHAIN }}
         run: |
           cd fuzz
-          cargo test --quiet --color always --lib --bins -j8
+          RUSTFLAGS="--cfg=fuzzing --cfg=secp256k1_fuzz --cfg=hashes_fuzz" cargo test --quiet --color always --lib -j8
+          RUSTFLAGS="--cfg=fuzzing --cfg=secp256k1_fuzz --cfg=hashes_fuzz" cargo test --manifest-path fuzz-fake-hashes/Cargo.toml --quiet --color always --bins -j8
+          RUSTFLAGS="--cfg=fuzzing --cfg=secp256k1_fuzz" cargo test --manifest-path fuzz-real-hashes/Cargo.toml --quiet --color always --bins -j8
 
   fuzz:
     runs-on: self-hosted
