@@ -6777,7 +6777,7 @@ fn get_v2_channel_reserve_satoshis(
 /// multiplicative 25/24 rule alone would be insufficient.
 fn min_rbf_feerate(prev_feerate: u32) -> FeeRate {
 	let flat_increment = (prev_feerate as u64).saturating_add(25);
-	let spec_increment = ((prev_feerate as u64) * 25).div_ceil(24);
+	let spec_increment = (prev_feerate as u64) * 25 / 24;
 	FeeRate::from_sat_per_kwu(cmp::max(flat_increment, spec_increment))
 }
 

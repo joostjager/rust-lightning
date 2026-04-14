@@ -4600,12 +4600,12 @@ fn test_splice_rbf_insufficient_feerate() {
 	let tx_abort = get_event_msg!(nodes[1], MessageSendEvent::SendTxAbort, node_id_0);
 	assert_eq!(tx_abort.channel_id, channel_id);
 
-	// Acceptor-side: a counterparty feerate that only satisfies the 25/24 rule (264) is
-	// rejected — the spec requires max(prev + 25, ceil(prev * 25/24)) = 278 at low feerates.
+	// Acceptor-side: a counterparty feerate that only satisfies the 25/24 rule (263) is
+	// rejected — the spec requires max(prev + 25, prev * 25/24) = 278 at low feerates.
 	// After tx_abort the channel remains quiescent, so no need to re-enter quiescence.
 	nodes[0].node.handle_tx_abort(node_id_1, &tx_abort);
 
-	let rbf_feerate_25_24 = ((FEERATE_FLOOR_SATS_PER_KW as u64) * 25).div_ceil(24) as u32;
+	let rbf_feerate_25_24 = ((FEERATE_FLOOR_SATS_PER_KW as u64) * 25 / 24) as u32;
 	let tx_init_rbf = msgs::TxInitRbf {
 		channel_id,
 		locktime: 0,
@@ -4674,7 +4674,7 @@ fn test_splice_rbf_insufficient_feerate_high() {
 	expect_splice_pending_event(&nodes[0], &node_id_1);
 	expect_splice_pending_event(&nodes[1], &node_id_0);
 
-	// prev=1000: flat increment gives 1000+25=1025, 25/24 rule gives ceil(1000*25/24)=1042.
+	// prev=1000: flat increment gives 1000+25=1025, 25/24 rule gives 1000*25/24=1041.
 	// Feerate 1025 satisfies the flat increment but not 25/24 — rejected.
 	reenter_quiescence(&nodes[0], &nodes[1], &channel_id);
 
@@ -4689,13 +4689,13 @@ fn test_splice_rbf_insufficient_feerate_high() {
 	let tx_abort = get_event_msg!(nodes[1], MessageSendEvent::SendTxAbort, node_id_0);
 	assert_eq!(tx_abort.channel_id, channel_id);
 
-	// Feerate 1042 satisfies both rules — accepted.
+	// Feerate 1041 satisfies both rules — accepted.
 	nodes[0].node.handle_tx_abort(node_id_1, &tx_abort);
 
 	let tx_init_rbf = msgs::TxInitRbf {
 		channel_id,
 		locktime: 0,
-		feerate_sat_per_1000_weight: 1042,
+		feerate_sat_per_1000_weight: 1041,
 		funding_output_contribution: Some(added_value.to_sat() as i64),
 	};
 
@@ -6253,7 +6253,7 @@ fn test_funding_contributed_rbf_adjustment_insufficient_budget() {
 		funding_template.splice_in_sync(added_value, floor_feerate, FeeRate::MAX, &wallet).unwrap();
 
 	// Node 1 initiates a splice at a HIGH feerate (10,000 sat/kwu). The minimum RBF feerate will be
-	// max(10,000 + 25, ceil(10,000 * 25/24)) = 10,417 sat/kwu — far above what node 0's tight
+	// max(10,000 + 25, 10,000 * 25/24) = 10,416 sat/kwu — far above what node 0's tight
 	// budget can handle.
 	let high_feerate = FeeRate::from_sat_per_kwu(10_000);
 	let node_1_template = nodes[1].node.splice_channel(&channel_id, &node_id_0).unwrap();
