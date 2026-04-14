@@ -1333,7 +1333,9 @@ pub fn do_test<Out: Output + MaybeSend + MaybeSync>(data: &[u8], out: Out) {
 	let (node_c, mut monitor_c, keys_manager_c, logger_c) = make_node!(2, fee_est_c, broadcast_c);
 
 	let mut nodes = [node_a, node_b, node_c];
+	#[allow(unused_variables)]
 	let loggers = [logger_a, logger_b, logger_c];
+	#[allow(unused_variables)]
 	let fee_estimators = [Arc::clone(&fee_est_a), Arc::clone(&fee_est_b), Arc::clone(&fee_est_c)];
 
 	// Connect peers first, then create channels
@@ -2426,24 +2428,36 @@ pub fn do_test<Out: Output + MaybeSend + MaybeSync>(data: &[u8], out: Out) {
 			},
 
 			0xa0 => {
+				if !cfg!(splicing) {
+					test_return!();
+				}
 				let cp_node_id = nodes[1].get_our_node_id();
 				let wallet = WalletSync::new(&wallets[0], Arc::clone(&loggers[0]));
 				let feerate_sat_per_kw = fee_estimators[0].feerate_sat_per_kw();
 				splice_in(&nodes[0], &cp_node_id, &chan_a_id, &wallet, feerate_sat_per_kw);
 			},
 			0xa1 => {
+				if !cfg!(splicing) {
+					test_return!();
+				}
 				let cp_node_id = nodes[0].get_our_node_id();
 				let wallet = WalletSync::new(&wallets[1], Arc::clone(&loggers[1]));
 				let feerate_sat_per_kw = fee_estimators[1].feerate_sat_per_kw();
 				splice_in(&nodes[1], &cp_node_id, &chan_a_id, &wallet, feerate_sat_per_kw);
 			},
 			0xa2 => {
+				if !cfg!(splicing) {
+					test_return!();
+				}
 				let cp_node_id = nodes[2].get_our_node_id();
 				let wallet = WalletSync::new(&wallets[1], Arc::clone(&loggers[1]));
 				let feerate_sat_per_kw = fee_estimators[1].feerate_sat_per_kw();
 				splice_in(&nodes[1], &cp_node_id, &chan_b_id, &wallet, feerate_sat_per_kw);
 			},
 			0xa3 => {
+				if !cfg!(splicing) {
+					test_return!();
+				}
 				let cp_node_id = nodes[1].get_our_node_id();
 				let wallet = WalletSync::new(&wallets[2], Arc::clone(&loggers[2]));
 				let feerate_sat_per_kw = fee_estimators[2].feerate_sat_per_kw();
@@ -2451,6 +2465,9 @@ pub fn do_test<Out: Output + MaybeSend + MaybeSync>(data: &[u8], out: Out) {
 			},
 
 			0xa4 => {
+				if !cfg!(splicing) {
+					test_return!();
+				}
 				let cp_node_id = nodes[1].get_our_node_id();
 				let wallet = &wallets[0];
 				let logger = Arc::clone(&loggers[0]);
@@ -2458,6 +2475,9 @@ pub fn do_test<Out: Output + MaybeSend + MaybeSync>(data: &[u8], out: Out) {
 				splice_out(&nodes[0], &cp_node_id, &chan_a_id, wallet, logger, feerate_sat_per_kw);
 			},
 			0xa5 => {
+				if !cfg!(splicing) {
+					test_return!();
+				}
 				let cp_node_id = nodes[0].get_our_node_id();
 				let wallet = &wallets[1];
 				let logger = Arc::clone(&loggers[1]);
@@ -2465,6 +2485,9 @@ pub fn do_test<Out: Output + MaybeSend + MaybeSync>(data: &[u8], out: Out) {
 				splice_out(&nodes[1], &cp_node_id, &chan_a_id, wallet, logger, feerate_sat_per_kw);
 			},
 			0xa6 => {
+				if !cfg!(splicing) {
+					test_return!();
+				}
 				let cp_node_id = nodes[2].get_our_node_id();
 				let wallet = &wallets[1];
 				let logger = Arc::clone(&loggers[1]);
@@ -2472,6 +2495,9 @@ pub fn do_test<Out: Output + MaybeSend + MaybeSync>(data: &[u8], out: Out) {
 				splice_out(&nodes[1], &cp_node_id, &chan_b_id, wallet, logger, feerate_sat_per_kw);
 			},
 			0xa7 => {
+				if !cfg!(splicing) {
+					test_return!();
+				}
 				let cp_node_id = nodes[1].get_our_node_id();
 				let wallet = &wallets[2];
 				let logger = Arc::clone(&loggers[2]);
