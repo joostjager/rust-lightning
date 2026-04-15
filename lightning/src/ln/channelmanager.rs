@@ -1601,6 +1601,7 @@ enum PostMonitorUpdateChanResume {
 	Blocked { update_actions: Vec<MonitorUpdateCompletionAction> },
 	/// Channel was fully unblocked and has been resumed. Contains remaining data to process.
 	Unblocked {
+		has_state_changes: bool,
 		channel_id: ChannelId,
 		counterparty_node_id: PublicKey,
 		funding_txo: OutPoint,
@@ -4226,7 +4227,7 @@ impl<
 							) {
 								mem::drop(peer_state_lock);
 								mem::drop(per_peer_state);
-								self.handle_post_monitor_update_chan_resume(data);
+								let _ = self.handle_post_monitor_update_chan_resume(data);
 							}
 						}
 					} else {
@@ -4355,7 +4356,7 @@ impl<
 					) {
 						mem::drop(peer_state_lock);
 						mem::drop(per_peer_state);
-						self.handle_post_monitor_update_chan_resume(data);
+						let _ = self.handle_post_monitor_update_chan_resume(data);
 					}
 					return;
 				} else {
@@ -4430,7 +4431,7 @@ impl<
 			// TODO: If we do the `in_flight_monitor_updates.is_empty()` check in
 			// `convert_channel_err` we can skip the locks here.
 			if shutdown_res.channel_funding_txo.is_some() {
-				self.channel_monitor_updated(
+				let _ = self.channel_monitor_updated(
 					&shutdown_res.channel_id,
 					None,
 					&shutdown_res.counterparty_node_id,
@@ -5566,7 +5567,7 @@ impl<
 								if let Some(data) = completion_data {
 									mem::drop(peer_state_lock);
 									mem::drop(per_peer_state);
-									self.handle_post_monitor_update_chan_resume(data);
+									let _ = self.handle_post_monitor_update_chan_resume(data);
 								}
 								if !update_completed {
 									// Note that MonitorUpdateInProgress here indicates (per function
@@ -7084,7 +7085,7 @@ impl<
 			if let Some(monitor_update_result) = monitor_update_result {
 				match monitor_update_result {
 					Ok(post_update_data) => {
-						self.handle_post_monitor_update_chan_resume(post_update_data);
+						let _ = self.handle_post_monitor_update_chan_resume(post_update_data);
 					},
 					Err(_) => {
 						let _ = self.handle_error(monitor_update_result, *counterparty_node_id);
@@ -8791,7 +8792,7 @@ impl<
 					// already been persisted to the monitor and can be applied to our internal
 					// state such that the channel resumes operation if no new updates have been
 					// made since.
-					self.channel_monitor_updated(
+					let _ = self.channel_monitor_updated(
 						&channel_id,
 						Some(highest_update_id_completed),
 						&counterparty_node_id,
@@ -9907,7 +9908,7 @@ impl<
 							) {
 								mem::drop(peer_state_lock);
 								mem::drop(per_peer_state);
-								self.handle_post_monitor_update_chan_resume(data);
+								let _ = self.handle_post_monitor_update_chan_resume(data);
 							}
 						},
 						UpdateFulfillCommitFetch::DuplicateClaim {} => {
@@ -10280,6 +10281,9 @@ This indicates a bug inside LDK. Please report this error at https://github.com/
 
 	/// Handles actions which need to complete after a [`ChannelMonitorUpdate`] has been applied
 	/// which can happen after the per-peer state lock has been dropped.
+	///
+	/// Returns whether the completed work mutated `ChannelManager` state in a way that should be
+	/// persisted before returning control to the caller.
 	fn post_monitor_update_unlock(
 		&self, channel_id: ChannelId, counterparty_node_id: PublicKey, funding_txo: OutPoint,
 		user_channel_id: u128, unbroadcasted_batch_funding_txid: Option<Txid>,
@@ -10287,10 +10291,13 @@ This indicates a bug inside LDK. Please report this error at https://github.com/
 		finalized_claimed_htlcs: Vec<(HTLCSource, Option<AttributionData>)>,
 		failed_htlcs: Vec<(HTLCSource, PaymentHash, HTLCFailReason)>,
 		committed_outbound_htlc_sources: Vec<(HTLCPreviousHopData, u64)>,
-	) {
+	) -> bool {
+		let mut needs_persist = false;
+
 		// If the channel belongs to a batch funding transaction, the progress of the batch
 		// should be updated as we have received funding_signed and persisted the monitor.
 		if let Some(txid) = unbroadcasted_batch_funding_txid {
+			needs_persist = true;
 			let mut funding_batch_states = self.funding_batch_states.lock().unwrap();
 			let mut batch_completed = false;
 			if let Some(batch_state) = funding_batch_states.get_mut(&txid) {
@@ -10341,6 +10348,14 @@ This indicates a bug inside LDK. Please report this error at https://github.com/
 			}
 		}
 
+		if !update_actions.is_empty()
+			|| !htlc_forwards.is_empty()
+			|| !finalized_claimed_htlcs.is_empty()
+			|| !failed_htlcs.is_empty()
+			|| !committed_outbound_htlc_sources.is_empty()
+		{
+			needs_persist = true;
+		}
 		self.handle_monitor_update_completion_actions(update_actions);
 
 		self.forward_htlcs(htlc_forwards);
@@ -10362,6 +10377,8 @@ This indicates a bug inside LDK. Please report this error at https://github.com/
 			user_channel_id,
 			committed_outbound_htlc_sources,
 		);
+
+		needs_persist
 	}
 
 	fn handle_monitor_update_completion_actions<
@@ -10750,7 +10767,13 @@ This indicates a bug inside LDK. Please report this error at https://github.com/
 	///
 	/// If the channel has no more blocked monitor updates, this resumes normal operation by
 	/// calling [`Self::handle_channel_resumption`] and returns the remaining work to process
-	/// after locks are released. If blocked updates remain, only the update actions are returned.
+	/// after locks are released. If blocked updates remain, only the update actions are returned
+	/// and the caller should persist if any are present.
+	///
+	/// This method only prepares the post-monitor-update work while locks are held. Any
+	/// persistence decision for the unblocked case is deferred until
+	/// [`Self::handle_post_monitor_update_chan_resume`] executes the returned work after locks are
+	/// released.
 	///
 	/// Note: This method takes individual fields from [`PeerState`] rather than the whole struct
 	/// to avoid borrow checker issues when the channel is borrowed from `peer_state.channel_by_id`.
@@ -10812,6 +10835,13 @@ This indicates a bug inside LDK. Please report this error at https://github.com/
 				None
 			};
 
+			// Checked before handle_channel_resumption moves these fields to capture
+			// ChannelManager mutations performed while the peer lock is still held.
+			let has_state_changes = updates.funding_broadcastable.is_some()
+				|| updates.channel_ready.is_some()
+				|| updates.announcement_sigs.is_some()
+				|| !updates.pending_update_adds.is_empty();
+
 			let (htlc_forwards, decode_update_add_htlcs) = self.handle_channel_resumption(
 				pending_msg_events,
 				chan,
@@ -10839,6 +10869,7 @@ This indicates a bug inside LDK. Please report this error at https://github.com/
 				chan.context.unbroadcasted_batch_funding_txid(&chan.funding);
 
 			PostMonitorUpdateChanResume::Unblocked {
+				has_state_changes,
 				channel_id: chan_id,
 				counterparty_node_id,
 				funding_txo: chan.funding_outpoint(),
@@ -10928,7 +10959,12 @@ This indicates a bug inside LDK. Please report this error at https://github.com/
 	/// Processes the [`PostMonitorUpdateChanResume`] returned by
 	/// [`Self::try_resume_channel_post_monitor_update`], handling update actions and any
 	/// remaining work that requires locks to be released (e.g., forwarding HTLCs, failing HTLCs).
-	fn handle_post_monitor_update_chan_resume(&self, data: PostMonitorUpdateChanResume) {
+	///
+	/// Returns whether the completed work mutated `ChannelManager` state in a way that should be
+	/// persisted before returning control to the caller. In other words, this method executes the
+	/// prepared post-monitor-update work and reports whether the caller should treat monitor
+	/// completion as requiring `ChannelManager` persistence.
+	fn handle_post_monitor_update_chan_resume(&self, data: PostMonitorUpdateChanResume) -> bool {
 		debug_assert_ne!(self.per_peer_state.held_by_thread(), LockHeldState::HeldByThread);
 		#[cfg(debug_assertions)]
 		for (_, peer) in self.per_peer_state.read().unwrap().iter() {
@@ -10937,9 +10973,12 @@ This indicates a bug inside LDK. Please report this error at https://github.com/
 
 		match data {
 			PostMonitorUpdateChanResume::Blocked { update_actions } => {
+				let needs_persist = !update_actions.is_empty();
 				self.handle_monitor_update_completion_actions(update_actions);
+				needs_persist
 			},
 			PostMonitorUpdateChanResume::Unblocked {
+				has_state_changes,
 				channel_id,
 				counterparty_node_id,
 				funding_txo,
@@ -10951,7 +10990,7 @@ This indicates a bug inside LDK. Please report this error at https://github.com/
 				failed_htlcs,
 				committed_outbound_htlc_sources,
 			} => {
-				self.post_monitor_update_unlock(
+				let post_unlock_persist = self.post_monitor_update_unlock(
 					channel_id,
 					counterparty_node_id,
 					funding_txo,
@@ -10963,6 +11002,7 @@ This indicates a bug inside LDK. Please report this error at https://github.com/
 					failed_htlcs,
 					committed_outbound_htlc_sources,
 				);
+				has_state_changes || post_unlock_persist
 			},
 		}
 	}
@@ -11160,13 +11200,13 @@ This indicates a bug inside LDK. Please report this error at https://github.com/
 	}
 
 	#[rustfmt::skip]
-	fn channel_monitor_updated(&self, channel_id: &ChannelId, highest_applied_update_id: Option<u64>, counterparty_node_id: &PublicKey) {
+	fn channel_monitor_updated(&self, channel_id: &ChannelId, highest_applied_update_id: Option<u64>, counterparty_node_id: &PublicKey) -> bool {
 		debug_assert!(self.total_consistency_lock.try_write().is_err()); // Caller holds read lock
 
 		let per_peer_state = self.per_peer_state.read().unwrap();
 		let mut peer_state_lock;
 		let peer_state_mutex_opt = per_peer_state.get(counterparty_node_id);
-		if peer_state_mutex_opt.is_none() { return }
+		if peer_state_mutex_opt.is_none() { return false; }
 		peer_state_lock = peer_state_mutex_opt.unwrap().lock().unwrap();
 		let peer_state = &mut *peer_state_lock;
 
@@ -11198,7 +11238,7 @@ This indicates a bug inside LDK. Please report this error at https://github.com/
 			} else { 0 };
 
 		if remaining_in_flight != 0 {
-			return;
+			return false;
 		}
 
 		if let Some(chan) = peer_state.channel_by_id
@@ -11219,10 +11259,12 @@ This indicates a bug inside LDK. Please report this error at https://github.com/
 				mem::drop(peer_state_lock);
 				mem::drop(per_peer_state);
 
-				self.handle_post_monitor_update_chan_resume(completion_data);
+				let needs_persist = self.handle_post_monitor_update_chan_resume(completion_data);
 				self.handle_holding_cell_free_result(holding_cell_res);
+				needs_persist
 			} else {
 				log_trace!(logger, "Channel is open but not awaiting update");
+				false
 			}
 		} else {
 			let update_actions = peer_state.monitor_update_blocked_actions
@@ -11230,7 +11272,12 @@ This indicates a bug inside LDK. Please report this error at https://github.com/
 			log_trace!(logger, "Channel is closed, applying {} post-update actions", update_actions.len());
 			mem::drop(peer_state_lock);
 			mem::drop(per_peer_state);
-			self.handle_monitor_update_completion_actions(update_actions);
+			if !update_actions.is_empty() {
+				self.handle_monitor_update_completion_actions(update_actions);
+				true
+			} else {
+				false
+			}
 		}
 	}
 
@@ -11791,7 +11838,7 @@ This indicates a bug inside LDK. Please report this error at https://github.com/
 						) {
 							mem::drop(peer_state_lock);
 							mem::drop(per_peer_state);
-							self.handle_post_monitor_update_chan_resume(data);
+							let _ = self.handle_post_monitor_update_chan_resume(data);
 						}
 					} else {
 						unreachable!("This must be a funded channel as we just inserted it.");
@@ -11961,7 +12008,7 @@ This indicates a bug inside LDK. Please report this error at https://github.com/
 						) {
 							mem::drop(peer_state_lock);
 							mem::drop(per_peer_state);
-							self.handle_post_monitor_update_chan_resume(data);
+							let _ = self.handle_post_monitor_update_chan_resume(data);
 						}
 						Ok(())
 					},
@@ -12521,7 +12568,7 @@ This indicates a bug inside LDK. Please report this error at https://github.com/
 							) {
 								mem::drop(peer_state_lock);
 								mem::drop(per_peer_state);
-								self.handle_post_monitor_update_chan_resume(data);
+								let _ = self.handle_post_monitor_update_chan_resume(data);
 							}
 						}
 					},
@@ -12857,7 +12904,7 @@ This indicates a bug inside LDK. Please report this error at https://github.com/
 							) {
 								mem::drop(peer_state_lock);
 								mem::drop(per_peer_state);
-								self.handle_post_monitor_update_chan_resume(data);
+								let _ = self.handle_post_monitor_update_chan_resume(data);
 							}
 						} else {
 							let logger =
@@ -12880,7 +12927,7 @@ This indicates a bug inside LDK. Please report this error at https://github.com/
 						) {
 							mem::drop(peer_state_lock);
 							mem::drop(per_peer_state);
-							self.handle_post_monitor_update_chan_resume(data);
+							let _ = self.handle_post_monitor_update_chan_resume(data);
 						}
 					}
 				}
@@ -12923,7 +12970,7 @@ This indicates a bug inside LDK. Please report this error at https://github.com/
 						) {
 							mem::drop(peer_state_lock);
 							mem::drop(per_peer_state);
-							self.handle_post_monitor_update_chan_resume(data);
+							let _ = self.handle_post_monitor_update_chan_resume(data);
 						}
 					}
 				}
@@ -13042,7 +13089,7 @@ This indicates a bug inside LDK. Please report this error at https://github.com/
 							) {
 								mem::drop(peer_state_lock);
 								mem::drop(per_peer_state);
-								self.handle_post_monitor_update_chan_resume(data);
+								let _ = self.handle_post_monitor_update_chan_resume(data);
 							}
 						}
 						(htlcs_to_fail, static_invoices)
@@ -13643,7 +13690,7 @@ This indicates a bug inside LDK. Please report this error at https://github.com/
 							) {
 								mem::drop(peer_state_lock);
 								mem::drop(per_peer_state);
-								self.handle_post_monitor_update_chan_resume(data);
+								let _ = self.handle_post_monitor_update_chan_resume(data);
 							}
 						}
 					}
@@ -13669,12 +13716,14 @@ This indicates a bug inside LDK. Please report this error at https://github.com/
 		if pending_monitor_events.is_empty() {
 			return NotifyOption::SkipPersistNoEvents;
 		}
+		let mut needs_persist = false;
 		for (funding_outpoint, channel_id, mut monitor_events, counterparty_node_id) in
 			pending_monitor_events.drain(..)
 		{
 			for monitor_event in monitor_events.drain(..) {
 				match monitor_event {
 					MonitorEvent::HTLCEvent(htlc_update) => {
+						needs_persist = true;
 						let logger = WithContext::from(
 							&self.logger,
 							Some(counterparty_node_id),
@@ -13725,6 +13774,7 @@ This indicates a bug inside LDK. Please report this error at https://github.com/
 					},
 					MonitorEvent::HolderForceClosed(_)
 					| MonitorEvent::HolderForceClosedWithInfo { .. } => {
+						needs_persist = true;
 						let per_peer_state = self.per_peer_state.read().unwrap();
 						if let Some(peer_state_mutex) = per_peer_state.get(&counterparty_node_id) {
 							let mut peer_state_lock = peer_state_mutex.lock().unwrap();
@@ -13757,6 +13807,7 @@ This indicates a bug inside LDK. Please report this error at https://github.com/
 						}
 					},
 					MonitorEvent::CommitmentTxConfirmed(_) => {
+						needs_persist = true;
 						let per_peer_state = self.per_peer_state.read().unwrap();
 						if let Some(peer_state_mutex) = per_peer_state.get(&counterparty_node_id) {
 							let mut peer_state_lock = peer_state_mutex.lock().unwrap();
@@ -13778,7 +13829,7 @@ This indicates a bug inside LDK. Please report this error at https://github.com/
 						}
 					},
 					MonitorEvent::Completed { channel_id, monitor_update_id, .. } => {
-						self.channel_monitor_updated(
+						needs_persist |= self.channel_monitor_updated(
 							&channel_id,
 							Some(monitor_update_id),
 							&counterparty_node_id,
@@ -13792,7 +13843,11 @@ This indicates a bug inside LDK. Please report this error at https://github.com/
 			let _ = self.handle_error(err, counterparty_node_id);
 		}
 
-		NotifyOption::DoPersist
+		if needs_persist {
+			NotifyOption::DoPersist
+		} else {
+			NotifyOption::SkipPersistHandleEvents
+		}
 	}
 
 	fn handle_holding_cell_free_result(&self, result: FreeHoldingCellsResult) {
@@ -13802,7 +13857,7 @@ This indicates a bug inside LDK. Please report this error at https://github.com/
 		);
 		for (chan_id, cp_node_id, post_update_data, failed_htlcs) in result {
 			if let Some(data) = post_update_data {
-				self.handle_post_monitor_update_chan_resume(data);
+				let _ = self.handle_post_monitor_update_chan_resume(data);
 			}
 
 			self.fail_holding_cell_htlcs(failed_htlcs, chan_id, &cp_node_id);
@@ -15378,7 +15433,7 @@ impl<
 							mem::drop(per_peer_state);
 
 							if let Some(data) = post_update_data {
-								self.handle_post_monitor_update_chan_resume(data);
+								let _ = self.handle_post_monitor_update_chan_resume(data);
 							}
 
 							self.handle_holding_cell_free_result(holding_cell_res);
@@ -16320,7 +16375,7 @@ impl<
 		}
 
 		for (counterparty_node_id, channel_id) in to_process_monitor_update_actions {
-			self.channel_monitor_updated(&channel_id, None, &counterparty_node_id);
+			let _ = self.channel_monitor_updated(&channel_id, None, &counterparty_node_id);
 		}
 
 		if let Some(height) = height_opt {
