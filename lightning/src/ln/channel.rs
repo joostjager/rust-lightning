@@ -2900,7 +2900,7 @@ struct PendingFunding {
 	received_funding_txid: Option<Txid>,
 
 	/// The feerate used in the last successfully negotiated funding transaction.
-	/// Used for validating the 25/24 feerate increase rule on RBF attempts.
+	/// Used for validating the minimum feerate increase rule on RBF attempts.
 	last_funding_feerate_sat_per_1000_weight: Option<u32>,
 
 	/// The funding contributions from splice/RBF rounds where we contributed.
@@ -6769,16 +6769,15 @@ fn get_v2_channel_reserve_satoshis(
 	cmp::min(channel_value_satoshis, cmp::max(q, dust_limit_satoshis))
 }
 
-/// Returns the minimum feerate for our own RBF attempts given a previous feerate.
+/// Returns the minimum feerate for RBF attempts given a previous feerate.
 ///
-/// The spec (tx_init_rbf) requires the new feerate to be >= 25/24 of the previous feerate.
-/// However, at low feerates that multiplier doesn't always satisfy BIP125's relay requirement of
-/// an absolute fee increase, so we take the max of a flat +25 sat/kwu (0.1 sat/vB) increment
-/// and the spec's multiplicative rule. We still accept the bare 25/24 rule from counterparties
-/// in [`FundedChannel::validate_tx_init_rbf`].
+/// The spec (tx_init_rbf) requires the new feerate to be >= the maximum of 25/24 of the previous
+/// feerate and the previous feerate + 25 sat/kwu. The flat +25 sat/kwu increment ensures BIP125's
+/// relay requirement of an absolute fee increase is satisfied at low feerates where the
+/// multiplicative 25/24 rule alone would be insufficient.
 fn min_rbf_feerate(prev_feerate: u32) -> FeeRate {
 	let flat_increment = (prev_feerate as u64).saturating_add(25);
-	let spec_increment = ((prev_feerate as u64) * 25).div_ceil(24);
+	let spec_increment = (prev_feerate as u64) * 25 / 24;
 	FeeRate::from_sat_per_kwu(cmp::max(flat_increment, spec_increment))
 }
 
@@ -13045,17 +13044,17 @@ where
 			},
 		};
 
-		// Check the 25/24 feerate increase rule
 		let prev_feerate =
 			pending_splice.last_funding_feerate_sat_per_1000_weight.unwrap_or_else(|| {
 				fee_estimator.bounded_sat_per_1000_weight(ConfirmationTarget::UrgentOnChainSweep)
 			});
-		let new_feerate = msg.feerate_sat_per_1000_weight;
-		if (new_feerate as u64) * 24 < (prev_feerate as u64) * 25 {
+		let new_feerate = FeeRate::from_sat_per_kwu(msg.feerate_sat_per_1000_weight as u64);
+		if new_feerate < min_rbf_feerate(prev_feerate) {
 			return Err(ChannelError::Abort(AbortReason::InsufficientRbfFeerate));
 		}
 
-		if !pending_splice.is_rbf_feerate_sufficient(new_feerate, fee_estimator) {
+		if !pending_splice.is_rbf_feerate_sufficient(msg.feerate_sat_per_1000_weight, fee_estimator)
+		{
 			return Err(ChannelError::Abort(AbortReason::InsufficientRbfFeerate));
 		}
 

@@ -1069,9 +1069,9 @@ impl FundingContribution {
 
 	/// Adjusts the contribution's change output for the minimum RBF feerate.
 	///
-	/// When a pending splice exists with negotiated candidates and the contribution's feerate
-	/// is below the minimum RBF feerate (25/24 of the previous feerate), this adjusts the
-	/// change output so the initiator pays fees at the minimum RBF feerate.
+	/// When a pending splice exists with negotiated candidates and the contribution's feerate is
+	/// below the minimum RBF feerate, this adjusts the change output so the initiator pays fees
+	/// at the minimum RBF feerate.
 	pub(super) fn for_initiator_at_feerate(
 		self, feerate: FeeRate, holder_balance: Amount,
 	) -> Result<Self, FeeRateAdjustmentError> {
