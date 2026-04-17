@@ -578,10 +578,6 @@ impl_writeable_tlv_based!(FundingContribution, {
 });
 
 impl FundingContribution {
-	pub(super) fn feerate(&self) -> FeeRate {
-		self.feerate
-	}
-
 	pub(super) fn is_splice(&self) -> bool {
 		self.is_splice
 	}
@@ -610,6 +606,16 @@ impl FundingContribution {
 			.unwrap_or(Amount::ZERO)
 	}
 
+	/// Returns the estimated on-chain fee this contribution is responsible for paying.
+	pub fn estimated_fee(&self) -> Amount {
+		self.estimated_fee
+	}
+
+	/// Returns the inputs included in this contribution.
+	pub fn inputs(&self) -> &[FundingTxInput] {
+		&self.inputs
+	}
+
 	/// Returns the outputs (e.g., withdrawal destinations) included in this contribution.
 	///
 	/// This does not include the change output; see [`FundingContribution::change_output`].
@@ -623,6 +629,17 @@ impl FundingContribution {
 	/// the surplus is returned to the wallet via this change output.
 	pub fn change_output(&self) -> Option<&TxOut> {
 		self.change_output.as_ref()
+	}
+
+	/// Returns the fee rate used to select `inputs` (the minimum feerate).
+	pub fn feerate(&self) -> FeeRate {
+		self.feerate
+	}
+
+	/// Returns the maximum fee rate this contribution will accept as acceptor before rejecting
+	/// the splice.
+	pub fn max_feerate(&self) -> FeeRate {
+		self.max_feerate
 	}
 
 	/// Tries to satisfy a new request using only this contribution's existing inputs.
