@@ -28,7 +28,8 @@ use bitcoin::{secp256k1, sighash, FeeRate, Sequence, TxIn};
 
 use crate::blinded_path::message::BlindedMessagePath;
 use crate::chain::chaininterface::{
-	ConfirmationTarget, FeeEstimator, LowerBoundedFeeEstimator, TransactionType,
+	ChannelFunding, ConfirmationTarget, FeeEstimator, FundingCandidate, FundingPurpose,
+	LowerBoundedFeeEstimator, TransactionType,
 };
 use crate::chain::channelmonitor::{
 	ChannelMonitor, ChannelMonitorUpdate, ChannelMonitorUpdateStep, CommitmentHTLCData,
@@ -9382,10 +9383,34 @@ where
 					);
 				}
 
-				let tx_type = TransactionType::Splice {
-					counterparty_node_id: self.context.counterparty_node_id,
-					channel_id: self.context.channel_id,
-				};
+				let contrib_offset = pending_splice
+					.negotiated_candidates
+					.len()
+					.saturating_sub(pending_splice.contributions.len());
+				let candidates = pending_splice
+					.negotiated_candidates
+					.iter()
+					.enumerate()
+					.map(|(i, funding)| {
+						let txid = funding
+							.get_funding_txid()
+							.expect("negotiated candidates should have a funding txid");
+						let contribution = i
+							.checked_sub(contrib_offset)
+							.and_then(|j| pending_splice.contributions.get(j))
+							.cloned();
+						FundingCandidate {
+							txid,
+							channels: vec![ChannelFunding {
+								counterparty_node_id: self.context.counterparty_node_id,
+								channel_id: self.context.channel_id,
+								purpose: FundingPurpose::Splice,
+								contribution,
+							}],
+						}
+					})
+					.collect();
+				let tx_type = TransactionType::InteractiveFunding { candidates };
 				funding_tx_signed.funding_tx = Some((funding_tx, tx_type));
 				funding_tx_signed.splice_negotiated = Some(splice_negotiated);
 				funding_tx_signed.splice_locked = splice_locked;

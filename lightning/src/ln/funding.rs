@@ -539,7 +539,7 @@ enum FundingInputs {
 }
 
 /// The components of a funding transaction contributed by one party.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Hash, PartialEq, Eq)]
 pub struct FundingContribution {
 	/// The estimate fees responsible to be paid for the contribution.
 	estimated_fee: Amount,
