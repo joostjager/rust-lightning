@@ -1305,12 +1305,10 @@ mod tests {
 
 	use super::OnchainTxHandler;
 
-	// Test that all claims with locktime equal to or less than the current height are broadcast
-	// immediately while claims with locktime greater than the current height are only broadcast
-	// once the locktime is reached.
-	#[test]
-	#[rustfmt::skip]
-	fn test_broadcast_height() {
+	fn new_test_tx_handler(
+		channel_type_features: ChannelTypeFeatures, nondust_htlcs: Vec<HTLCOutputInCommitment>,
+	) -> OnchainTxHandler<InMemorySigner> {
+		// Keep the fixture deterministic so the test exercises only the claim-replay behavior.
 		let secp_ctx = Secp256k1::new();
 		let signer = InMemorySigner::new(
 			SecretKey::from_slice(&[41; 32]).unwrap(),
@@ -1347,9 +1345,6 @@ mod tests {
 			)),
 		};
 		let funding_outpoint = OutPoint { txid: Txid::all_zeros(), index: u16::MAX };
-
-		// Use non-anchor channels so that HTLC-Timeouts are broadcast immediately instead of sent
-		// to the user for external funding.
 		let chan_params = ChannelTransactionParameters {
 			holder_pubkeys: signer.pubkeys(&secp_ctx),
 			holder_selected_contest_delay: 66,
@@ -1360,10 +1355,71 @@ mod tests {
 			}),
 			funding_outpoint: Some(funding_outpoint),
 			splice_parent_funding_txid: None,
-			channel_type_features: ChannelTypeFeatures::only_static_remote_key(),
+			channel_type_features,
 			channel_value_satoshis: 0,
 		};
+		let holder_commit =
+			HolderCommitmentTransaction::dummy(1000000, funding_outpoint, nondust_htlcs);
+		let counterparty_node_id = PublicKey::from_slice(&[2; 33]).unwrap();
+		OnchainTxHandler::new(
+			ChannelId::from_bytes([0; 32]),
+			counterparty_node_id,
+			1000000,
+			[0; 32],
+			ScriptBuf::new(),
+			signer,
+			chan_params,
+			holder_commit,
+			secp_ctx,
+		)
+	}
 
+	fn build_offered_holder_htlc_requests(
+		tx_handler: &OnchainTxHandler<InMemorySigner>,
+	) -> Vec<PackageTemplate> {
+		let holder_commit = tx_handler.current_holder_commitment_tx();
+		let holder_commit_txid = holder_commit.trust().txid();
+		let mut requests = Vec::new();
+		for (htlc, counterparty_sig) in
+			holder_commit.nondust_htlcs().iter().zip(holder_commit.counterparty_htlc_sigs.iter())
+		{
+			// Force-close starts with one single-outpoint request per HTLC output. The duplicate
+			// replay bug happens later when `OnchainTxHandler` reprocesses the same per-outpoint
+			// requests while an aggregated delayed package is still parked in `locktimed_packages`.
+			requests.push(PackageTemplate::build_package(
+				holder_commit_txid,
+				htlc.transaction_output_index.unwrap(),
+				PackageSolvingData::HolderHTLCOutput(HolderHTLCOutput::build(
+					HTLCDescriptor {
+						channel_derivation_parameters: ChannelDerivationParameters {
+							value_satoshis: tx_handler.channel_value_satoshis,
+							keys_id: tx_handler.channel_keys_id,
+							transaction_parameters: tx_handler
+								.channel_transaction_parameters
+								.clone(),
+						},
+						commitment_txid: holder_commit_txid,
+						per_commitment_number: holder_commit.commitment_number(),
+						per_commitment_point: holder_commit.per_commitment_point(),
+						feerate_per_kw: holder_commit.negotiated_feerate_per_kw(),
+						htlc: htlc.clone(),
+						preimage: None,
+						counterparty_sig: *counterparty_sig,
+					},
+					0,
+				)),
+				0,
+			));
+		}
+		requests
+	}
+
+	// Test that all claims with locktime equal to or less than the current height are broadcast
+	// immediately while claims with locktime greater than the current height are only broadcast
+	// once the locktime is reached.
+	#[test]
+	#[rustfmt::skip]
+	fn test_broadcast_height() {
 		// Create an OnchainTxHandler for a commitment containing HTLCs with CLTV expiries of 0, 1,
 		// and 2 blocks.
 		let mut nondust_htlcs = Vec::new();
@@ -1380,19 +1436,10 @@ mod tests {
 				}
 			);
 		}
-		let holder_commit = HolderCommitmentTransaction::dummy(1000000, funding_outpoint, nondust_htlcs);
 		let destination_script = ScriptBuf::new();
-		let counterparty_node_id = PublicKey::from_slice(&[2; 33]).unwrap();
-		let mut tx_handler = OnchainTxHandler::new(
-			ChannelId::from_bytes([0; 32]),
-			counterparty_node_id,
-			1000000,
-			[0; 32],
-			destination_script.clone(),
-			signer,
-			chan_params,
-			holder_commit,
-			secp_ctx,
+		let mut tx_handler = new_test_tx_handler(
+			ChannelTypeFeatures::only_static_remote_key(),
+			nondust_htlcs,
 		);
 
 		// Create a broadcaster with current block height 1.
@@ -1408,32 +1455,7 @@ mod tests {
 		let logger = TestLogger::new();
 
 		// Request claiming of each HTLC on the holder's commitment, with current block height 1.
-		let holder_commit = tx_handler.current_holder_commitment_tx();
-		let holder_commit_txid = holder_commit.trust().txid();
-		let mut requests = Vec::new();
-		for (htlc, counterparty_sig) in holder_commit.nondust_htlcs().iter().zip(holder_commit.counterparty_htlc_sigs.iter()) {
-			requests.push(PackageTemplate::build_package(
-				holder_commit_txid,
-				htlc.transaction_output_index.unwrap(),
-				PackageSolvingData::HolderHTLCOutput(HolderHTLCOutput::build(HTLCDescriptor {
-						channel_derivation_parameters: ChannelDerivationParameters {
-							value_satoshis: tx_handler.channel_value_satoshis,
-							keys_id: tx_handler.channel_keys_id,
-							transaction_parameters: tx_handler.channel_transaction_parameters.clone(),
-						},
-						commitment_txid: holder_commit_txid,
-						per_commitment_number: holder_commit.commitment_number(),
-						per_commitment_point: holder_commit.per_commitment_point(),
-						feerate_per_kw: holder_commit.negotiated_feerate_per_kw(),
-						htlc: htlc.clone(),
-						preimage: None,
-						counterparty_sig: *counterparty_sig,
-					},
-					0
-				)),
-				0,
-			));
-		}
+		let requests = build_offered_holder_htlc_requests(&tx_handler);
 		tx_handler.update_claims_view_from_requests(
 			requests,
 			1,
@@ -1473,5 +1495,104 @@ mod tests {
 		let txs_broadcasted = broadcaster.txn_broadcast();
 		assert_eq!(txs_broadcasted.len(), 1);
 		assert_eq!(txs_broadcasted[0].lock_time.to_consensus_u32(), 2);
+	}
+
+	#[test]
+	#[rustfmt::skip]
+	fn test_duplicate_pending_claim_request_after_force_close_replay() {
+		let claim_height = 21;
+		let locktime = 42;
+		let mut nondust_htlcs = Vec::new();
+		for i in 0..2 {
+			let preimage = PaymentPreimage([i + 1; 32]);
+			let hash = PaymentHash(Sha256::hash(&preimage.0[..]).to_byte_array());
+			nondust_htlcs.push(HTLCOutputInCommitment {
+				offered: true,
+				amount_msat: 10000,
+				cltv_expiry: locktime,
+				payment_hash: hash,
+				transaction_output_index: Some(i as u32),
+			});
+		}
+
+		let mut tx_handler = new_test_tx_handler(
+			ChannelTypeFeatures::anchors_zero_htlc_fee_and_dependencies(),
+			nondust_htlcs,
+		);
+		let requests = build_offered_holder_htlc_requests(&tx_handler);
+		let destination_script = ScriptBuf::new();
+		let broadcaster = TestBroadcaster::new(Network::Testnet);
+		let fee_estimator = TestFeeEstimator::new(253);
+		let fee_estimator = LowerBoundedFeeEstimator::new(&fee_estimator);
+		let logger = TestLogger::new();
+
+		// The first force-close pass sees two single-outpoint HTLC claims with the same future
+		// locktime. Those requests should be merged into one delayed package and held until the
+		// CLTV height is reached.
+		tx_handler.update_claims_view_from_requests(
+			requests.clone(),
+			claim_height,
+			claim_height,
+			&&broadcaster,
+			ConfirmationTarget::UrgentOnChainSweep,
+			&destination_script,
+			&fee_estimator,
+			&logger,
+		);
+		assert_eq!(
+			tx_handler.locktimed_packages.get(&locktime).map(|packages| packages.len()),
+			Some(1),
+		);
+
+		// In reality this replay can happen because `ChannelMonitor` rebuilds claim requests from
+		// the same force-closed state more than once before the HTLC timeout matures. Another
+		// monitor update, block connection, or other state replay can call
+		// `update_claims_view_from_requests` again while the original delayed package is still only
+		// stored in `locktimed_packages`. At that point nothing has been registered in
+		// `claimable_outpoints` yet, so the replay still arrives as the same two fresh
+		// single-outpoint requests.
+		//
+		// The correct behavior is to recognize that the existing delayed package already covers both
+		// outpoints and to ignore this replay. The buggy behavior is to aggregate these two requests
+		// a second time, producing another identical delayed package with the same eventual
+		// `ClaimId`.
+		tx_handler.update_claims_view_from_requests(
+			requests,
+			claim_height,
+			claim_height,
+			&&broadcaster,
+			ConfirmationTarget::UrgentOnChainSweep,
+			&destination_script,
+			&fee_estimator,
+			&logger,
+		);
+
+		// Once the timelock matures, only one aggregated delayed package should be restored. The
+		// buggy code restores two identical packages and then panics when the second one tries to
+		// register the already-used `ClaimId`.
+		tx_handler.update_claims_view_from_requests(
+			Vec::new(),
+			locktime,
+			locktime,
+			&&broadcaster,
+			ConfirmationTarget::UrgentOnChainSweep,
+			&destination_script,
+			&fee_estimator,
+			&logger,
+		);
+
+		// After the fix we expect a single pending external claim event and one tracked claim
+		// request covering both HTLC outpoints.
+		let pending_events = tx_handler.get_and_clear_pending_claim_events();
+		assert_eq!(pending_events.len(), 1);
+		assert_eq!(tx_handler.pending_claim_requests.len(), 1);
+		assert_eq!(tx_handler.claimable_outpoints.len(), 2);
+		match &pending_events[0].1 {
+			super::ClaimEvent::BumpHTLC { htlcs, tx_lock_time, .. } => {
+				assert_eq!(htlcs.len(), 2);
+				assert_eq!(tx_lock_time.to_consensus_u32(), locktime);
+			},
+			_ => panic!("expected a single HTLC bump event"),
+		}
 	}
 }
