@@ -67,7 +67,7 @@ pub fn hkdf_extract_expand_7x(
 #[inline]
 pub fn sign<C: Signing>(ctx: &Secp256k1<C>, msg: &Message, sk: &SecretKey) -> Signature {
 	#[cfg(feature = "grind_signatures")]
-	let sig = ctx.sign_ecdsa_low_r(msg, sk);
+	let sig = if cfg!(fuzzing) { ctx.sign_ecdsa(msg, sk) } else { ctx.sign_ecdsa_low_r(msg, sk) };
 	#[cfg(not(feature = "grind_signatures"))]
 	let sig = ctx.sign_ecdsa(msg, sk);
 	sig
@@ -79,10 +79,16 @@ pub fn sign_with_aux_rand<C: Signing, ES: EntropySource>(
 	ctx: &Secp256k1<C>, msg: &Message, sk: &SecretKey, entropy_source: &ES,
 ) -> Signature {
 	#[cfg(feature = "grind_signatures")]
-	let sig = loop {
-		let sig = ctx.sign_ecdsa_with_noncedata(msg, sk, &entropy_source.get_secure_random_bytes());
-		if sig.serialize_compact()[0] < 0x80 {
-			break sig;
+	let sig = {
+		if cfg!(fuzzing) {
+			return sign(ctx, msg, sk);
+		}
+		loop {
+			let sig =
+				ctx.sign_ecdsa_with_noncedata(msg, sk, &entropy_source.get_secure_random_bytes());
+			if sig.serialize_compact()[0] < 0x80 {
+				break sig;
+			}
 		}
 	};
 	#[cfg(all(not(feature = "grind_signatures"), not(ldk_test_vectors)))]

@@ -480,11 +480,15 @@ impl<B: BroadcasterInterface, C: CoinSelectionSource, SP: SignerProvider, L: Log
 			#[cfg(debug_assertions)]
 			{
 				let signed_tx_weight = anchor_tx.weight().to_wu();
-				let expected_signed_tx_weight =
-					unsigned_tx_weight + 2 /* wit marker */ + total_satisfaction_weight;
 				// Our estimate should be within a 1% error margin of the actual weight and we should
 				// never underestimate.
+				#[cfg(not(fuzzing))]
+				let expected_signed_tx_weight = unsigned_tx_weight + 2 /* wit marker */ + total_satisfaction_weight;
+				#[cfg(not(fuzzing))]
 				assert!(expected_signed_tx_weight >= signed_tx_weight);
+				// When fuzzing, signatures are trivially small so the actual weight can be
+				// significantly less than estimated. Skip the lower-bound check.
+				#[cfg(not(fuzzing))]
 				assert!(expected_signed_tx_weight * 99 / 100 <= signed_tx_weight);
 
 				let expected_package_fee = Amount::from_sat(fee_for_weight(
@@ -629,10 +633,10 @@ impl<B: BroadcasterInterface, C: CoinSelectionSource, SP: SignerProvider, L: Log
 				target_feerate_sat_per_1000_weight
 			);
 
-			#[cfg(debug_assertions)]
+			#[cfg(all(debug_assertions, not(fuzzing)))]
 			let must_spend_satisfaction_weight =
 				must_spend.iter().map(|input| input.satisfaction_weight).sum::<u64>();
-			#[cfg(debug_assertions)]
+			#[cfg(all(debug_assertions, not(fuzzing)))]
 			let must_spend_amount =
 				must_spend.iter().map(|input| input.previous_utxo.value.to_sat()).sum::<u64>();
 
@@ -663,13 +667,13 @@ impl<B: BroadcasterInterface, C: CoinSelectionSource, SP: SignerProvider, L: Log
 			batch_size = htlc_descriptors.len() - broadcasted_htlcs;
 			utxo_id = claim_id.step_with_bytes(&broadcasted_htlcs.to_be_bytes());
 
-			#[cfg(debug_assertions)]
+			#[cfg(all(debug_assertions, not(fuzzing)))]
 			let input_satisfaction_weight = coin_selection.satisfaction_weight();
-			#[cfg(debug_assertions)]
+			#[cfg(all(debug_assertions, not(fuzzing)))]
 			let total_satisfaction_weight = must_spend_satisfaction_weight + input_satisfaction_weight;
-			#[cfg(debug_assertions)]
+			#[cfg(all(debug_assertions, not(fuzzing)))]
 			let input_value = coin_selection.input_amount().to_sat();
-			#[cfg(debug_assertions)]
+			#[cfg(all(debug_assertions, not(fuzzing)))]
 			let total_input_amount = must_spend_amount + input_value;
 
 			self.process_coin_selection(&mut htlc_tx, &coin_selection);
@@ -698,7 +702,7 @@ impl<B: BroadcasterInterface, C: CoinSelectionSource, SP: SignerProvider, L: Log
 				}
 			}
 
-			#[cfg(debug_assertions)]
+			#[cfg(all(debug_assertions, not(fuzzing)))]
 			let unsigned_tx_weight = htlc_psbt.unsigned_tx.weight().to_wu()
 				- (htlc_psbt.unsigned_tx.input.len() as u64 * EMPTY_SCRIPT_SIG_WEIGHT);
 
@@ -726,13 +730,15 @@ impl<B: BroadcasterInterface, C: CoinSelectionSource, SP: SignerProvider, L: Log
 					htlc_descriptor.tx_input_witness(&htlc_sig, &witness_script);
 			}
 
-			#[cfg(debug_assertions)]
+			#[cfg(all(debug_assertions, not(fuzzing)))]
 			{
 				let signed_tx_weight = htlc_tx.weight().to_wu();
-				let expected_signed_tx_weight = unsigned_tx_weight + total_satisfaction_weight;
 				// Our estimate should be within a 2% error margin of the actual weight and we should
 				// never underestimate.
+				let expected_signed_tx_weight = unsigned_tx_weight + total_satisfaction_weight;
 				assert!(expected_signed_tx_weight >= signed_tx_weight);
+				// When fuzzing, signatures are trivially small so the actual weight can be
+				// significantly less than estimated. Skip the lower-bound check.
 				assert!(expected_signed_tx_weight * 98 / 100 <= signed_tx_weight);
 
 				let expected_signed_tx_fee =

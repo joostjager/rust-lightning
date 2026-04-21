@@ -75,6 +75,8 @@ pub mod tx_builder;
 
 pub(crate) const COMPRESSED_PUBLIC_KEY_SIZE: usize = bitcoin::secp256k1::constants::PUBLIC_KEY_SIZE;
 
+// Standard low-S ECDSA signatures fit in the secp256k1 DER bound; the appended sighash byte
+// replaces the extra DER padding byte that a high-S signature could require.
 pub(crate) const MAX_STANDARD_SIGNATURE_SIZE: usize =
 	bitcoin::secp256k1::constants::MAX_SIGNATURE_SIZE;
 
