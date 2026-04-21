@@ -273,6 +273,11 @@ pub struct OnchainTxHandler<ChannelSigner: EcdsaChannelSigner> {
 	#[cfg(not(any(test, feature = "_test_utils")))]
 	claimable_outpoints: HashMap<BitcoinOutPoint, (ClaimId, u32)>,
 
+	// Tracks outpoints whose claim tx has already reached [`ANTI_REORG_DELAY`] confirmations.
+	// Later claim requests for these outputs must be ignored, even if they arrive from newly
+	// learned preimages after the original claim tracking has been cleaned up.
+	irrevocably_spent_outpoints: HashSet<BitcoinOutPoint>,
+
 	#[cfg(any(test, feature = "_test_utils"))]
 	pub(crate) locktimed_packages: BTreeMap<u32, Vec<PackageTemplate>>,
 	#[cfg(not(any(test, feature = "_test_utils")))]
@@ -297,6 +302,7 @@ impl<ChannelSigner: EcdsaChannelSigner> PartialEq for OnchainTxHandler<ChannelSi
 			self.channel_transaction_parameters == other.channel_transaction_parameters &&
 			self.pending_claim_requests == other.pending_claim_requests &&
 			self.claimable_outpoints == other.claimable_outpoints &&
+			self.irrevocably_spent_outpoints == other.irrevocably_spent_outpoints &&
 			self.locktimed_packages == other.locktimed_packages &&
 			self.onchain_events_awaiting_threshold_conf == other.onchain_events_awaiting_threshold_conf
 	}
@@ -349,7 +355,10 @@ impl<ChannelSigner: EcdsaChannelSigner> OnchainTxHandler<ChannelSigner> {
 			entry.write(writer)?;
 		}
 
-		write_tlv_fields!(writer, {});
+		let irrevocably_spent_outpoints = Some(self.irrevocably_spent_outpoints.clone());
+		write_tlv_fields!(writer, {
+			(0, irrevocably_spent_outpoints, option),
+		});
 		Ok(())
 	}
 
@@ -441,7 +450,10 @@ impl<'a, 'b, ES: EntropySource, SP: SignerProvider> ReadableArgs<(&'a ES, &'b SP
 			}
 		}
 
-		read_tlv_fields!(reader, {});
+		let mut irrevocably_spent_outpoints = None;
+		read_tlv_fields!(reader, {
+			(0, irrevocably_spent_outpoints, option),
+		});
 
 		// `ChannelMonitor`s already track the `channel_id` and `counterparty_node_id`, however, due
 		// to the deserialization order there we can't make use of `ReadableArgs` to hand them in
@@ -465,6 +477,7 @@ impl<'a, 'b, ES: EntropySource, SP: SignerProvider> ReadableArgs<(&'a ES, &'b SP
 			signer,
 			channel_transaction_parameters: channel_parameters,
 			claimable_outpoints,
+			irrevocably_spent_outpoints: irrevocably_spent_outpoints.unwrap_or_else(new_hash_set),
 			locktimed_packages,
 			pending_claim_requests,
 			onchain_events_awaiting_threshold_conf,
@@ -493,6 +506,7 @@ impl<ChannelSigner: EcdsaChannelSigner> OnchainTxHandler<ChannelSigner> {
 			channel_transaction_parameters: channel_parameters,
 			pending_claim_requests: new_hash_map(),
 			claimable_outpoints: new_hash_map(),
+			irrevocably_spent_outpoints: new_hash_set(),
 			locktimed_packages: BTreeMap::new(),
 			onchain_events_awaiting_threshold_conf: Vec::new(),
 			pending_claim_events: Vec::new(),
@@ -806,6 +820,14 @@ impl<ChannelSigner: EcdsaChannelSigner> OnchainTxHandler<ChannelSigner> {
 				1,
 				"Claims passed to `update_claims_view_from_requests` should not be aggregated"
 			);
+			if req.outpoints()
+				.iter()
+				.any(|outpoint| self.irrevocably_spent_outpoints.contains(*outpoint))
+			{
+				log_info!(logger, "Ignoring claim for outpoint {}:{}, it was already irrevocably spent by a confirmed claim transaction",
+					req.outpoints()[0].txid, req.outpoints()[0].vout);
+				false
+			} else {
 			let mut all_outpoints_claiming = true;
 			for outpoint in req.outpoints() {
 				if self.claimable_outpoints.get(outpoint).is_none() {
@@ -817,15 +839,23 @@ impl<ChannelSigner: EcdsaChannelSigner> OnchainTxHandler<ChannelSigner> {
 					req.outpoints()[0].txid, req.outpoints()[0].vout);
 				false
 			} else {
-				let timelocked_equivalent_package = self.locktimed_packages.iter().map(|v| v.1.iter()).flatten()
-					.find(|locked_package| locked_package.outpoints() == req.outpoints());
-				if let Some(package) = timelocked_equivalent_package {
+				let timelocked_covering_package = self
+					.locktimed_packages
+					.values()
+					.flat_map(|packages| packages.iter())
+					.find(|locked_package| {
+						req.outpoints().iter().all(|outpoint| {
+							locked_package.outpoints().contains(outpoint)
+						})
+					});
+				if let Some(package) = timelocked_covering_package {
 					log_info!(logger, "Ignoring second claim for outpoint {}:{}, we already have one which we're waiting on a timelock at {} for.",
 						req.outpoints()[0].txid, req.outpoints()[0].vout, package.package_locktime(cur_height));
 					false
 				} else {
 					true
 				}
+			}
 			}
 		});
 
@@ -895,26 +925,31 @@ impl<ChannelSigner: EcdsaChannelSigner> OnchainTxHandler<ChannelSigner> {
 						}
 						ClaimId(tx.0.compute_txid().to_byte_array())
 					},
-					OnchainClaim::Event(claim_event) => {
-						log_info!(logger, "Yielding onchain event to spend inputs {:?}", req.outpoints());
-						let claim_id = match claim_event {
+						OnchainClaim::Event(claim_event) => {
+							log_info!(logger, "Yielding onchain event to spend inputs {:?}", req.outpoints());
+							let claim_id = match claim_event {
 							ClaimEvent::BumpCommitment { ref commitment_tx, .. } =>
 								// For commitment claims, we can just use their txid as it should
 								// already be unique.
 								ClaimId(commitment_tx.compute_txid().to_byte_array()),
-							ClaimEvent::BumpHTLC { ref htlcs, .. } => {
-								// For HTLC claims, commit to the entire set of HTLC outputs to
-								// claim, which will always be unique per request. Once a claim ID
-								// is generated, it is assigned and remains unchanged, even if the
-								// underlying set of HTLCs changes.
-								ClaimId::from_htlcs(htlcs)
-							},
-						};
-						debug_assert!(self.pending_claim_requests.get(&claim_id).is_none());
-						debug_assert_eq!(self.pending_claim_events.iter().filter(|entry| entry.0 == claim_id).count(), 0);
-						self.pending_claim_events.push((claim_id, claim_event));
-						claim_id
-					},
+								ClaimEvent::BumpHTLC { ref htlcs, .. } => {
+									// For HTLC claims, commit to the entire set of HTLC outputs to
+									// claim, which will always be unique per request. Once a claim ID
+									// is generated, it is assigned and remains unchanged, even if the
+									// underlying set of HTLCs changes.
+									ClaimId::from_htlcs(htlcs)
+								},
+							};
+							debug_assert!(self.pending_claim_requests.get(&claim_id).is_none());
+							#[cfg(debug_assertions)] {
+								let num_existing = self.pending_claim_events.iter()
+									.filter(|entry| entry.0 == claim_id).count();
+								assert!(num_existing == 0 || num_existing == 1);
+							}
+							self.pending_claim_events.retain(|entry| entry.0 != claim_id);
+							self.pending_claim_events.push((claim_id, claim_event));
+							claim_id
+						},
 				};
 				// Because fuzzing can cause hash collisions, we can end up with conflicting claim
 				// ids here, so we only assert when not fuzzing.
@@ -1064,6 +1099,7 @@ impl<ChannelSigner: EcdsaChannelSigner> OnchainTxHandler<ChannelSigner> {
 							for outpoint in request.outpoints() {
 								log_debug!(logger, "Removing claim tracking for {} due to maturation of claim package {}.",
 									outpoint, log_bytes!(claim_id.0));
+								self.irrevocably_spent_outpoints.insert(*outpoint);
 								self.claimable_outpoints.remove(outpoint);
 							}
 							#[cfg(debug_assertions)] {
@@ -1077,7 +1113,10 @@ impl<ChannelSigner: EcdsaChannelSigner> OnchainTxHandler<ChannelSigner> {
 					OnchainEvent::ContentiousOutpoint { package } => {
 						log_debug!(logger, "Removing claim tracking due to maturation of claim tx for outpoints:");
 						log_debug!(logger, " {:?}", package.outpoints());
-						self.claimable_outpoints.remove(package.outpoints()[0]);
+						for outpoint in package.outpoints() {
+							self.irrevocably_spent_outpoints.insert(*outpoint);
+							self.claimable_outpoints.remove(outpoint);
+						}
 					}
 				}
 			} else {

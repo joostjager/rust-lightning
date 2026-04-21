@@ -58,7 +58,7 @@ fn test_monitor_and_persister_update_fail() {
 	let chanmon_cfgs = create_chanmon_cfgs(2);
 	let node_cfgs = create_node_cfgs(2, &chanmon_cfgs);
 	let node_chanmgrs = create_node_chanmgrs(2, &node_cfgs, &[None, None]);
-	let mut nodes = create_network(2, &node_cfgs, &node_chanmgrs);
+	let nodes = create_network(2, &node_cfgs, &node_chanmgrs);
 
 	let node_a_id = nodes[0].node.get_our_node_id();
 	let node_b_id = nodes[1].node.get_our_node_id();
@@ -4609,7 +4609,7 @@ fn test_claim_to_closed_channel_blocks_claimed_event() {
 	let node_cfgs = create_node_cfgs(2, &chanmon_cfgs);
 	let legacy_cfg = test_legacy_channel_config();
 	let node_chanmgrs = create_node_chanmgrs(2, &node_cfgs, &[Some(legacy_cfg), None]);
-	let nodes = create_network(2, &node_cfgs, &node_chanmgrs);
+	let mut nodes = create_network(2, &node_cfgs, &node_chanmgrs);
 
 	let node_a_id = nodes[0].node.get_our_node_id();
 	let node_b_id = nodes[1].node.get_our_node_id();
