@@ -56,7 +56,6 @@ use lightning::ln::channelmanager::{
 	TrustedChannelFeatures,
 };
 use lightning::ln::functional_test_utils::*;
-use lightning::ln::funding::{FundingContribution, FundingContributionError, FundingTemplate};
 use lightning::ln::inbound_payment::ExpandedKey;
 use lightning::ln::msgs::{
 	self, BaseMessageHandler, ChannelMessageHandler, CommitmentUpdate, Init, MessageSendEvent,
@@ -1155,6 +1154,147 @@ impl<'a> HarnessNode<'a> {
 	}
 }
 
+#[derive(Copy, Clone)]
+enum MonitorUpdateSelector {
+	First,
+	Second,
+	Last,
+}
+
+fn complete_monitor_update(
+	monitor: &Arc<TestChainMonitor>, chan_id: &ChannelId, selector: MonitorUpdateSelector,
+) {
+	if let Some(state) = monitor.latest_monitors.lock().unwrap().get_mut(chan_id) {
+		assert!(
+			state.pending_monitors.windows(2).all(|pair| pair[0].0 < pair[1].0),
+			"updates should be sorted by id"
+		);
+		let update = match selector {
+			MonitorUpdateSelector::First => {
+				if state.pending_monitors.is_empty() {
+					None
+				} else {
+					Some(state.pending_monitors.remove(0))
+				}
+			},
+			MonitorUpdateSelector::Second => {
+				if state.pending_monitors.len() > 1 {
+					Some(state.pending_monitors.remove(1))
+				} else {
+					None
+				}
+			},
+			MonitorUpdateSelector::Last => state.pending_monitors.pop(),
+		};
+		if let Some((id, data)) = update {
+			monitor.chain_monitor.channel_monitor_updated(*chan_id, id).unwrap();
+			if id > state.persisted_monitor_id {
+				state.persisted_monitor_id = id;
+				state.persisted_monitor = data;
+			}
+		}
+	}
+}
+
+fn complete_all_monitor_updates(monitor: &Arc<TestChainMonitor>, chan_id: &ChannelId) {
+	if let Some(state) = monitor.latest_monitors.lock().unwrap().get_mut(chan_id) {
+		assert!(
+			state.pending_monitors.windows(2).all(|pair| pair[0].0 < pair[1].0),
+			"updates should be sorted by id"
+		);
+		for (id, data) in state.pending_monitors.drain(..) {
+			monitor.chain_monitor.channel_monitor_updated(*chan_id, id).unwrap();
+			if id > state.persisted_monitor_id {
+				state.persisted_monitor_id = id;
+				state.persisted_monitor = data;
+			}
+		}
+	}
+}
+
+fn sync_with_chain_state(
+	node: &mut HarnessNode<'_>, chain_state: &ChainState, num_blocks: Option<u32>,
+) {
+	let target_height = if let Some(num_blocks) = num_blocks {
+		std::cmp::min(node.height + num_blocks, chain_state.tip_height())
+	} else {
+		chain_state.tip_height()
+	};
+	while node.height < target_height {
+		node.height += 1;
+		let (header, txn) = chain_state.block_at(node.height);
+		let txdata: Vec<_> = txn.iter().enumerate().map(|(i, tx)| (i + 1, tx)).collect();
+		if !txdata.is_empty() {
+			node.transactions_confirmed(header, &txdata, node.height);
+		}
+		node.best_block_updated(header, node.height);
+	}
+}
+
+fn splice_in(node: &HarnessNode<'_>, counterparty_node_id: &PublicKey, channel_id: &ChannelId) {
+	let wallet = WalletSync::new(&node.wallet, Arc::clone(&node.logger));
+	match node.splice_channel(channel_id, counterparty_node_id) {
+		Ok(funding_template) => {
+			let feerate = funding_template
+				.min_rbf_feerate()
+				.unwrap_or(node.fee_estimator.feerate_sat_per_kw());
+			if let Ok(contribution) = funding_template.splice_in_sync(
+				Amount::from_sat(10_000),
+				feerate,
+				FeeRate::MAX,
+				&wallet,
+			) {
+				let _ =
+					node.funding_contributed(channel_id, counterparty_node_id, contribution, None);
+			}
+		},
+		Err(e) => {
+			assert!(
+				matches!(e, APIError::APIMisuseError { ref err } if err.contains("splice")),
+				"{:?}",
+				e
+			);
+		},
+	}
+}
+
+fn splice_out(node: &HarnessNode<'_>, counterparty_node_id: &PublicKey, channel_id: &ChannelId) {
+	// We conditionally splice out `MAX_STD_OUTPUT_DUST_LIMIT_SATOSHIS` only when the node
+	// has double the balance required to send a payment upon a `0xff` byte. We do this to
+	// ensure there's always liquidity available for a payment to succeed then.
+	let outbound_capacity_msat = node
+		.list_channels()
+		.iter()
+		.find(|chan| chan.channel_id == *channel_id)
+		.map(|chan| chan.outbound_capacity_msat)
+		.unwrap();
+	if outbound_capacity_msat < 20_000_000 {
+		return;
+	}
+	match node.splice_channel(channel_id, counterparty_node_id) {
+		Ok(funding_template) => {
+			let feerate = funding_template
+				.min_rbf_feerate()
+				.unwrap_or(node.fee_estimator.feerate_sat_per_kw());
+			let outputs = vec![TxOut {
+				value: Amount::from_sat(MAX_STD_OUTPUT_DUST_LIMIT_SATOSHIS),
+				script_pubkey: node.wallet.get_change_script().unwrap(),
+			}];
+			if let Ok(contribution) = funding_template.splice_out(outputs, feerate, FeeRate::MAX) {
+				let _ =
+					node.funding_contributed(channel_id, counterparty_node_id, contribution, None);
+			}
+		},
+		Err(e) => {
+			assert!(
+				matches!(e, APIError::APIMisuseError { ref err } if err.contains("splice")),
+				"{:?}",
+				e
+			);
+		},
+	}
+}
+
 fn build_node_config(chan_type: ChanType) -> UserConfig {
 	let mut config = UserConfig::default();
 	config.channel_config.forwarding_fee_proportional_millionths = 0;
@@ -1492,24 +1632,6 @@ pub fn do_test<Out: Output + MaybeSend + MaybeSync>(data: &[u8], out: Out) {
 	nodes[0].broadcaster.txn_broadcasted.borrow_mut().clear();
 	nodes[1].broadcaster.txn_broadcasted.borrow_mut().clear();
 	nodes[2].broadcaster.txn_broadcasted.borrow_mut().clear();
-
-	let sync_with_chain_state =
-		|node: &mut HarnessNode<'_>, chain_state: &ChainState, num_blocks: Option<u32>| {
-			let target_height = if let Some(num_blocks) = num_blocks {
-				std::cmp::min(node.height + num_blocks, chain_state.tip_height())
-			} else {
-				chain_state.tip_height()
-			};
-			while node.height < target_height {
-				node.height += 1;
-				let (header, txn) = chain_state.block_at(node.height);
-				let txdata: Vec<_> = txn.iter().enumerate().map(|(i, tx)| (i + 1, tx)).collect();
-				if !txdata.is_empty() {
-					node.transactions_confirmed(header, &txdata, node.height);
-				}
-				node.best_block_updated(header, node.height);
-			}
-		};
 
 	// Sync all nodes to tip to lock the funding.
 	sync_with_chain_state(&mut nodes[0], &chain_state, None);
@@ -2091,121 +2213,6 @@ pub fn do_test<Out: Output + MaybeSend + MaybeSync>(data: &[u8], out: Out) {
 			}};
 		}
 
-		let complete_first = |v: &mut Vec<_>| if !v.is_empty() { Some(v.remove(0)) } else { None };
-		let complete_second = |v: &mut Vec<_>| if v.len() > 1 { Some(v.remove(1)) } else { None };
-		let complete_monitor_update =
-			|monitor: &Arc<TestChainMonitor>,
-			 chan_funding,
-			 compl_selector: &dyn Fn(&mut Vec<(u64, Vec<u8>)>) -> Option<(u64, Vec<u8>)>| {
-				if let Some(state) = monitor.latest_monitors.lock().unwrap().get_mut(chan_funding) {
-					assert!(
-						state.pending_monitors.windows(2).all(|pair| pair[0].0 < pair[1].0),
-						"updates should be sorted by id"
-					);
-					if let Some((id, data)) = compl_selector(&mut state.pending_monitors) {
-						monitor.chain_monitor.channel_monitor_updated(*chan_funding, id).unwrap();
-						if id > state.persisted_monitor_id {
-							state.persisted_monitor_id = id;
-							state.persisted_monitor = data;
-						}
-					}
-				}
-			};
-		let complete_all_monitor_updates = |monitor: &Arc<TestChainMonitor>, chan_id| {
-			if let Some(state) = monitor.latest_monitors.lock().unwrap().get_mut(chan_id) {
-				assert!(
-					state.pending_monitors.windows(2).all(|pair| pair[0].0 < pair[1].0),
-					"updates should be sorted by id"
-				);
-				for (id, data) in state.pending_monitors.drain(..) {
-					monitor.chain_monitor.channel_monitor_updated(*chan_id, id).unwrap();
-					if id > state.persisted_monitor_id {
-						state.persisted_monitor_id = id;
-						state.persisted_monitor = data;
-					}
-				}
-			}
-		};
-
-		let splice_channel =
-			|node: &HarnessNode<'_>,
-			 counterparty_node_id: &PublicKey,
-			 channel_id: &ChannelId,
-			 f: &dyn Fn(
-				FundingTemplate,
-			) -> Result<FundingContribution, FundingContributionError>| {
-				match node.splice_channel(channel_id, counterparty_node_id) {
-					Ok(funding_template) => {
-						if let Ok(contribution) = f(funding_template) {
-							let _ = node.funding_contributed(
-								channel_id,
-								counterparty_node_id,
-								contribution,
-								None,
-							);
-						}
-					},
-					Err(e) => {
-						assert!(
-							matches!(e, APIError::APIMisuseError { ref err } if err.contains("splice")),
-							"{:?}",
-							e
-						);
-					},
-				}
-			};
-
-		let splice_in = |node: &HarnessNode<'_>,
-		                 counterparty_node_id: &PublicKey,
-		                 channel_id: &ChannelId| {
-			let wallet = WalletSync::new(&node.wallet, Arc::clone(&node.logger));
-			let funding_feerate_sat_per_kw = node.fee_estimator.feerate_sat_per_kw();
-			splice_channel(
-				node,
-				counterparty_node_id,
-				channel_id,
-				&move |funding_template: FundingTemplate| {
-					let feerate =
-						funding_template.min_rbf_feerate().unwrap_or(funding_feerate_sat_per_kw);
-					funding_template.splice_in_sync(
-						Amount::from_sat(10_000),
-						feerate,
-						FeeRate::MAX,
-						&wallet,
-					)
-				},
-			);
-		};
-
-		let splice_out = |node: &HarnessNode<'_>,
-		                  counterparty_node_id: &PublicKey,
-		                  channel_id: &ChannelId| {
-			let outbound_capacity_msat = node
-				.list_channels()
-				.iter()
-				.find(|chan| chan.channel_id == *channel_id)
-				.map(|chan| chan.outbound_capacity_msat)
-				.unwrap();
-			if outbound_capacity_msat < 20_000_000 {
-				return;
-			}
-			let funding_feerate_sat_per_kw = node.fee_estimator.feerate_sat_per_kw();
-			splice_channel(
-				node,
-				counterparty_node_id,
-				channel_id,
-				&move |funding_template: FundingTemplate| {
-					let feerate =
-						funding_template.min_rbf_feerate().unwrap_or(funding_feerate_sat_per_kw);
-					let outputs = vec![TxOut {
-						value: Amount::from_sat(MAX_STD_OUTPUT_DUST_LIMIT_SATOSHIS),
-						script_pubkey: node.wallet.get_change_script().unwrap(),
-					}];
-					funding_template.splice_out(outputs, feerate, FeeRate::MAX)
-				},
-			);
-		};
-
 		let send =
 			|source_idx: usize, dest_idx: usize, dest_chan_id, amt, payment_ctr: &mut u64| {
 				let source = &nodes[source_idx];
@@ -2737,65 +2744,65 @@ pub fn do_test<Out: Output + MaybeSend + MaybeSync>(data: &[u8], out: Out) {
 
 			0xf0 => {
 				for id in &chan_ab_ids {
-					complete_monitor_update(&nodes[0].monitor, id, &complete_first);
+					complete_monitor_update(&nodes[0].monitor, id, MonitorUpdateSelector::First);
 				}
 			},
 			0xf1 => {
 				for id in &chan_ab_ids {
-					complete_monitor_update(&nodes[0].monitor, id, &complete_second);
+					complete_monitor_update(&nodes[0].monitor, id, MonitorUpdateSelector::Second);
 				}
 			},
 			0xf2 => {
 				for id in &chan_ab_ids {
-					complete_monitor_update(&nodes[0].monitor, id, &Vec::pop);
+					complete_monitor_update(&nodes[0].monitor, id, MonitorUpdateSelector::Last);
 				}
 			},
 
 			0xf4 => {
 				for id in &chan_ab_ids {
-					complete_monitor_update(&nodes[1].monitor, id, &complete_first);
+					complete_monitor_update(&nodes[1].monitor, id, MonitorUpdateSelector::First);
 				}
 			},
 			0xf5 => {
 				for id in &chan_ab_ids {
-					complete_monitor_update(&nodes[1].monitor, id, &complete_second);
+					complete_monitor_update(&nodes[1].monitor, id, MonitorUpdateSelector::Second);
 				}
 			},
 			0xf6 => {
 				for id in &chan_ab_ids {
-					complete_monitor_update(&nodes[1].monitor, id, &Vec::pop);
+					complete_monitor_update(&nodes[1].monitor, id, MonitorUpdateSelector::Last);
 				}
 			},
 
 			0xf8 => {
 				for id in &chan_bc_ids {
-					complete_monitor_update(&nodes[1].monitor, id, &complete_first);
+					complete_monitor_update(&nodes[1].monitor, id, MonitorUpdateSelector::First);
 				}
 			},
 			0xf9 => {
 				for id in &chan_bc_ids {
-					complete_monitor_update(&nodes[1].monitor, id, &complete_second);
+					complete_monitor_update(&nodes[1].monitor, id, MonitorUpdateSelector::Second);
 				}
 			},
 			0xfa => {
 				for id in &chan_bc_ids {
-					complete_monitor_update(&nodes[1].monitor, id, &Vec::pop);
+					complete_monitor_update(&nodes[1].monitor, id, MonitorUpdateSelector::Last);
 				}
 			},
 
 			0xfc => {
 				for id in &chan_bc_ids {
-					complete_monitor_update(&nodes[2].monitor, id, &complete_first);
+					complete_monitor_update(&nodes[2].monitor, id, MonitorUpdateSelector::First);
 				}
 			},
 			0xfd => {
 				for id in &chan_bc_ids {
-					complete_monitor_update(&nodes[2].monitor, id, &complete_second);
+					complete_monitor_update(&nodes[2].monitor, id, MonitorUpdateSelector::Second);
 				}
 			},
 			0xfe => {
 				for id in &chan_bc_ids {
-					complete_monitor_update(&nodes[2].monitor, id, &Vec::pop);
+					complete_monitor_update(&nodes[2].monitor, id, MonitorUpdateSelector::Last);
 				}
 			},
 
