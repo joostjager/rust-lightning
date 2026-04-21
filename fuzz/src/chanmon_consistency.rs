@@ -1447,6 +1447,20 @@ impl EventQueues {
 		}
 	}
 
+	fn clear_link(&mut self, link: &PeerLink) {
+		match (link.node_a, link.node_b) {
+			(0, 1) | (1, 0) => {
+				self.ab.clear();
+				self.ba.clear();
+			},
+			(1, 2) | (2, 1) => {
+				self.bc.clear();
+				self.cb.clear();
+			},
+			_ => panic!("unsupported link"),
+		}
+	}
+
 	fn drain_on_disconnect(&mut self, edge_node: usize, nodes: &[HarnessNode<'_>; 3]) {
 		match edge_node {
 			0 => {
@@ -1489,6 +1503,110 @@ impl EventQueues {
 			},
 			_ => panic!("unsupported disconnected edge"),
 		}
+	}
+}
+
+struct PeerLink {
+	node_a: usize,
+	node_b: usize,
+	channel_ids: [ChannelId; 3],
+	disconnected: bool,
+}
+
+impl PeerLink {
+	fn new(node_a: usize, node_b: usize, channel_ids: [ChannelId; 3]) -> Self {
+		Self { node_a, node_b, channel_ids, disconnected: false }
+	}
+
+	fn first_channel_id(&self) -> ChannelId {
+		self.channel_ids[0]
+	}
+
+	fn channel_ids(&self) -> &[ChannelId; 3] {
+		&self.channel_ids
+	}
+
+	fn complete_all_monitor_updates(&self, nodes: &[HarnessNode<'_>; 3]) {
+		for id in &self.channel_ids {
+			nodes[self.node_a].complete_all_monitor_updates(id);
+			nodes[self.node_b].complete_all_monitor_updates(id);
+		}
+	}
+
+	fn complete_monitor_updates_for_node(
+		&self, node_idx: usize, nodes: &[HarnessNode<'_>; 3], selector: MonitorUpdateSelector,
+	) {
+		assert!(node_idx == self.node_a || node_idx == self.node_b);
+		for id in &self.channel_ids {
+			nodes[node_idx].complete_monitor_update(id, selector);
+		}
+	}
+
+	fn disconnect(&mut self, nodes: &mut [HarnessNode<'_>; 3], queues: &mut EventQueues) {
+		if self.disconnected {
+			return;
+		}
+		let node_a_id = nodes[self.node_a].our_node_id();
+		let node_b_id = nodes[self.node_b].our_node_id();
+		nodes[self.node_a].peer_disconnected(node_b_id);
+		nodes[self.node_b].peer_disconnected(node_a_id);
+		self.disconnected = true;
+		let edge_node = if self.node_a == 1 {
+			self.node_b
+		} else if self.node_b == 1 {
+			self.node_a
+		} else {
+			panic!("unsupported link topology")
+		};
+		queues.drain_on_disconnect(edge_node, nodes);
+		queues.clear_link(self);
+	}
+
+	fn reconnect(&mut self, nodes: &mut [HarnessNode<'_>; 3]) {
+		if !self.disconnected {
+			return;
+		}
+		let node_a_id = nodes[self.node_a].our_node_id();
+		let node_b_id = nodes[self.node_b].our_node_id();
+		let init_b = Init {
+			features: nodes[self.node_b].init_features(),
+			networks: None,
+			remote_network_address: None,
+		};
+		nodes[self.node_a].peer_connected(node_b_id, &init_b, true).unwrap();
+		let init_a = Init {
+			features: nodes[self.node_a].init_features(),
+			networks: None,
+			remote_network_address: None,
+		};
+		nodes[self.node_b].peer_connected(node_a_id, &init_a, false).unwrap();
+		self.disconnected = false;
+	}
+
+	fn disconnect_for_reload(
+		&mut self, restarted_node: usize, nodes: &mut [HarnessNode<'_>; 3],
+		queues: &mut EventQueues,
+	) {
+		if self.disconnected {
+			return;
+		}
+		assert!(restarted_node == self.node_a || restarted_node == self.node_b);
+
+		let remaining_node = if restarted_node == self.node_a { self.node_b } else { self.node_a };
+		let restarted_node_id = nodes[restarted_node].our_node_id();
+		nodes[remaining_node].peer_disconnected(restarted_node_id);
+		self.disconnected = true;
+
+		if remaining_node == 1 {
+			queues.route_from_middle(
+				nodes[1].get_and_clear_pending_msg_events(),
+				Some(restarted_node),
+				nodes,
+			);
+		} else {
+			nodes[remaining_node].get_and_clear_pending_msg_events();
+		}
+		queues.clear_link(self);
 	}
 }
 
@@ -2107,10 +2225,10 @@ pub fn do_test<Out: Output + MaybeSend + MaybeSync>(data: &[u8], out: Out) {
 		let node_c_chans = nodes[2].list_usable_channels();
 		[node_c_chans[0].channel_id, node_c_chans[1].channel_id, node_c_chans[2].channel_id]
 	};
-	let chan_a_id = chan_ab_ids[0];
-	let chan_b_id = chan_bc_ids[0];
-	let mut peers_ab_disconnected = false;
-	let mut peers_bc_disconnected = false;
+	let mut ab_link = PeerLink::new(0, 1, chan_ab_ids);
+	let mut bc_link = PeerLink::new(1, 2, chan_bc_ids);
+	let chan_a_id = ab_link.first_channel_id();
+	let chan_b_id = bc_link.first_channel_id();
 	let mut queues = EventQueues::new();
 	let mut p_ctr: u64 = 0;
 
@@ -2386,80 +2504,30 @@ pub fn do_test<Out: Output + MaybeSend + MaybeSync>(data: &[u8], out: Out) {
 			0x06 => nodes[2].set_persistence_style(ChannelMonitorUpdateStatus::Completed),
 
 			0x08 => {
-				for id in &chan_ab_ids {
+				for id in ab_link.channel_ids() {
 					nodes[0].complete_all_monitor_updates(id);
 				}
 			},
 			0x09 => {
-				for id in &chan_ab_ids {
+				for id in ab_link.channel_ids() {
 					nodes[1].complete_all_monitor_updates(id);
 				}
 			},
 			0x0a => {
-				for id in &chan_bc_ids {
+				for id in bc_link.channel_ids() {
 					nodes[1].complete_all_monitor_updates(id);
 				}
 			},
 			0x0b => {
-				for id in &chan_bc_ids {
+				for id in bc_link.channel_ids() {
 					nodes[2].complete_all_monitor_updates(id);
 				}
 			},
 
-			0x0c => {
-				if !peers_ab_disconnected {
-					nodes[0].peer_disconnected(nodes[1].get_our_node_id());
-					nodes[1].peer_disconnected(nodes[0].get_our_node_id());
-					peers_ab_disconnected = true;
-					queues.drain_on_disconnect(0, &nodes);
-					queues.ab.clear();
-					queues.ba.clear();
-				}
-			},
-			0x0d => {
-				if !peers_bc_disconnected {
-					nodes[1].peer_disconnected(nodes[2].get_our_node_id());
-					nodes[2].peer_disconnected(nodes[1].get_our_node_id());
-					peers_bc_disconnected = true;
-					queues.drain_on_disconnect(2, &nodes);
-					queues.bc.clear();
-					queues.cb.clear();
-				}
-			},
-			0x0e => {
-				if peers_ab_disconnected {
-					let init_1 = Init {
-						features: nodes[1].init_features(),
-						networks: None,
-						remote_network_address: None,
-					};
-					nodes[0].peer_connected(nodes[1].get_our_node_id(), &init_1, true).unwrap();
-					let init_0 = Init {
-						features: nodes[0].init_features(),
-						networks: None,
-						remote_network_address: None,
-					};
-					nodes[1].peer_connected(nodes[0].get_our_node_id(), &init_0, false).unwrap();
-					peers_ab_disconnected = false;
-				}
-			},
-			0x0f => {
-				if peers_bc_disconnected {
-					let init_2 = Init {
-						features: nodes[2].init_features(),
-						networks: None,
-						remote_network_address: None,
-					};
-					nodes[1].peer_connected(nodes[2].get_our_node_id(), &init_2, true).unwrap();
-					let init_1 = Init {
-						features: nodes[1].init_features(),
-						networks: None,
-						remote_network_address: None,
-					};
-					nodes[2].peer_connected(nodes[1].get_our_node_id(), &init_1, false).unwrap();
-					peers_bc_disconnected = false;
-				}
-			},
+			0x0c => ab_link.disconnect(&mut nodes, &mut queues),
+			0x0d => bc_link.disconnect(&mut nodes, &mut queues),
+			0x0e => ab_link.reconnect(&mut nodes),
+			0x0f => bc_link.reconnect(&mut nodes),
 
 			0x10 => process_msg_noret!(0, true, ProcessMessages::AllMessages),
 			0x11 => process_msg_noret!(0, false, ProcessMessages::AllMessages),
@@ -2655,48 +2723,16 @@ pub fn do_test<Out: Output + MaybeSend + MaybeSync>(data: &[u8], out: Out) {
 			},
 
 			0xb0 | 0xb1 | 0xb2 => {
-				if !peers_ab_disconnected {
-					nodes[1].peer_disconnected(nodes[0].get_our_node_id());
-					peers_ab_disconnected = true;
-					queues.route_from_middle(
-						nodes[1].get_and_clear_pending_msg_events(),
-						Some(0),
-						&nodes,
-					);
-					queues.ab.clear();
-					queues.ba.clear();
-				}
+				ab_link.disconnect_for_reload(0, &mut nodes, &mut queues);
 				nodes[0].reload(v, &out, &router, chan_type);
 			},
 			0xb3..=0xbb => {
-				if !peers_ab_disconnected {
-					nodes[0].peer_disconnected(nodes[1].get_our_node_id());
-					peers_ab_disconnected = true;
-					nodes[0].get_and_clear_pending_msg_events();
-					queues.ab.clear();
-					queues.ba.clear();
-				}
-				if !peers_bc_disconnected {
-					nodes[2].peer_disconnected(nodes[1].get_our_node_id());
-					peers_bc_disconnected = true;
-					nodes[2].get_and_clear_pending_msg_events();
-					queues.bc.clear();
-					queues.cb.clear();
-				}
+				ab_link.disconnect_for_reload(1, &mut nodes, &mut queues);
+				bc_link.disconnect_for_reload(1, &mut nodes, &mut queues);
 				nodes[1].reload(v, &out, &router, chan_type);
 			},
 			0xbc | 0xbd | 0xbe => {
-				if !peers_bc_disconnected {
-					nodes[1].peer_disconnected(nodes[2].get_our_node_id());
-					peers_bc_disconnected = true;
-					queues.route_from_middle(
-						nodes[1].get_and_clear_pending_msg_events(),
-						Some(2),
-						&nodes,
-					);
-					queues.bc.clear();
-					queues.cb.clear();
-				}
+				bc_link.disconnect_for_reload(2, &mut nodes, &mut queues);
 				nodes[2].reload(v, &out, &router, chan_type);
 			},
 
@@ -2767,103 +2803,51 @@ pub fn do_test<Out: Output + MaybeSend + MaybeSync>(data: &[u8], out: Out) {
 			},
 
 			0xf0 => {
-				for id in &chan_ab_ids {
-					nodes[0].complete_monitor_update(id, MonitorUpdateSelector::First);
-				}
+				ab_link.complete_monitor_updates_for_node(0, &nodes, MonitorUpdateSelector::First)
 			},
 			0xf1 => {
-				for id in &chan_ab_ids {
-					nodes[0].complete_monitor_update(id, MonitorUpdateSelector::Second);
-				}
+				ab_link.complete_monitor_updates_for_node(0, &nodes, MonitorUpdateSelector::Second)
 			},
 			0xf2 => {
-				for id in &chan_ab_ids {
-					nodes[0].complete_monitor_update(id, MonitorUpdateSelector::Last);
-				}
+				ab_link.complete_monitor_updates_for_node(0, &nodes, MonitorUpdateSelector::Last)
 			},
 
 			0xf4 => {
-				for id in &chan_ab_ids {
-					nodes[1].complete_monitor_update(id, MonitorUpdateSelector::First);
-				}
+				ab_link.complete_monitor_updates_for_node(1, &nodes, MonitorUpdateSelector::First)
 			},
 			0xf5 => {
-				for id in &chan_ab_ids {
-					nodes[1].complete_monitor_update(id, MonitorUpdateSelector::Second);
-				}
+				ab_link.complete_monitor_updates_for_node(1, &nodes, MonitorUpdateSelector::Second)
 			},
 			0xf6 => {
-				for id in &chan_ab_ids {
-					nodes[1].complete_monitor_update(id, MonitorUpdateSelector::Last);
-				}
+				ab_link.complete_monitor_updates_for_node(1, &nodes, MonitorUpdateSelector::Last)
 			},
 
 			0xf8 => {
-				for id in &chan_bc_ids {
-					nodes[1].complete_monitor_update(id, MonitorUpdateSelector::First);
-				}
+				bc_link.complete_monitor_updates_for_node(1, &nodes, MonitorUpdateSelector::First)
 			},
 			0xf9 => {
-				for id in &chan_bc_ids {
-					nodes[1].complete_monitor_update(id, MonitorUpdateSelector::Second);
-				}
+				bc_link.complete_monitor_updates_for_node(1, &nodes, MonitorUpdateSelector::Second)
 			},
 			0xfa => {
-				for id in &chan_bc_ids {
-					nodes[1].complete_monitor_update(id, MonitorUpdateSelector::Last);
-				}
+				bc_link.complete_monitor_updates_for_node(1, &nodes, MonitorUpdateSelector::Last)
 			},
 
 			0xfc => {
-				for id in &chan_bc_ids {
-					nodes[2].complete_monitor_update(id, MonitorUpdateSelector::First);
-				}
+				bc_link.complete_monitor_updates_for_node(2, &nodes, MonitorUpdateSelector::First)
 			},
 			0xfd => {
-				for id in &chan_bc_ids {
-					nodes[2].complete_monitor_update(id, MonitorUpdateSelector::Second);
-				}
+				bc_link.complete_monitor_updates_for_node(2, &nodes, MonitorUpdateSelector::Second)
 			},
 			0xfe => {
-				for id in &chan_bc_ids {
-					nodes[2].complete_monitor_update(id, MonitorUpdateSelector::Last);
-				}
+				bc_link.complete_monitor_updates_for_node(2, &nodes, MonitorUpdateSelector::Last)
 			},
 
 			0xff => {
 				// Test that no channel is in a stuck state where neither party can send funds even
 				// after we resolve all pending events.
 
-				if peers_ab_disconnected {
-					let init_1 = Init {
-						features: nodes[1].init_features(),
-						networks: None,
-						remote_network_address: None,
-					};
-					nodes[0].peer_connected(nodes[1].get_our_node_id(), &init_1, true).unwrap();
-					let init_0 = Init {
-						features: nodes[0].init_features(),
-						networks: None,
-						remote_network_address: None,
-					};
-					nodes[1].peer_connected(nodes[0].get_our_node_id(), &init_0, false).unwrap();
-					peers_ab_disconnected = false;
-				}
-				if peers_bc_disconnected {
-					let init_2 = Init {
-						features: nodes[2].init_features(),
-						networks: None,
-						remote_network_address: None,
-					};
-					nodes[1].peer_connected(nodes[2].get_our_node_id(), &init_2, true).unwrap();
-					let init_1 = Init {
-						features: nodes[1].init_features(),
-						networks: None,
-						remote_network_address: None,
-					};
-					nodes[2].peer_connected(nodes[1].get_our_node_id(), &init_1, false).unwrap();
-					peers_bc_disconnected = false;
-				}
+				ab_link.reconnect(&mut nodes);
+				bc_link.reconnect(&mut nodes);
 
 				for op in SUPPORTED_SIGNER_OPS {
 					nodes[0].keys_manager.enable_op_for_all_signers(op);
@@ -2883,14 +2867,8 @@ pub fn do_test<Out: Output + MaybeSend + MaybeSync>(data: &[u8], out: Out) {
 									"It may take may iterations to settle the state, but it should not take forever"
 								);
 							}
-							for id in &chan_ab_ids {
-								nodes[0].complete_all_monitor_updates(id);
-								nodes[1].complete_all_monitor_updates(id);
-							}
-							for id in &chan_bc_ids {
-								nodes[1].complete_all_monitor_updates(id);
-								nodes[2].complete_all_monitor_updates(id);
-							}
+							ab_link.complete_all_monitor_updates(&nodes);
+							bc_link.complete_all_monitor_updates(&nodes);
 							if process_msg_events!(0, false, ProcessMessages::AllMessages) {
 								last_pass_no_updates = false;
 								continue;
@@ -2955,16 +2933,33 @@ pub fn do_test<Out: Output + MaybeSend + MaybeSync>(data: &[u8], out: Out) {
 				}
 
 				// Finally, make sure that at least one end of each channel can make a substantial payment
-				for &chan_id in &chan_ab_ids {
+				let send_after_settle = |source_idx: usize,
+				                         dest_idx: usize,
+				                         dest_chan_id,
+				                         amt,
+				                         payment_ctr: &mut u64| {
+					let source = &nodes[source_idx];
+					let dest = &nodes[dest_idx];
+					let (secret, hash) =
+						get_payment_secret_hash(dest, payment_ctr, &payment_preimages);
+					let mut id = PaymentId([0; 32]);
+					id.0[0..8].copy_from_slice(&payment_ctr.to_ne_bytes());
+					let succeeded = send_payment(source, dest, dest_chan_id, amt, secret, hash, id);
+					if succeeded {
+						pending_payments.borrow_mut()[source_idx].push(id);
+					}
+					succeeded
+				};
+				for &chan_id in ab_link.channel_ids() {
 					assert!(
-						send(0, 1, chan_id, 10_000_000, &mut p_ctr)
-							|| send(1, 0, chan_id, 10_000_000, &mut p_ctr)
+						send_after_settle(0, 1, chan_id, 10_000_000, &mut p_ctr)
+							|| send_after_settle(1, 0, chan_id, 10_000_000, &mut p_ctr)
 					);
 				}
-				for &chan_id in &chan_bc_ids {
+				for &chan_id in bc_link.channel_ids() {
 					assert!(
-						send(1, 2, chan_id, 10_000_000, &mut p_ctr)
-							|| send(2, 1, chan_id, 10_000_000, &mut p_ctr)
+						send_after_settle(1, 2, chan_id, 10_000_000, &mut p_ctr)
+							|| send_after_settle(2, 1, chan_id, 10_000_000, &mut p_ctr)
 					);
 				}
 
