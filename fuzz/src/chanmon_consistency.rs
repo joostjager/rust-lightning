@@ -1783,7 +1783,8 @@ impl PaymentTracker {
 	}
 }
 
-struct Harness<'a, Out: Output + MaybeSend + MaybeSync> {
+struct Harness<'a, 'd, Out: Output + MaybeSend + MaybeSync> {
+	data: &'d [u8],
 	out: Out,
 	chan_type: ChanType,
 	chain_state: ChainState,
@@ -2013,8 +2014,8 @@ fn lock_fundings(nodes: &[HarnessNode<'_>; 3]) {
 	}
 }
 
-impl<'a, Out: Output + MaybeSend + MaybeSync> Harness<'a, Out> {
-	fn new(data: &[u8], out: Out, router: &'a FuzzRouter) -> Self {
+impl<'a, 'd, Out: Output + MaybeSend + MaybeSync> Harness<'a, 'd, Out> {
+	fn new(data: &'d [u8], out: Out, router: &'a FuzzRouter) -> Self {
 		// Read initial monitor styles and channel type from fuzz input byte 0:
 		// bits 0-2: monitor styles (1 bit per node)
 		// bits 3-4: channel type (0=Legacy, 1=KeyedAnchors, 2=ZeroFeeCommitments)
@@ -2153,6 +2154,7 @@ impl<'a, Out: Output + MaybeSend + MaybeSync> Harness<'a, Out> {
 		}
 
 		Self {
+			data,
 			out,
 			chan_type,
 			chain_state,
@@ -2162,6 +2164,34 @@ impl<'a, Out: Output + MaybeSend + MaybeSync> Harness<'a, Out> {
 			queues: EventQueues::new(),
 			payments: PaymentTracker::new(),
 			read_pos: 1,
+		}
+	}
+
+	fn chan_a_id(&self) -> ChannelId {
+		self.ab_link.first_channel_id()
+	}
+
+	fn chan_b_id(&self) -> ChannelId {
+		self.bc_link.first_channel_id()
+	}
+
+	fn next_input_byte(&mut self) -> Option<u8> {
+		if self.data.len() < self.read_pos + 1 {
+			None
+		} else {
+			let value = self.data[self.read_pos];
+			self.read_pos += 1;
+			Some(value)
+		}
+	}
+
+	fn finish(&self) {
+		assert_test_invariants(&self.nodes);
+	}
+
+	fn refresh_serialized_managers(&mut self) {
+		for node in &mut self.nodes {
+			node.refresh_serialized_manager();
 		}
 	}
 }
@@ -2549,23 +2579,13 @@ fn process_all_events_impl<Out: Output + MaybeSend + MaybeSync>(
 #[inline]
 pub fn do_test<Out: Output + MaybeSend + MaybeSync>(data: &[u8], out: Out) {
 	let router = FuzzRouter {};
-	let Harness {
-		out,
-		chan_type,
-		mut chain_state,
-		mut nodes,
-		mut ab_link,
-		mut bc_link,
-		mut queues,
-		mut payments,
-		mut read_pos,
-	} = Harness::new(data, out, &router);
-	let chan_a_id = ab_link.first_channel_id();
-	let chan_b_id = bc_link.first_channel_id();
+	let mut harness = Harness::new(data, out, &router);
+	let chan_a_id = harness.chan_a_id();
+	let chan_b_id = harness.chan_b_id();
 
 	macro_rules! test_return {
 		() => {{
-			assert_test_invariants(&nodes);
+			harness.finish();
 			return;
 		}};
 	}
@@ -2577,9 +2597,9 @@ pub fn do_test<Out: Output + MaybeSend + MaybeSync>(data: &[u8], out: Out) {
 					$node,
 					$corrupt_forward,
 					$limit_events,
-					&nodes,
-					&out,
-					&mut queues,
+					&harness.nodes,
+					&harness.out,
+					&mut harness.queues,
 				)
 			}};
 		}
@@ -2592,7 +2612,13 @@ pub fn do_test<Out: Output + MaybeSend + MaybeSync>(data: &[u8], out: Out) {
 
 		macro_rules! process_events {
 			($node: expr, $fail: expr) => {{
-				process_events_impl($node, $fail, &nodes, &mut chain_state, &mut payments)
+				process_events_impl(
+					$node,
+					$fail,
+					&harness.nodes,
+					&mut harness.chain_state,
+					&mut harness.payments,
+				)
 			}};
 		}
 
@@ -2602,48 +2628,46 @@ pub fn do_test<Out: Output + MaybeSend + MaybeSync>(data: &[u8], out: Out) {
 			}};
 		}
 
-		if data.len() < read_pos + 1 {
-			test_return!();
-		}
-		let v = data[read_pos];
-		read_pos += 1;
-		out.locked_write(format!("READ A BYTE! HANDLING INPUT {:x}...........\n", v).as_bytes());
+		let v = if let Some(value) = harness.next_input_byte() { value } else { test_return!() };
+		harness
+			.out
+			.locked_write(format!("READ A BYTE! HANDLING INPUT {:x}...........\n", v).as_bytes());
 		match v {
 			// In general, we keep related message groups close together in binary form, allowing
 			// bit-twiddling mutations to have similar effects. This is probably overkill, but no
 			// harm in doing so.
-			0x00 => nodes[0].set_persistence_style(ChannelMonitorUpdateStatus::InProgress),
-			0x01 => nodes[1].set_persistence_style(ChannelMonitorUpdateStatus::InProgress),
-			0x02 => nodes[2].set_persistence_style(ChannelMonitorUpdateStatus::InProgress),
-			0x04 => nodes[0].set_persistence_style(ChannelMonitorUpdateStatus::Completed),
-			0x05 => nodes[1].set_persistence_style(ChannelMonitorUpdateStatus::Completed),
-			0x06 => nodes[2].set_persistence_style(ChannelMonitorUpdateStatus::Completed),
+			0x00 => harness.nodes[0].set_persistence_style(ChannelMonitorUpdateStatus::InProgress),
+			0x01 => harness.nodes[1].set_persistence_style(ChannelMonitorUpdateStatus::InProgress),
+			0x02 => harness.nodes[2].set_persistence_style(ChannelMonitorUpdateStatus::InProgress),
+			0x04 => harness.nodes[0].set_persistence_style(ChannelMonitorUpdateStatus::Completed),
+			0x05 => harness.nodes[1].set_persistence_style(ChannelMonitorUpdateStatus::Completed),
+			0x06 => harness.nodes[2].set_persistence_style(ChannelMonitorUpdateStatus::Completed),
 
 			0x08 => {
-				for id in ab_link.channel_ids() {
-					nodes[0].complete_all_monitor_updates(id);
+				for id in harness.ab_link.channel_ids() {
+					harness.nodes[0].complete_all_monitor_updates(id);
 				}
 			},
 			0x09 => {
-				for id in ab_link.channel_ids() {
-					nodes[1].complete_all_monitor_updates(id);
+				for id in harness.ab_link.channel_ids() {
+					harness.nodes[1].complete_all_monitor_updates(id);
 				}
 			},
 			0x0a => {
-				for id in bc_link.channel_ids() {
-					nodes[1].complete_all_monitor_updates(id);
+				for id in harness.bc_link.channel_ids() {
+					harness.nodes[1].complete_all_monitor_updates(id);
 				}
 			},
 			0x0b => {
-				for id in bc_link.channel_ids() {
-					nodes[2].complete_all_monitor_updates(id);
+				for id in harness.bc_link.channel_ids() {
+					harness.nodes[2].complete_all_monitor_updates(id);
 				}
 			},
 
-			0x0c => ab_link.disconnect(&mut nodes, &mut queues),
-			0x0d => bc_link.disconnect(&mut nodes, &mut queues),
-			0x0e => ab_link.reconnect(&mut nodes),
-			0x0f => bc_link.reconnect(&mut nodes),
+			0x0c => harness.ab_link.disconnect(&mut harness.nodes, &mut harness.queues),
+			0x0d => harness.bc_link.disconnect(&mut harness.nodes, &mut harness.queues),
+			0x0e => harness.ab_link.reconnect(&mut harness.nodes),
+			0x0f => harness.bc_link.reconnect(&mut harness.nodes),
 
 			0x10 => process_msg_noret!(0, true, ProcessMessages::AllMessages),
 			0x11 => process_msg_noret!(0, false, ProcessMessages::AllMessages),
@@ -2677,169 +2701,191 @@ pub fn do_test<Out: Output + MaybeSend + MaybeSync>(data: &[u8], out: Out) {
 
 			// 1/10th the channel size:
 			0x30 => {
-				payments.send_direct(&nodes, 0, 1, chan_a_id, 10_000_000);
+				harness.payments.send_direct(&harness.nodes, 0, 1, chan_a_id, 10_000_000);
 			},
 			0x31 => {
-				payments.send_direct(&nodes, 1, 0, chan_a_id, 10_000_000);
+				harness.payments.send_direct(&harness.nodes, 1, 0, chan_a_id, 10_000_000);
 			},
 			0x32 => {
-				payments.send_direct(&nodes, 1, 2, chan_b_id, 10_000_000);
+				harness.payments.send_direct(&harness.nodes, 1, 2, chan_b_id, 10_000_000);
 			},
 			0x33 => {
-				payments.send_direct(&nodes, 2, 1, chan_b_id, 10_000_000);
+				harness.payments.send_direct(&harness.nodes, 2, 1, chan_b_id, 10_000_000);
 			},
 			0x34 => {
-				payments.send_hop(&nodes, 0, 1, chan_a_id, 2, chan_b_id, 10_000_000);
+				harness.payments.send_hop(
+					&harness.nodes,
+					0,
+					1,
+					chan_a_id,
+					2,
+					chan_b_id,
+					10_000_000,
+				);
 			},
 			0x35 => {
-				payments.send_hop(&nodes, 2, 1, chan_b_id, 0, chan_a_id, 10_000_000);
+				harness.payments.send_hop(
+					&harness.nodes,
+					2,
+					1,
+					chan_b_id,
+					0,
+					chan_a_id,
+					10_000_000,
+				);
 			},
 
 			0x38 => {
-				payments.send_direct(&nodes, 0, 1, chan_a_id, 1_000_000);
+				harness.payments.send_direct(&harness.nodes, 0, 1, chan_a_id, 1_000_000);
 			},
 			0x39 => {
-				payments.send_direct(&nodes, 1, 0, chan_a_id, 1_000_000);
+				harness.payments.send_direct(&harness.nodes, 1, 0, chan_a_id, 1_000_000);
 			},
 			0x3a => {
-				payments.send_direct(&nodes, 1, 2, chan_b_id, 1_000_000);
+				harness.payments.send_direct(&harness.nodes, 1, 2, chan_b_id, 1_000_000);
 			},
 			0x3b => {
-				payments.send_direct(&nodes, 2, 1, chan_b_id, 1_000_000);
+				harness.payments.send_direct(&harness.nodes, 2, 1, chan_b_id, 1_000_000);
 			},
 			0x3c => {
-				payments.send_hop(&nodes, 0, 1, chan_a_id, 2, chan_b_id, 1_000_000);
+				harness.payments.send_hop(&harness.nodes, 0, 1, chan_a_id, 2, chan_b_id, 1_000_000);
 			},
 			0x3d => {
-				payments.send_hop(&nodes, 2, 1, chan_b_id, 0, chan_a_id, 1_000_000);
+				harness.payments.send_hop(&harness.nodes, 2, 1, chan_b_id, 0, chan_a_id, 1_000_000);
 			},
 
 			0x40 => {
-				payments.send_direct(&nodes, 0, 1, chan_a_id, 100_000);
+				harness.payments.send_direct(&harness.nodes, 0, 1, chan_a_id, 100_000);
 			},
 			0x41 => {
-				payments.send_direct(&nodes, 1, 0, chan_a_id, 100_000);
+				harness.payments.send_direct(&harness.nodes, 1, 0, chan_a_id, 100_000);
 			},
 			0x42 => {
-				payments.send_direct(&nodes, 1, 2, chan_b_id, 100_000);
+				harness.payments.send_direct(&harness.nodes, 1, 2, chan_b_id, 100_000);
 			},
 			0x43 => {
-				payments.send_direct(&nodes, 2, 1, chan_b_id, 100_000);
+				harness.payments.send_direct(&harness.nodes, 2, 1, chan_b_id, 100_000);
 			},
 			0x44 => {
-				payments.send_hop(&nodes, 0, 1, chan_a_id, 2, chan_b_id, 100_000);
+				harness.payments.send_hop(&harness.nodes, 0, 1, chan_a_id, 2, chan_b_id, 100_000);
 			},
 			0x45 => {
-				payments.send_hop(&nodes, 2, 1, chan_b_id, 0, chan_a_id, 100_000);
+				harness.payments.send_hop(&harness.nodes, 2, 1, chan_b_id, 0, chan_a_id, 100_000);
 			},
 
 			0x48 => {
-				payments.send_direct(&nodes, 0, 1, chan_a_id, 10_000);
+				harness.payments.send_direct(&harness.nodes, 0, 1, chan_a_id, 10_000);
 			},
 			0x49 => {
-				payments.send_direct(&nodes, 1, 0, chan_a_id, 10_000);
+				harness.payments.send_direct(&harness.nodes, 1, 0, chan_a_id, 10_000);
 			},
 			0x4a => {
-				payments.send_direct(&nodes, 1, 2, chan_b_id, 10_000);
+				harness.payments.send_direct(&harness.nodes, 1, 2, chan_b_id, 10_000);
 			},
 			0x4b => {
-				payments.send_direct(&nodes, 2, 1, chan_b_id, 10_000);
+				harness.payments.send_direct(&harness.nodes, 2, 1, chan_b_id, 10_000);
 			},
 			0x4c => {
-				payments.send_hop(&nodes, 0, 1, chan_a_id, 2, chan_b_id, 10_000);
+				harness.payments.send_hop(&harness.nodes, 0, 1, chan_a_id, 2, chan_b_id, 10_000);
 			},
 			0x4d => {
-				payments.send_hop(&nodes, 2, 1, chan_b_id, 0, chan_a_id, 10_000);
+				harness.payments.send_hop(&harness.nodes, 2, 1, chan_b_id, 0, chan_a_id, 10_000);
 			},
 
 			0x50 => {
-				payments.send_direct(&nodes, 0, 1, chan_a_id, 1_000);
+				harness.payments.send_direct(&harness.nodes, 0, 1, chan_a_id, 1_000);
 			},
 			0x51 => {
-				payments.send_direct(&nodes, 1, 0, chan_a_id, 1_000);
+				harness.payments.send_direct(&harness.nodes, 1, 0, chan_a_id, 1_000);
 			},
 			0x52 => {
-				payments.send_direct(&nodes, 1, 2, chan_b_id, 1_000);
+				harness.payments.send_direct(&harness.nodes, 1, 2, chan_b_id, 1_000);
 			},
 			0x53 => {
-				payments.send_direct(&nodes, 2, 1, chan_b_id, 1_000);
+				harness.payments.send_direct(&harness.nodes, 2, 1, chan_b_id, 1_000);
 			},
 			0x54 => {
-				payments.send_hop(&nodes, 0, 1, chan_a_id, 2, chan_b_id, 1_000);
+				harness.payments.send_hop(&harness.nodes, 0, 1, chan_a_id, 2, chan_b_id, 1_000);
 			},
 			0x55 => {
-				payments.send_hop(&nodes, 2, 1, chan_b_id, 0, chan_a_id, 1_000);
+				harness.payments.send_hop(&harness.nodes, 2, 1, chan_b_id, 0, chan_a_id, 1_000);
 			},
 
 			0x58 => {
-				payments.send_direct(&nodes, 0, 1, chan_a_id, 100);
+				harness.payments.send_direct(&harness.nodes, 0, 1, chan_a_id, 100);
 			},
 			0x59 => {
-				payments.send_direct(&nodes, 1, 0, chan_a_id, 100);
+				harness.payments.send_direct(&harness.nodes, 1, 0, chan_a_id, 100);
 			},
 			0x5a => {
-				payments.send_direct(&nodes, 1, 2, chan_b_id, 100);
+				harness.payments.send_direct(&harness.nodes, 1, 2, chan_b_id, 100);
 			},
 			0x5b => {
-				payments.send_direct(&nodes, 2, 1, chan_b_id, 100);
+				harness.payments.send_direct(&harness.nodes, 2, 1, chan_b_id, 100);
 			},
 			0x5c => {
-				payments.send_hop(&nodes, 0, 1, chan_a_id, 2, chan_b_id, 100);
+				harness.payments.send_hop(&harness.nodes, 0, 1, chan_a_id, 2, chan_b_id, 100);
 			},
 			0x5d => {
-				payments.send_hop(&nodes, 2, 1, chan_b_id, 0, chan_a_id, 100);
+				harness.payments.send_hop(&harness.nodes, 2, 1, chan_b_id, 0, chan_a_id, 100);
 			},
 
 			0x60 => {
-				payments.send_direct(&nodes, 0, 1, chan_a_id, 10);
+				harness.payments.send_direct(&harness.nodes, 0, 1, chan_a_id, 10);
 			},
 			0x61 => {
-				payments.send_direct(&nodes, 1, 0, chan_a_id, 10);
+				harness.payments.send_direct(&harness.nodes, 1, 0, chan_a_id, 10);
 			},
 			0x62 => {
-				payments.send_direct(&nodes, 1, 2, chan_b_id, 10);
+				harness.payments.send_direct(&harness.nodes, 1, 2, chan_b_id, 10);
 			},
 			0x63 => {
-				payments.send_direct(&nodes, 2, 1, chan_b_id, 10);
+				harness.payments.send_direct(&harness.nodes, 2, 1, chan_b_id, 10);
 			},
 			0x64 => {
-				payments.send_hop(&nodes, 0, 1, chan_a_id, 2, chan_b_id, 10);
+				harness.payments.send_hop(&harness.nodes, 0, 1, chan_a_id, 2, chan_b_id, 10);
 			},
 			0x65 => {
-				payments.send_hop(&nodes, 2, 1, chan_b_id, 0, chan_a_id, 10);
+				harness.payments.send_hop(&harness.nodes, 2, 1, chan_b_id, 0, chan_a_id, 10);
 			},
 
 			0x68 => {
-				payments.send_direct(&nodes, 0, 1, chan_a_id, 1);
+				harness.payments.send_direct(&harness.nodes, 0, 1, chan_a_id, 1);
 			},
 			0x69 => {
-				payments.send_direct(&nodes, 1, 0, chan_a_id, 1);
+				harness.payments.send_direct(&harness.nodes, 1, 0, chan_a_id, 1);
 			},
 			0x6a => {
-				payments.send_direct(&nodes, 1, 2, chan_b_id, 1);
+				harness.payments.send_direct(&harness.nodes, 1, 2, chan_b_id, 1);
 			},
 			0x6b => {
-				payments.send_direct(&nodes, 2, 1, chan_b_id, 1);
+				harness.payments.send_direct(&harness.nodes, 2, 1, chan_b_id, 1);
 			},
 			0x6c => {
-				payments.send_hop(&nodes, 0, 1, chan_a_id, 2, chan_b_id, 1);
+				harness.payments.send_hop(&harness.nodes, 0, 1, chan_a_id, 2, chan_b_id, 1);
 			},
 			0x6d => {
-				payments.send_hop(&nodes, 2, 1, chan_b_id, 0, chan_a_id, 1);
+				harness.payments.send_hop(&harness.nodes, 2, 1, chan_b_id, 0, chan_a_id, 1);
 			},
 
 			// MPP payments
 			// 0x70: direct MPP from 0 to 1 (multi A-B channels)
 			0x70 => {
-				payments.send_mpp_direct(&nodes, 0, 1, ab_link.channel_ids(), 1_000_000);
+				harness.payments.send_mpp_direct(
+					&harness.nodes,
+					0,
+					1,
+					harness.ab_link.channel_ids(),
+					1_000_000,
+				);
 			},
 			// 0x71: MPP 0->1->2, multi channels on first hop (A-B)
 			0x71 => {
-				payments.send_mpp_hop(
-					&nodes,
+				harness.payments.send_mpp_hop(
+					&harness.nodes,
 					0,
 					1,
-					ab_link.channel_ids(),
+					harness.ab_link.channel_ids(),
 					2,
 					&[chan_b_id],
 					1_000_000,
@@ -2847,32 +2893,32 @@ pub fn do_test<Out: Output + MaybeSend + MaybeSync>(data: &[u8], out: Out) {
 			},
 			// 0x72: MPP 0->1->2, multi channels on both hops (A-B and B-C)
 			0x72 => {
-				payments.send_mpp_hop(
-					&nodes,
+				harness.payments.send_mpp_hop(
+					&harness.nodes,
 					0,
 					1,
-					ab_link.channel_ids(),
+					harness.ab_link.channel_ids(),
 					2,
-					bc_link.channel_ids(),
+					harness.bc_link.channel_ids(),
 					1_000_000,
 				);
 			},
 			// 0x73: MPP 0->1->2, multi channels on second hop (B-C)
 			0x73 => {
-				payments.send_mpp_hop(
-					&nodes,
+				harness.payments.send_mpp_hop(
+					&harness.nodes,
 					0,
 					1,
 					&[chan_a_id],
 					2,
-					bc_link.channel_ids(),
+					harness.bc_link.channel_ids(),
 					1_000_000,
 				);
 			},
 			// 0x74: direct MPP from 0 to 1, multi parts over single channel
 			0x74 => {
-				payments.send_mpp_direct(
-					&nodes,
+				harness.payments.send_mpp_direct(
+					&harness.nodes,
 					0,
 					1,
 					&[chan_a_id, chan_a_id, chan_a_id],
@@ -2880,301 +2926,375 @@ pub fn do_test<Out: Output + MaybeSend + MaybeSync>(data: &[u8], out: Out) {
 				);
 			},
 
-			0x80 => nodes[0].bump_fee_estimate(chan_type),
-			0x81 => nodes[0].reset_fee_estimate(),
-			0x84 => nodes[1].bump_fee_estimate(chan_type),
-			0x85 => nodes[1].reset_fee_estimate(),
-			0x88 => nodes[2].bump_fee_estimate(chan_type),
-			0x89 => nodes[2].reset_fee_estimate(),
+			0x80 => harness.nodes[0].bump_fee_estimate(harness.chan_type),
+			0x81 => harness.nodes[0].reset_fee_estimate(),
+			0x84 => harness.nodes[1].bump_fee_estimate(harness.chan_type),
+			0x85 => harness.nodes[1].reset_fee_estimate(),
+			0x88 => harness.nodes[2].bump_fee_estimate(harness.chan_type),
+			0x89 => harness.nodes[2].reset_fee_estimate(),
 
 			0xa0 => {
 				if !cfg!(splicing) {
-					assert_test_invariants(&nodes);
+					assert_test_invariants(&harness.nodes);
 					return;
 				}
-				let cp_node_id = nodes[1].our_node_id();
-				nodes[0].splice_in(&cp_node_id, &chan_a_id);
+				let cp_node_id = harness.nodes[1].our_node_id();
+				harness.nodes[0].splice_in(&cp_node_id, &harness.chan_a_id());
 			},
 			0xa1 => {
 				if !cfg!(splicing) {
-					assert_test_invariants(&nodes);
+					assert_test_invariants(&harness.nodes);
 					return;
 				}
-				let cp_node_id = nodes[0].our_node_id();
-				nodes[1].splice_in(&cp_node_id, &chan_a_id);
+				let cp_node_id = harness.nodes[0].our_node_id();
+				harness.nodes[1].splice_in(&cp_node_id, &harness.chan_a_id());
 			},
 			0xa2 => {
 				if !cfg!(splicing) {
-					assert_test_invariants(&nodes);
+					assert_test_invariants(&harness.nodes);
 					return;
 				}
-				let cp_node_id = nodes[2].our_node_id();
-				nodes[1].splice_in(&cp_node_id, &chan_b_id);
+				let cp_node_id = harness.nodes[2].our_node_id();
+				harness.nodes[1].splice_in(&cp_node_id, &harness.chan_b_id());
 			},
 			0xa3 => {
 				if !cfg!(splicing) {
-					assert_test_invariants(&nodes);
+					assert_test_invariants(&harness.nodes);
 					return;
 				}
-				let cp_node_id = nodes[1].our_node_id();
-				nodes[2].splice_in(&cp_node_id, &chan_b_id);
+				let cp_node_id = harness.nodes[1].our_node_id();
+				harness.nodes[2].splice_in(&cp_node_id, &harness.chan_b_id());
 			},
 
 			0xa4 => {
 				if !cfg!(splicing) {
-					assert_test_invariants(&nodes);
+					assert_test_invariants(&harness.nodes);
 					return;
 				}
-				let cp_node_id = nodes[1].our_node_id();
-				nodes[0].splice_out(&cp_node_id, &chan_a_id);
+				let cp_node_id = harness.nodes[1].our_node_id();
+				harness.nodes[0].splice_out(&cp_node_id, &harness.chan_a_id());
 			},
 			0xa5 => {
 				if !cfg!(splicing) {
-					assert_test_invariants(&nodes);
+					assert_test_invariants(&harness.nodes);
 					return;
 				}
-				let cp_node_id = nodes[0].our_node_id();
-				nodes[1].splice_out(&cp_node_id, &chan_a_id);
+				let cp_node_id = harness.nodes[0].our_node_id();
+				harness.nodes[1].splice_out(&cp_node_id, &harness.chan_a_id());
 			},
 			0xa6 => {
 				if !cfg!(splicing) {
-					assert_test_invariants(&nodes);
+					assert_test_invariants(&harness.nodes);
 					return;
 				}
-				let cp_node_id = nodes[2].our_node_id();
-				nodes[1].splice_out(&cp_node_id, &chan_b_id);
+				let cp_node_id = harness.nodes[2].our_node_id();
+				harness.nodes[1].splice_out(&cp_node_id, &harness.chan_b_id());
 			},
 			0xa7 => {
 				if !cfg!(splicing) {
-					assert_test_invariants(&nodes);
+					assert_test_invariants(&harness.nodes);
 					return;
 				}
-				let cp_node_id = nodes[1].our_node_id();
-				nodes[2].splice_out(&cp_node_id, &chan_b_id);
+				let cp_node_id = harness.nodes[1].our_node_id();
+				harness.nodes[2].splice_out(&cp_node_id, &harness.chan_b_id());
 			},
 
 			// Sync node by 1 block to cover confirmation of a transaction.
 			0xa8 => {
-				chain_state.confirm_pending_txs();
-				nodes[0].sync_with_chain_state(&chain_state, Some(1));
+				harness.chain_state.confirm_pending_txs();
+				harness.nodes[0].sync_with_chain_state(&harness.chain_state, Some(1));
 			},
 			0xa9 => {
-				chain_state.confirm_pending_txs();
-				nodes[1].sync_with_chain_state(&chain_state, Some(1));
+				harness.chain_state.confirm_pending_txs();
+				harness.nodes[1].sync_with_chain_state(&harness.chain_state, Some(1));
 			},
 			0xaa => {
-				chain_state.confirm_pending_txs();
-				nodes[2].sync_with_chain_state(&chain_state, Some(1));
+				harness.chain_state.confirm_pending_txs();
+				harness.nodes[2].sync_with_chain_state(&harness.chain_state, Some(1));
 			},
 			// Sync node to chain tip to cover confirmation of a transaction post-reorg-risk.
 			0xab => {
-				chain_state.confirm_pending_txs();
-				nodes[0].sync_with_chain_state(&chain_state, None);
+				harness.chain_state.confirm_pending_txs();
+				harness.nodes[0].sync_with_chain_state(&harness.chain_state, None);
 			},
 			0xac => {
-				chain_state.confirm_pending_txs();
-				nodes[1].sync_with_chain_state(&chain_state, None);
+				harness.chain_state.confirm_pending_txs();
+				harness.nodes[1].sync_with_chain_state(&harness.chain_state, None);
 			},
 			0xad => {
-				chain_state.confirm_pending_txs();
-				nodes[2].sync_with_chain_state(&chain_state, None);
+				harness.chain_state.confirm_pending_txs();
+				harness.nodes[2].sync_with_chain_state(&harness.chain_state, None);
 			},
 
 			0xb0 | 0xb1 | 0xb2 => {
 				// Restart node A, picking among the in-flight `ChannelMonitor`s to use based on
 				// the value of `v` we're matching.
-				ab_link.disconnect_for_reload(0, &mut nodes, &mut queues);
-				nodes[0].reload(v, &out, &router, chan_type);
+				harness.ab_link.disconnect_for_reload(0, &mut harness.nodes, &mut harness.queues);
+				harness.nodes[0].reload(v, &harness.out, &router, harness.chan_type);
 			},
 			0xb3..=0xbb => {
 				// Restart node B, picking among the in-flight `ChannelMonitor`s to use based on
 				// the value of `v` we're matching.
-				ab_link.disconnect_for_reload(1, &mut nodes, &mut queues);
-				bc_link.disconnect_for_reload(1, &mut nodes, &mut queues);
-				nodes[1].reload(v, &out, &router, chan_type);
+				harness.ab_link.disconnect_for_reload(1, &mut harness.nodes, &mut harness.queues);
+				harness.bc_link.disconnect_for_reload(1, &mut harness.nodes, &mut harness.queues);
+				harness.nodes[1].reload(v, &harness.out, &router, harness.chan_type);
 			},
 			0xbc | 0xbd | 0xbe => {
 				// Restart node C, picking among the in-flight `ChannelMonitor`s to use based on
 				// the value of `v` we're matching.
-				bc_link.disconnect_for_reload(2, &mut nodes, &mut queues);
-				nodes[2].reload(v, &out, &router, chan_type);
+				harness.bc_link.disconnect_for_reload(2, &mut harness.nodes, &mut harness.queues);
+				harness.nodes[2].reload(v, &harness.out, &router, harness.chan_type);
 			},
 
-			0xc0 => nodes[0].keys_manager.disable_supported_ops_for_all_signers(),
-			0xc1 => nodes[1].keys_manager.disable_supported_ops_for_all_signers(),
-			0xc2 => nodes[2].keys_manager.disable_supported_ops_for_all_signers(),
+			0xc0 => harness.nodes[0].keys_manager.disable_supported_ops_for_all_signers(),
+			0xc1 => harness.nodes[1].keys_manager.disable_supported_ops_for_all_signers(),
+			0xc2 => harness.nodes[2].keys_manager.disable_supported_ops_for_all_signers(),
 			0xc3 => {
-				nodes[0]
+				harness.nodes[0]
 					.keys_manager
 					.enable_op_for_all_signers(SignerOp::SignCounterpartyCommitment);
-				nodes[0].node.signer_unblocked(None);
+				harness.nodes[0].node.signer_unblocked(None);
 			},
 			0xc4 => {
-				nodes[1]
+				harness.nodes[1]
 					.keys_manager
 					.enable_op_for_all_signers(SignerOp::SignCounterpartyCommitment);
-				let filter = Some((nodes[0].our_node_id(), chan_a_id));
-				nodes[1].node.signer_unblocked(filter);
+				let filter = Some((harness.nodes[0].our_node_id(), harness.chan_a_id()));
+				harness.nodes[1].node.signer_unblocked(filter);
 			},
 			0xc5 => {
-				nodes[1]
+				harness.nodes[1]
 					.keys_manager
 					.enable_op_for_all_signers(SignerOp::SignCounterpartyCommitment);
-				let filter = Some((nodes[2].our_node_id(), chan_b_id));
-				nodes[1].node.signer_unblocked(filter);
+				let filter = Some((harness.nodes[2].our_node_id(), harness.chan_b_id()));
+				harness.nodes[1].node.signer_unblocked(filter);
 			},
 			0xc6 => {
-				nodes[2]
+				harness.nodes[2]
 					.keys_manager
 					.enable_op_for_all_signers(SignerOp::SignCounterpartyCommitment);
-				nodes[2].node.signer_unblocked(None);
+				harness.nodes[2].node.signer_unblocked(None);
 			},
 			0xc7 => {
-				nodes[0].keys_manager.enable_op_for_all_signers(SignerOp::GetPerCommitmentPoint);
-				nodes[0].node.signer_unblocked(None);
+				harness.nodes[0]
+					.keys_manager
+					.enable_op_for_all_signers(SignerOp::GetPerCommitmentPoint);
+				harness.nodes[0].node.signer_unblocked(None);
 			},
 			0xc8 => {
-				nodes[1].keys_manager.enable_op_for_all_signers(SignerOp::GetPerCommitmentPoint);
-				let filter = Some((nodes[0].our_node_id(), chan_a_id));
-				nodes[1].node.signer_unblocked(filter);
+				harness.nodes[1]
+					.keys_manager
+					.enable_op_for_all_signers(SignerOp::GetPerCommitmentPoint);
+				let filter = Some((harness.nodes[0].our_node_id(), harness.chan_a_id()));
+				harness.nodes[1].node.signer_unblocked(filter);
 			},
 			0xc9 => {
-				nodes[1].keys_manager.enable_op_for_all_signers(SignerOp::GetPerCommitmentPoint);
-				let filter = Some((nodes[2].our_node_id(), chan_b_id));
-				nodes[1].node.signer_unblocked(filter);
+				harness.nodes[1]
+					.keys_manager
+					.enable_op_for_all_signers(SignerOp::GetPerCommitmentPoint);
+				let filter = Some((harness.nodes[2].our_node_id(), harness.chan_b_id()));
+				harness.nodes[1].node.signer_unblocked(filter);
 			},
 			0xca => {
-				nodes[2].keys_manager.enable_op_for_all_signers(SignerOp::GetPerCommitmentPoint);
-				nodes[2].node.signer_unblocked(None);
+				harness.nodes[2]
+					.keys_manager
+					.enable_op_for_all_signers(SignerOp::GetPerCommitmentPoint);
+				harness.nodes[2].node.signer_unblocked(None);
 			},
 			0xcb => {
-				nodes[0].keys_manager.enable_op_for_all_signers(SignerOp::ReleaseCommitmentSecret);
-				nodes[0].node.signer_unblocked(None);
+				harness.nodes[0]
+					.keys_manager
+					.enable_op_for_all_signers(SignerOp::ReleaseCommitmentSecret);
+				harness.nodes[0].node.signer_unblocked(None);
 			},
 			0xcc => {
-				nodes[1].keys_manager.enable_op_for_all_signers(SignerOp::ReleaseCommitmentSecret);
-				let filter = Some((nodes[0].our_node_id(), chan_a_id));
-				nodes[1].node.signer_unblocked(filter);
+				harness.nodes[1]
+					.keys_manager
+					.enable_op_for_all_signers(SignerOp::ReleaseCommitmentSecret);
+				let filter = Some((harness.nodes[0].our_node_id(), harness.chan_a_id()));
+				harness.nodes[1].node.signer_unblocked(filter);
 			},
 			0xcd => {
-				nodes[1].keys_manager.enable_op_for_all_signers(SignerOp::ReleaseCommitmentSecret);
-				let filter = Some((nodes[2].our_node_id(), chan_b_id));
-				nodes[1].node.signer_unblocked(filter);
+				harness.nodes[1]
+					.keys_manager
+					.enable_op_for_all_signers(SignerOp::ReleaseCommitmentSecret);
+				let filter = Some((harness.nodes[2].our_node_id(), harness.chan_b_id()));
+				harness.nodes[1].node.signer_unblocked(filter);
 			},
 			0xce => {
-				nodes[2].keys_manager.enable_op_for_all_signers(SignerOp::ReleaseCommitmentSecret);
-				nodes[2].node.signer_unblocked(None);
+				harness.nodes[2]
+					.keys_manager
+					.enable_op_for_all_signers(SignerOp::ReleaseCommitmentSecret);
+				harness.nodes[2].node.signer_unblocked(None);
 			},
 
 			0xf0 => {
-				ab_link.complete_monitor_updates_for_node(0, &nodes, MonitorUpdateSelector::First);
+				harness.ab_link.complete_monitor_updates_for_node(
+					0,
+					&harness.nodes,
+					MonitorUpdateSelector::First,
+				);
 			},
 			0xf1 => {
-				ab_link.complete_monitor_updates_for_node(0, &nodes, MonitorUpdateSelector::Second);
+				harness.ab_link.complete_monitor_updates_for_node(
+					0,
+					&harness.nodes,
+					MonitorUpdateSelector::Second,
+				);
 			},
 			0xf2 => {
-				ab_link.complete_monitor_updates_for_node(0, &nodes, MonitorUpdateSelector::Last);
+				harness.ab_link.complete_monitor_updates_for_node(
+					0,
+					&harness.nodes,
+					MonitorUpdateSelector::Last,
+				);
 			},
 
 			0xf4 => {
-				ab_link.complete_monitor_updates_for_node(1, &nodes, MonitorUpdateSelector::First);
+				harness.ab_link.complete_monitor_updates_for_node(
+					1,
+					&harness.nodes,
+					MonitorUpdateSelector::First,
+				);
 			},
 			0xf5 => {
-				ab_link.complete_monitor_updates_for_node(1, &nodes, MonitorUpdateSelector::Second);
+				harness.ab_link.complete_monitor_updates_for_node(
+					1,
+					&harness.nodes,
+					MonitorUpdateSelector::Second,
+				);
 			},
 			0xf6 => {
-				ab_link.complete_monitor_updates_for_node(1, &nodes, MonitorUpdateSelector::Last);
+				harness.ab_link.complete_monitor_updates_for_node(
+					1,
+					&harness.nodes,
+					MonitorUpdateSelector::Last,
+				);
 			},
 
 			0xf8 => {
-				bc_link.complete_monitor_updates_for_node(1, &nodes, MonitorUpdateSelector::First);
+				harness.bc_link.complete_monitor_updates_for_node(
+					1,
+					&harness.nodes,
+					MonitorUpdateSelector::First,
+				);
 			},
 			0xf9 => {
-				bc_link.complete_monitor_updates_for_node(1, &nodes, MonitorUpdateSelector::Second);
+				harness.bc_link.complete_monitor_updates_for_node(
+					1,
+					&harness.nodes,
+					MonitorUpdateSelector::Second,
+				);
 			},
 			0xfa => {
-				bc_link.complete_monitor_updates_for_node(1, &nodes, MonitorUpdateSelector::Last);
+				harness.bc_link.complete_monitor_updates_for_node(
+					1,
+					&harness.nodes,
+					MonitorUpdateSelector::Last,
+				);
 			},
 
 			0xfc => {
-				bc_link.complete_monitor_updates_for_node(2, &nodes, MonitorUpdateSelector::First);
+				harness.bc_link.complete_monitor_updates_for_node(
+					2,
+					&harness.nodes,
+					MonitorUpdateSelector::First,
+				);
 			},
 			0xfd => {
-				bc_link.complete_monitor_updates_for_node(2, &nodes, MonitorUpdateSelector::Second);
+				harness.bc_link.complete_monitor_updates_for_node(
+					2,
+					&harness.nodes,
+					MonitorUpdateSelector::Second,
+				);
 			},
 			0xfe => {
-				bc_link.complete_monitor_updates_for_node(2, &nodes, MonitorUpdateSelector::Last);
+				harness.bc_link.complete_monitor_updates_for_node(
+					2,
+					&harness.nodes,
+					MonitorUpdateSelector::Last,
+				);
 			},
 
 			0xff => {
 				// Test that no channel is in a stuck state where neither party can send funds even
 				// after we resolve all pending events.
 
-				ab_link.reconnect(&mut nodes);
-				bc_link.reconnect(&mut nodes);
+				harness.ab_link.reconnect(&mut harness.nodes);
+				harness.bc_link.reconnect(&mut harness.nodes);
 
 				for op in SUPPORTED_SIGNER_OPS {
-					nodes[0].keys_manager.enable_op_for_all_signers(op);
-					nodes[1].keys_manager.enable_op_for_all_signers(op);
-					nodes[2].keys_manager.enable_op_for_all_signers(op);
+					harness.nodes[0].keys_manager.enable_op_for_all_signers(op);
+					harness.nodes[1].keys_manager.enable_op_for_all_signers(op);
+					harness.nodes[2].keys_manager.enable_op_for_all_signers(op);
 				}
-				nodes[0].node.signer_unblocked(None);
-				nodes[1].node.signer_unblocked(None);
-				nodes[2].node.signer_unblocked(None);
+				harness.nodes[0].node.signer_unblocked(None);
+				harness.nodes[1].node.signer_unblocked(None);
+				harness.nodes[2].node.signer_unblocked(None);
 
 				process_all_events_impl(
-					&nodes,
-					&out,
-					&ab_link,
-					&bc_link,
-					&mut chain_state,
-					&mut payments,
-					&mut queues,
+					&harness.nodes,
+					&harness.out,
+					&harness.ab_link,
+					&harness.bc_link,
+					&mut harness.chain_state,
+					&mut harness.payments,
+					&mut harness.queues,
 				);
 
 				// Since MPP payments are supported, we wait until we fully settle the state of all
 				// channels to see if we have any committed HTLC parts of an MPP payment that need
 				// to be failed back.
-				for node in &nodes {
+				for node in &harness.nodes {
 					node.node.timer_tick_occurred();
 				}
 				process_all_events_impl(
-					&nodes,
-					&out,
-					&ab_link,
-					&bc_link,
-					&mut chain_state,
-					&mut payments,
-					&mut queues,
+					&harness.nodes,
+					&harness.out,
+					&harness.ab_link,
+					&harness.bc_link,
+					&mut harness.chain_state,
+					&mut harness.payments,
+					&mut harness.queues,
 				);
 
-				payments.assert_all_resolved();
-				payments.assert_claims_reported();
+				harness.payments.assert_all_resolved();
+				harness.payments.assert_claims_reported();
 
 				// Finally, make sure that at least one end of each channel can make a substantial payment
-				for &chan_id in ab_link.channel_ids() {
+				for &chan_id in harness.ab_link.channel_ids() {
 					assert!(
-						payments.send_direct(&nodes, 0, 1, chan_id, 10_000_000)
-							|| payments.send_direct(&nodes, 1, 0, chan_id, 10_000_000)
+						harness.payments.send_direct(&harness.nodes, 0, 1, chan_id, 10_000_000)
+							|| harness.payments.send_direct(
+								&harness.nodes,
+								1,
+								0,
+								chan_id,
+								10_000_000
+							)
 					);
 				}
-				for &chan_id in bc_link.channel_ids() {
+				for &chan_id in harness.bc_link.channel_ids() {
 					assert!(
-						payments.send_direct(&nodes, 1, 2, chan_id, 10_000_000)
-							|| payments.send_direct(&nodes, 2, 1, chan_id, 10_000_000)
+						harness.payments.send_direct(&harness.nodes, 1, 2, chan_id, 10_000_000)
+							|| harness.payments.send_direct(
+								&harness.nodes,
+								2,
+								1,
+								chan_id,
+								10_000_000
+							)
 					);
 				}
 
-				nodes[0].record_last_htlc_clear_fee();
-				nodes[1].record_last_htlc_clear_fee();
-				nodes[2].record_last_htlc_clear_fee();
+				harness.nodes[0].record_last_htlc_clear_fee();
+				harness.nodes[1].record_last_htlc_clear_fee();
+				harness.nodes[2].record_last_htlc_clear_fee();
 			},
 			_ => test_return!(),
 		}
 
-		for node in &mut nodes {
-			node.refresh_serialized_manager();
-		}
+		harness.refresh_serialized_managers();
 	}
 }
 
