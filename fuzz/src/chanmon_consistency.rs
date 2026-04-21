@@ -2189,6 +2189,199 @@ impl<'a, 'd, Out: Output + MaybeSend + MaybeSync> Harness<'a, 'd, Out> {
 		assert_test_invariants(&self.nodes);
 	}
 
+	fn send_direct(
+		&mut self, source_idx: usize, dest_idx: usize, dest_chan_id: ChannelId, amt: u64,
+	) -> bool {
+		self.payments.send_direct(&self.nodes, source_idx, dest_idx, dest_chan_id, amt)
+	}
+
+	fn send_hop(
+		&mut self, source_idx: usize, middle_idx: usize, middle_chan_id: ChannelId,
+		dest_idx: usize, dest_chan_id: ChannelId, amt: u64,
+	) {
+		self.payments.send_hop(
+			&self.nodes,
+			source_idx,
+			middle_idx,
+			middle_chan_id,
+			dest_idx,
+			dest_chan_id,
+			amt,
+		);
+	}
+
+	fn send_mpp_direct(
+		&mut self, source_idx: usize, dest_idx: usize, dest_chan_ids: &[ChannelId], amt: u64,
+	) {
+		// Direct MPP payment with no hop.
+		self.payments.send_mpp_direct(&self.nodes, source_idx, dest_idx, dest_chan_ids, amt);
+	}
+
+	fn send_mpp_hop(
+		&mut self, source_idx: usize, middle_idx: usize, middle_chan_ids: &[ChannelId],
+		dest_idx: usize, dest_chan_ids: &[ChannelId], amt: u64,
+	) {
+		// MPP payment via hop, split across multiple channels on either or both hops.
+		self.payments.send_mpp_hop(
+			&self.nodes,
+			source_idx,
+			middle_idx,
+			middle_chan_ids,
+			dest_idx,
+			dest_chan_ids,
+			amt,
+		);
+	}
+
+	fn process_msg_events(
+		&mut self, node_idx: usize, corrupt_forward: bool, limit_events: ProcessMessages,
+	) -> bool {
+		process_msg_events_impl(
+			node_idx,
+			corrupt_forward,
+			limit_events,
+			&self.nodes,
+			&self.out,
+			&mut self.queues,
+		)
+	}
+
+	fn process_events(&mut self, node_idx: usize, fail: bool) -> bool {
+		process_events_impl(node_idx, fail, &self.nodes, &mut self.chain_state, &mut self.payments)
+	}
+
+	fn process_all_events(&mut self) {
+		let mut last_pass_no_updates = false;
+		for i in 0..std::usize::MAX {
+			if i == 100 {
+				panic!(
+					"It may take may iterations to settle the state, but it should not take forever"
+				);
+			}
+			// First, make sure no monitor updates are pending.
+			self.ab_link.complete_all_monitor_updates(&self.nodes);
+			self.bc_link.complete_all_monitor_updates(&self.nodes);
+			// Then, make sure any current forwards make their way to their destination.
+			if self.process_msg_events(0, false, ProcessMessages::AllMessages) {
+				last_pass_no_updates = false;
+				continue;
+			}
+			if self.process_msg_events(1, false, ProcessMessages::AllMessages) {
+				last_pass_no_updates = false;
+				continue;
+			}
+			if self.process_msg_events(2, false, ProcessMessages::AllMessages) {
+				last_pass_no_updates = false;
+				continue;
+			}
+			// Finally, make sure any payments are claimed.
+			if self.process_events(0, false) {
+				last_pass_no_updates = false;
+				continue;
+			}
+			if self.process_events(1, false) {
+				last_pass_no_updates = false;
+				continue;
+			}
+			if self.process_events(2, false) {
+				last_pass_no_updates = false;
+				continue;
+			}
+			if last_pass_no_updates {
+				// In some cases, `process_msg_events` may generate a message to send, but block
+				// sending until `complete_all_monitor_updates` gets called on the next iteration.
+				// Thus, we only exit if we manage two iterations with no messages or events to
+				// process.
+				break;
+			}
+			last_pass_no_updates = true;
+		}
+	}
+
+	fn disconnect_ab(&mut self) {
+		self.ab_link.disconnect(&mut self.nodes, &mut self.queues);
+	}
+
+	fn disconnect_bc(&mut self) {
+		self.bc_link.disconnect(&mut self.nodes, &mut self.queues);
+	}
+
+	fn reconnect_ab(&mut self) {
+		self.ab_link.reconnect(&mut self.nodes);
+	}
+
+	fn reconnect_bc(&mut self) {
+		self.bc_link.reconnect(&mut self.nodes);
+	}
+
+	fn restart_node(&mut self, node_idx: usize, v: u8, router: &'a FuzzRouter) {
+		match node_idx {
+			0 => {
+				self.ab_link.disconnect_for_reload(0, &mut self.nodes, &mut self.queues);
+			},
+			1 => {
+				self.ab_link.disconnect_for_reload(1, &mut self.nodes, &mut self.queues);
+				self.bc_link.disconnect_for_reload(1, &mut self.nodes, &mut self.queues);
+			},
+			2 => {
+				self.bc_link.disconnect_for_reload(2, &mut self.nodes, &mut self.queues);
+			},
+			_ => panic!("invalid node index"),
+		}
+		self.nodes[node_idx].reload(v, &self.out, router, self.chan_type);
+	}
+
+	fn settle_all(&mut self) {
+		// First, make sure peers are all connected to each other.
+		self.reconnect_ab();
+		self.reconnect_bc();
+
+		for op in SUPPORTED_SIGNER_OPS {
+			self.nodes[0].keys_manager.enable_op_for_all_signers(op);
+			self.nodes[1].keys_manager.enable_op_for_all_signers(op);
+			self.nodes[2].keys_manager.enable_op_for_all_signers(op);
+		}
+		self.nodes[0].node.signer_unblocked(None);
+		self.nodes[1].node.signer_unblocked(None);
+		self.nodes[2].node.signer_unblocked(None);
+
+		self.process_all_events();
+
+		// Since MPP payments are supported, we wait until we fully settle the state of all
+		// channels to see if we have any committed HTLC parts of an MPP payment that need
+		// to be failed back.
+		for node in self.nodes.iter() {
+			node.node.timer_tick_occurred();
+		}
+		self.process_all_events();
+
+		// Verify no payments are stuck, all should have resolved.
+		self.payments.assert_all_resolved();
+		// Verify that every payment claimed by a receiver resulted in a PaymentSent event at
+		// the sender.
+		self.payments.assert_claims_reported();
+
+		// Finally, make sure that at least one end of each channel can make a substantial payment.
+		let chan_ab_ids = self.ab_link.channel_ids().clone();
+		let chan_bc_ids = self.bc_link.channel_ids().clone();
+		for chan_id in chan_ab_ids {
+			assert!(
+				self.send_direct(0, 1, chan_id, 10_000_000)
+					|| self.send_direct(1, 0, chan_id, 10_000_000)
+			);
+		}
+		for chan_id in chan_bc_ids {
+			assert!(
+				self.send_direct(1, 2, chan_id, 10_000_000)
+					|| self.send_direct(2, 1, chan_id, 10_000_000)
+			);
+		}
+
+		self.nodes[0].record_last_htlc_clear_fee();
+		self.nodes[1].record_last_htlc_clear_fee();
+		self.nodes[2].record_last_htlc_clear_fee();
+	}
+
 	fn refresh_serialized_managers(&mut self) {
 		for node in &mut self.nodes {
 			node.refresh_serialized_manager();
@@ -2525,110 +2718,18 @@ fn process_events_impl(
 	had_events
 }
 
-fn process_all_events_impl<Out: Output + MaybeSend + MaybeSync>(
-	nodes: &[HarnessNode<'_>; 3], out: &Out, ab_link: &PeerLink, bc_link: &PeerLink,
-	chain_state: &mut ChainState, payments: &mut PaymentTracker, queues: &mut EventQueues,
-) {
-	let mut last_pass_no_updates = false;
-	for i in 0..std::usize::MAX {
-		if i == 100 {
-			panic!(
-				"It may take may iterations to settle the state, but it should not take forever"
-			);
-		}
-		// First, make sure no monitor updates are pending.
-		ab_link.complete_all_monitor_updates(nodes);
-		bc_link.complete_all_monitor_updates(nodes);
-		// Then, make sure any current forwards make their way to their destination.
-		if process_msg_events_impl(0, false, ProcessMessages::AllMessages, nodes, out, queues) {
-			last_pass_no_updates = false;
-			continue;
-		}
-		if process_msg_events_impl(1, false, ProcessMessages::AllMessages, nodes, out, queues) {
-			last_pass_no_updates = false;
-			continue;
-		}
-		if process_msg_events_impl(2, false, ProcessMessages::AllMessages, nodes, out, queues) {
-			last_pass_no_updates = false;
-			continue;
-		}
-		// Finally, make sure any payments are claimed.
-		if process_events_impl(0, false, nodes, chain_state, payments) {
-			last_pass_no_updates = false;
-			continue;
-		}
-		if process_events_impl(1, false, nodes, chain_state, payments) {
-			last_pass_no_updates = false;
-			continue;
-		}
-		if process_events_impl(2, false, nodes, chain_state, payments) {
-			last_pass_no_updates = false;
-			continue;
-		}
-		if last_pass_no_updates {
-			// In some cases, `process_msg_events_impl` may generate a message to send, but
-			// block sending until `complete_all_monitor_updates` gets called on the next
-			// iteration. Thus, we only exit if we manage two iterations with no messages or
-			// events to process.
-			break;
-		}
-		last_pass_no_updates = true;
-	}
-}
-
 #[inline]
 pub fn do_test<Out: Output + MaybeSend + MaybeSync>(data: &[u8], out: Out) {
 	let router = FuzzRouter {};
 	let mut harness = Harness::new(data, out, &router);
-	let chan_a_id = harness.chan_a_id();
-	let chan_b_id = harness.chan_b_id();
-
-	macro_rules! test_return {
-		() => {{
-			harness.finish();
-			return;
-		}};
-	}
 
 	loop {
-		macro_rules! process_msg_events {
-			($node: expr, $corrupt_forward: expr, $limit_events: expr) => {{
-				process_msg_events_impl(
-					$node,
-					$corrupt_forward,
-					$limit_events,
-					&harness.nodes,
-					&harness.out,
-					&mut harness.queues,
-				)
-			}};
-		}
-
-		macro_rules! process_msg_noret {
-			($node: expr, $corrupt_forward: expr, $limit_events: expr) => {{
-				process_msg_events!($node, $corrupt_forward, $limit_events);
-			}};
-		}
-
-		macro_rules! process_events {
-			($node: expr, $fail: expr) => {{
-				process_events_impl(
-					$node,
-					$fail,
-					&harness.nodes,
-					&mut harness.chain_state,
-					&mut harness.payments,
-				)
-			}};
-		}
-
-		macro_rules! process_ev_noret {
-			($node: expr, $fail: expr) => {{
-				process_events!($node, $fail);
-			}};
-		}
-
-		let v = if let Some(value) = harness.next_input_byte() { value } else { test_return!() };
+		let v = if let Some(value) = harness.next_input_byte() {
+			value
+		} else {
+			harness.finish();
+			return;
+		};
 		harness
 			.out
 			.locked_write(format!("READ A BYTE! HANDLING INPUT {:x}...........\n", v).as_bytes());
@@ -2664,266 +2765,278 @@ pub fn do_test<Out: Output + MaybeSend + MaybeSync>(data: &[u8], out: Out) {
 				}
 			},
 
-			0x0c => harness.ab_link.disconnect(&mut harness.nodes, &mut harness.queues),
-			0x0d => harness.bc_link.disconnect(&mut harness.nodes, &mut harness.queues),
-			0x0e => harness.ab_link.reconnect(&mut harness.nodes),
-			0x0f => harness.bc_link.reconnect(&mut harness.nodes),
+			0x0c => {
+				harness.disconnect_ab();
+			},
+			0x0d => {
+				harness.disconnect_bc();
+			},
+			0x0e => {
+				harness.reconnect_ab();
+			},
+			0x0f => {
+				harness.reconnect_bc();
+			},
 
-			0x10 => process_msg_noret!(0, true, ProcessMessages::AllMessages),
-			0x11 => process_msg_noret!(0, false, ProcessMessages::AllMessages),
-			0x12 => process_msg_noret!(0, true, ProcessMessages::OneMessage),
-			0x13 => process_msg_noret!(0, false, ProcessMessages::OneMessage),
-			0x14 => process_msg_noret!(0, true, ProcessMessages::OnePendingMessage),
-			0x15 => process_msg_noret!(0, false, ProcessMessages::OnePendingMessage),
+			0x10 => {
+				harness.process_msg_events(0, true, ProcessMessages::AllMessages);
+			},
+			0x11 => {
+				harness.process_msg_events(0, false, ProcessMessages::AllMessages);
+			},
+			0x12 => {
+				harness.process_msg_events(0, true, ProcessMessages::OneMessage);
+			},
+			0x13 => {
+				harness.process_msg_events(0, false, ProcessMessages::OneMessage);
+			},
+			0x14 => {
+				harness.process_msg_events(0, true, ProcessMessages::OnePendingMessage);
+			},
+			0x15 => {
+				harness.process_msg_events(0, false, ProcessMessages::OnePendingMessage);
+			},
 
-			0x16 => process_ev_noret!(0, true),
-			0x17 => process_ev_noret!(0, false),
+			0x16 => {
+				harness.process_events(0, true);
+			},
+			0x17 => {
+				harness.process_events(0, false);
+			},
 
-			0x18 => process_msg_noret!(1, true, ProcessMessages::AllMessages),
-			0x19 => process_msg_noret!(1, false, ProcessMessages::AllMessages),
-			0x1a => process_msg_noret!(1, true, ProcessMessages::OneMessage),
-			0x1b => process_msg_noret!(1, false, ProcessMessages::OneMessage),
-			0x1c => process_msg_noret!(1, true, ProcessMessages::OnePendingMessage),
-			0x1d => process_msg_noret!(1, false, ProcessMessages::OnePendingMessage),
+			0x18 => {
+				harness.process_msg_events(1, true, ProcessMessages::AllMessages);
+			},
+			0x19 => {
+				harness.process_msg_events(1, false, ProcessMessages::AllMessages);
+			},
+			0x1a => {
+				harness.process_msg_events(1, true, ProcessMessages::OneMessage);
+			},
+			0x1b => {
+				harness.process_msg_events(1, false, ProcessMessages::OneMessage);
+			},
+			0x1c => {
+				harness.process_msg_events(1, true, ProcessMessages::OnePendingMessage);
+			},
+			0x1d => {
+				harness.process_msg_events(1, false, ProcessMessages::OnePendingMessage);
+			},
 
-			0x1e => process_ev_noret!(1, true),
-			0x1f => process_ev_noret!(1, false),
+			0x1e => {
+				harness.process_events(1, true);
+			},
+			0x1f => {
+				harness.process_events(1, false);
+			},
 
-			0x20 => process_msg_noret!(2, true, ProcessMessages::AllMessages),
-			0x21 => process_msg_noret!(2, false, ProcessMessages::AllMessages),
-			0x22 => process_msg_noret!(2, true, ProcessMessages::OneMessage),
-			0x23 => process_msg_noret!(2, false, ProcessMessages::OneMessage),
-			0x24 => process_msg_noret!(2, true, ProcessMessages::OnePendingMessage),
-			0x25 => process_msg_noret!(2, false, ProcessMessages::OnePendingMessage),
+			0x20 => {
+				harness.process_msg_events(2, true, ProcessMessages::AllMessages);
+			},
+			0x21 => {
+				harness.process_msg_events(2, false, ProcessMessages::AllMessages);
+			},
+			0x22 => {
+				harness.process_msg_events(2, true, ProcessMessages::OneMessage);
+			},
+			0x23 => {
+				harness.process_msg_events(2, false, ProcessMessages::OneMessage);
+			},
+			0x24 => {
+				harness.process_msg_events(2, true, ProcessMessages::OnePendingMessage);
+			},
+			0x25 => {
+				harness.process_msg_events(2, false, ProcessMessages::OnePendingMessage);
+			},
 
-			0x26 => process_ev_noret!(2, true),
-			0x27 => process_ev_noret!(2, false),
+			0x26 => {
+				harness.process_events(2, true);
+			},
+			0x27 => {
+				harness.process_events(2, false);
+			},
 
 			// 1/10th the channel size:
 			0x30 => {
-				harness.payments.send_direct(&harness.nodes, 0, 1, chan_a_id, 10_000_000);
+				harness.send_direct(0, 1, harness.chan_a_id(), 10_000_000);
 			},
 			0x31 => {
-				harness.payments.send_direct(&harness.nodes, 1, 0, chan_a_id, 10_000_000);
+				harness.send_direct(1, 0, harness.chan_a_id(), 10_000_000);
 			},
 			0x32 => {
-				harness.payments.send_direct(&harness.nodes, 1, 2, chan_b_id, 10_000_000);
+				harness.send_direct(1, 2, harness.chan_b_id(), 10_000_000);
 			},
 			0x33 => {
-				harness.payments.send_direct(&harness.nodes, 2, 1, chan_b_id, 10_000_000);
+				harness.send_direct(2, 1, harness.chan_b_id(), 10_000_000);
 			},
 			0x34 => {
-				harness.payments.send_hop(
-					&harness.nodes,
-					0,
-					1,
-					chan_a_id,
-					2,
-					chan_b_id,
-					10_000_000,
-				);
+				harness.send_hop(0, 1, harness.chan_a_id(), 2, harness.chan_b_id(), 10_000_000);
 			},
 			0x35 => {
-				harness.payments.send_hop(
-					&harness.nodes,
-					2,
-					1,
-					chan_b_id,
-					0,
-					chan_a_id,
-					10_000_000,
-				);
+				harness.send_hop(2, 1, harness.chan_b_id(), 0, harness.chan_a_id(), 10_000_000);
 			},
 
 			0x38 => {
-				harness.payments.send_direct(&harness.nodes, 0, 1, chan_a_id, 1_000_000);
+				harness.send_direct(0, 1, harness.chan_a_id(), 1_000_000);
 			},
 			0x39 => {
-				harness.payments.send_direct(&harness.nodes, 1, 0, chan_a_id, 1_000_000);
+				harness.send_direct(1, 0, harness.chan_a_id(), 1_000_000);
 			},
 			0x3a => {
-				harness.payments.send_direct(&harness.nodes, 1, 2, chan_b_id, 1_000_000);
+				harness.send_direct(1, 2, harness.chan_b_id(), 1_000_000);
 			},
 			0x3b => {
-				harness.payments.send_direct(&harness.nodes, 2, 1, chan_b_id, 1_000_000);
+				harness.send_direct(2, 1, harness.chan_b_id(), 1_000_000);
 			},
 			0x3c => {
-				harness.payments.send_hop(&harness.nodes, 0, 1, chan_a_id, 2, chan_b_id, 1_000_000);
+				harness.send_hop(0, 1, harness.chan_a_id(), 2, harness.chan_b_id(), 1_000_000);
 			},
 			0x3d => {
-				harness.payments.send_hop(&harness.nodes, 2, 1, chan_b_id, 0, chan_a_id, 1_000_000);
+				harness.send_hop(2, 1, harness.chan_b_id(), 0, harness.chan_a_id(), 1_000_000);
 			},
 
 			0x40 => {
-				harness.payments.send_direct(&harness.nodes, 0, 1, chan_a_id, 100_000);
+				harness.send_direct(0, 1, harness.chan_a_id(), 100_000);
 			},
 			0x41 => {
-				harness.payments.send_direct(&harness.nodes, 1, 0, chan_a_id, 100_000);
+				harness.send_direct(1, 0, harness.chan_a_id(), 100_000);
 			},
 			0x42 => {
-				harness.payments.send_direct(&harness.nodes, 1, 2, chan_b_id, 100_000);
+				harness.send_direct(1, 2, harness.chan_b_id(), 100_000);
 			},
 			0x43 => {
-				harness.payments.send_direct(&harness.nodes, 2, 1, chan_b_id, 100_000);
+				harness.send_direct(2, 1, harness.chan_b_id(), 100_000);
 			},
 			0x44 => {
-				harness.payments.send_hop(&harness.nodes, 0, 1, chan_a_id, 2, chan_b_id, 100_000);
+				harness.send_hop(0, 1, harness.chan_a_id(), 2, harness.chan_b_id(), 100_000);
 			},
 			0x45 => {
-				harness.payments.send_hop(&harness.nodes, 2, 1, chan_b_id, 0, chan_a_id, 100_000);
+				harness.send_hop(2, 1, harness.chan_b_id(), 0, harness.chan_a_id(), 100_000);
 			},
 
 			0x48 => {
-				harness.payments.send_direct(&harness.nodes, 0, 1, chan_a_id, 10_000);
+				harness.send_direct(0, 1, harness.chan_a_id(), 10_000);
 			},
 			0x49 => {
-				harness.payments.send_direct(&harness.nodes, 1, 0, chan_a_id, 10_000);
+				harness.send_direct(1, 0, harness.chan_a_id(), 10_000);
 			},
 			0x4a => {
-				harness.payments.send_direct(&harness.nodes, 1, 2, chan_b_id, 10_000);
+				harness.send_direct(1, 2, harness.chan_b_id(), 10_000);
 			},
 			0x4b => {
-				harness.payments.send_direct(&harness.nodes, 2, 1, chan_b_id, 10_000);
+				harness.send_direct(2, 1, harness.chan_b_id(), 10_000);
 			},
 			0x4c => {
-				harness.payments.send_hop(&harness.nodes, 0, 1, chan_a_id, 2, chan_b_id, 10_000);
+				harness.send_hop(0, 1, harness.chan_a_id(), 2, harness.chan_b_id(), 10_000);
 			},
 			0x4d => {
-				harness.payments.send_hop(&harness.nodes, 2, 1, chan_b_id, 0, chan_a_id, 10_000);
+				harness.send_hop(2, 1, harness.chan_b_id(), 0, harness.chan_a_id(), 10_000);
 			},
 
 			0x50 => {
-				harness.payments.send_direct(&harness.nodes, 0, 1, chan_a_id, 1_000);
+				harness.send_direct(0, 1, harness.chan_a_id(), 1_000);
 			},
 			0x51 => {
-				harness.payments.send_direct(&harness.nodes, 1, 0, chan_a_id, 1_000);
+				harness.send_direct(1, 0, harness.chan_a_id(), 1_000);
 			},
 			0x52 => {
-				harness.payments.send_direct(&harness.nodes, 1, 2, chan_b_id, 1_000);
+				harness.send_direct(1, 2, harness.chan_b_id(), 1_000);
 			},
 			0x53 => {
-				harness.payments.send_direct(&harness.nodes, 2, 1, chan_b_id, 1_000);
+				harness.send_direct(2, 1, harness.chan_b_id(), 1_000);
 			},
 			0x54 => {
-				harness.payments.send_hop(&harness.nodes, 0, 1, chan_a_id, 2, chan_b_id, 1_000);
+				harness.send_hop(0, 1, harness.chan_a_id(), 2, harness.chan_b_id(), 1_000);
 			},
 			0x55 => {
-				harness.payments.send_hop(&harness.nodes, 2, 1, chan_b_id, 0, chan_a_id, 1_000);
+				harness.send_hop(2, 1, harness.chan_b_id(), 0, harness.chan_a_id(), 1_000);
 			},
 
 			0x58 => {
-				harness.payments.send_direct(&harness.nodes, 0, 1, chan_a_id, 100);
+				harness.send_direct(0, 1, harness.chan_a_id(), 100);
 			},
 			0x59 => {
-				harness.payments.send_direct(&harness.nodes, 1, 0, chan_a_id, 100);
+				harness.send_direct(1, 0, harness.chan_a_id(), 100);
 			},
 			0x5a => {
-				harness.payments.send_direct(&harness.nodes, 1, 2, chan_b_id, 100);
+				harness.send_direct(1, 2, harness.chan_b_id(), 100);
 			},
 			0x5b => {
-				harness.payments.send_direct(&harness.nodes, 2, 1, chan_b_id, 100);
+				harness.send_direct(2, 1, harness.chan_b_id(), 100);
 			},
 			0x5c => {
-				harness.payments.send_hop(&harness.nodes, 0, 1, chan_a_id, 2, chan_b_id, 100);
+				harness.send_hop(0, 1, harness.chan_a_id(), 2, harness.chan_b_id(), 100);
 			},
 			0x5d => {
-				harness.payments.send_hop(&harness.nodes, 2, 1, chan_b_id, 0, chan_a_id, 100);
+				harness.send_hop(2, 1, harness.chan_b_id(), 0, harness.chan_a_id(), 100);
 			},
 
 			0x60 => {
-				harness.payments.send_direct(&harness.nodes, 0, 1, chan_a_id, 10);
+				harness.send_direct(0, 1, harness.chan_a_id(), 10);
 			},
 			0x61 => {
-				harness.payments.send_direct(&harness.nodes, 1, 0, chan_a_id, 10);
+				harness.send_direct(1, 0, harness.chan_a_id(), 10);
 			},
 			0x62 => {
-				harness.payments.send_direct(&harness.nodes, 1, 2, chan_b_id, 10);
+				harness.send_direct(1, 2, harness.chan_b_id(), 10);
 			},
 			0x63 => {
-				harness.payments.send_direct(&harness.nodes, 2, 1, chan_b_id, 10);
+				harness.send_direct(2, 1, harness.chan_b_id(), 10);
 			},
 			0x64 => {
-				harness.payments.send_hop(&harness.nodes, 0, 1, chan_a_id, 2, chan_b_id, 10);
+				harness.send_hop(0, 1, harness.chan_a_id(), 2, harness.chan_b_id(), 10);
 			},
 			0x65 => {
-				harness.payments.send_hop(&harness.nodes, 2, 1, chan_b_id, 0, chan_a_id, 10);
+				harness.send_hop(2, 1, harness.chan_b_id(), 0, harness.chan_a_id(), 10);
 			},
 
 			0x68 => {
-				harness.payments.send_direct(&harness.nodes, 0, 1, chan_a_id, 1);
+				harness.send_direct(0, 1, harness.chan_a_id(), 1);
 			},
 			0x69 => {
-				harness.payments.send_direct(&harness.nodes, 1, 0, chan_a_id, 1);
+				harness.send_direct(1, 0, harness.chan_a_id(), 1);
 			},
 			0x6a => {
-				harness.payments.send_direct(&harness.nodes, 1, 2, chan_b_id, 1);
+				harness.send_direct(1, 2, harness.chan_b_id(), 1);
 			},
 			0x6b => {
-				harness.payments.send_direct(&harness.nodes, 2, 1, chan_b_id, 1);
+				harness.send_direct(2, 1, harness.chan_b_id(), 1);
 			},
 			0x6c => {
-				harness.payments.send_hop(&harness.nodes, 0, 1, chan_a_id, 2, chan_b_id, 1);
+				harness.send_hop(0, 1, harness.chan_a_id(), 2, harness.chan_b_id(), 1);
 			},
 			0x6d => {
-				harness.payments.send_hop(&harness.nodes, 2, 1, chan_b_id, 0, chan_a_id, 1);
+				harness.send_hop(2, 1, harness.chan_b_id(), 0, harness.chan_a_id(), 1);
 			},
 
 			// MPP payments
 			// 0x70: direct MPP from 0 to 1 (multi A-B channels)
 			0x70 => {
-				harness.payments.send_mpp_direct(
-					&harness.nodes,
-					0,
-					1,
-					harness.ab_link.channel_ids(),
-					1_000_000,
-				);
+				let chan_ab_ids = harness.ab_link.channel_ids().clone();
+				harness.send_mpp_direct(0, 1, &chan_ab_ids, 1_000_000);
 			},
 			// 0x71: MPP 0->1->2, multi channels on first hop (A-B)
 			0x71 => {
-				harness.payments.send_mpp_hop(
-					&harness.nodes,
-					0,
-					1,
-					harness.ab_link.channel_ids(),
-					2,
-					&[chan_b_id],
-					1_000_000,
-				);
+				let chan_ab_ids = harness.ab_link.channel_ids().clone();
+				let chan_b_id = harness.chan_b_id();
+				harness.send_mpp_hop(0, 1, &chan_ab_ids, 2, &[chan_b_id], 1_000_000);
 			},
 			// 0x72: MPP 0->1->2, multi channels on both hops (A-B and B-C)
 			0x72 => {
-				harness.payments.send_mpp_hop(
-					&harness.nodes,
-					0,
-					1,
-					harness.ab_link.channel_ids(),
-					2,
-					harness.bc_link.channel_ids(),
-					1_000_000,
-				);
+				let chan_ab_ids = harness.ab_link.channel_ids().clone();
+				let chan_bc_ids = harness.bc_link.channel_ids().clone();
+				harness.send_mpp_hop(0, 1, &chan_ab_ids, 2, &chan_bc_ids, 1_000_000);
 			},
 			// 0x73: MPP 0->1->2, multi channels on second hop (B-C)
 			0x73 => {
-				harness.payments.send_mpp_hop(
-					&harness.nodes,
-					0,
-					1,
-					&[chan_a_id],
-					2,
-					harness.bc_link.channel_ids(),
-					1_000_000,
-				);
+				let chan_a_id = harness.chan_a_id();
+				let chan_bc_ids = harness.bc_link.channel_ids().clone();
+				harness.send_mpp_hop(0, 1, &[chan_a_id], 2, &chan_bc_ids, 1_000_000);
 			},
 			// 0x74: direct MPP from 0 to 1, multi parts over single channel
 			0x74 => {
-				harness.payments.send_mpp_direct(
-					&harness.nodes,
-					0,
-					1,
-					&[chan_a_id, chan_a_id, chan_a_id],
-					1_000_000,
-				);
+				let chan_a_id = harness.chan_a_id();
+				harness.send_mpp_direct(0, 1, &[chan_a_id, chan_a_id, chan_a_id], 1_000_000);
 			},
 
 			0x80 => harness.nodes[0].bump_fee_estimate(harness.chan_type),
@@ -3029,21 +3142,17 @@ pub fn do_test<Out: Output + MaybeSend + MaybeSync>(data: &[u8], out: Out) {
 			0xb0 | 0xb1 | 0xb2 => {
 				// Restart node A, picking among the in-flight `ChannelMonitor`s to use based on
 				// the value of `v` we're matching.
-				harness.ab_link.disconnect_for_reload(0, &mut harness.nodes, &mut harness.queues);
-				harness.nodes[0].reload(v, &harness.out, &router, harness.chan_type);
+				harness.restart_node(0, v, &router);
 			},
 			0xb3..=0xbb => {
 				// Restart node B, picking among the in-flight `ChannelMonitor`s to use based on
 				// the value of `v` we're matching.
-				harness.ab_link.disconnect_for_reload(1, &mut harness.nodes, &mut harness.queues);
-				harness.bc_link.disconnect_for_reload(1, &mut harness.nodes, &mut harness.queues);
-				harness.nodes[1].reload(v, &harness.out, &router, harness.chan_type);
+				harness.restart_node(1, v, &router);
 			},
 			0xbc | 0xbd | 0xbe => {
 				// Restart node C, picking among the in-flight `ChannelMonitor`s to use based on
 				// the value of `v` we're matching.
-				harness.bc_link.disconnect_for_reload(2, &mut harness.nodes, &mut harness.queues);
-				harness.nodes[2].reload(v, &harness.out, &router, harness.chan_type);
+				harness.restart_node(2, v, &router);
 			},
 
 			0xc0 => harness.nodes[0].keys_manager.disable_supported_ops_for_all_signers(),
@@ -3219,79 +3328,12 @@ pub fn do_test<Out: Output + MaybeSend + MaybeSync>(data: &[u8], out: Out) {
 			0xff => {
 				// Test that no channel is in a stuck state where neither party can send funds even
 				// after we resolve all pending events.
-
-				harness.ab_link.reconnect(&mut harness.nodes);
-				harness.bc_link.reconnect(&mut harness.nodes);
-
-				for op in SUPPORTED_SIGNER_OPS {
-					harness.nodes[0].keys_manager.enable_op_for_all_signers(op);
-					harness.nodes[1].keys_manager.enable_op_for_all_signers(op);
-					harness.nodes[2].keys_manager.enable_op_for_all_signers(op);
-				}
-				harness.nodes[0].node.signer_unblocked(None);
-				harness.nodes[1].node.signer_unblocked(None);
-				harness.nodes[2].node.signer_unblocked(None);
-
-				process_all_events_impl(
-					&harness.nodes,
-					&harness.out,
-					&harness.ab_link,
-					&harness.bc_link,
-					&mut harness.chain_state,
-					&mut harness.payments,
-					&mut harness.queues,
-				);
-
-				// Since MPP payments are supported, we wait until we fully settle the state of all
-				// channels to see if we have any committed HTLC parts of an MPP payment that need
-				// to be failed back.
-				for node in &harness.nodes {
-					node.node.timer_tick_occurred();
-				}
-				process_all_events_impl(
-					&harness.nodes,
-					&harness.out,
-					&harness.ab_link,
-					&harness.bc_link,
-					&mut harness.chain_state,
-					&mut harness.payments,
-					&mut harness.queues,
-				);
-
-				harness.payments.assert_all_resolved();
-				harness.payments.assert_claims_reported();
-
-				// Finally, make sure that at least one end of each channel can make a substantial payment
-				for &chan_id in harness.ab_link.channel_ids() {
-					assert!(
-						harness.payments.send_direct(&harness.nodes, 0, 1, chan_id, 10_000_000)
-							|| harness.payments.send_direct(
-								&harness.nodes,
-								1,
-								0,
-								chan_id,
-								10_000_000
-							)
-					);
-				}
-				for &chan_id in harness.bc_link.channel_ids() {
-					assert!(
-						harness.payments.send_direct(&harness.nodes, 1, 2, chan_id, 10_000_000)
-							|| harness.payments.send_direct(
-								&harness.nodes,
-								2,
-								1,
-								chan_id,
-								10_000_000
-							)
-					);
-				}
-
-				harness.nodes[0].record_last_htlc_clear_fee();
-				harness.nodes[1].record_last_htlc_clear_fee();
-				harness.nodes[2].record_last_htlc_clear_fee();
+				harness.settle_all();
 			},
-			_ => test_return!(),
+			_ => {
+				assert_test_invariants(&harness.nodes);
+				return;
+			},
 		}
 
 		harness.refresh_serialized_managers();
