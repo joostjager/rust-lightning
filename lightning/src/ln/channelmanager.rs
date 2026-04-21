@@ -1601,7 +1601,7 @@ enum PostMonitorUpdateChanResume {
 	Blocked { update_actions: Vec<MonitorUpdateCompletionAction> },
 	/// Channel was fully unblocked and has been resumed. Contains remaining data to process.
 	Unblocked {
-		has_state_changes: bool,
+		needs_persist: bool,
 		channel_id: ChannelId,
 		counterparty_node_id: PublicKey,
 		funding_txo: OutPoint,
@@ -10281,9 +10281,6 @@ This indicates a bug inside LDK. Please report this error at https://github.com/
 
 	/// Handles actions which need to complete after a [`ChannelMonitorUpdate`] has been applied
 	/// which can happen after the per-peer state lock has been dropped.
-	///
-	/// Returns whether the completed work mutated `ChannelManager` state in a way that should be
-	/// persisted before returning control to the caller.
 	fn post_monitor_update_unlock(
 		&self, channel_id: ChannelId, counterparty_node_id: PublicKey, funding_txo: OutPoint,
 		user_channel_id: u128, unbroadcasted_batch_funding_txid: Option<Txid>,
@@ -10291,13 +10288,10 @@ This indicates a bug inside LDK. Please report this error at https://github.com/
 		finalized_claimed_htlcs: Vec<(HTLCSource, Option<AttributionData>)>,
 		failed_htlcs: Vec<(HTLCSource, PaymentHash, HTLCFailReason)>,
 		committed_outbound_htlc_sources: Vec<(HTLCPreviousHopData, u64)>,
-	) -> bool {
-		let mut needs_persist = false;
-
+	) {
 		// If the channel belongs to a batch funding transaction, the progress of the batch
 		// should be updated as we have received funding_signed and persisted the monitor.
 		if let Some(txid) = unbroadcasted_batch_funding_txid {
-			needs_persist = true;
 			let mut funding_batch_states = self.funding_batch_states.lock().unwrap();
 			let mut batch_completed = false;
 			if let Some(batch_state) = funding_batch_states.get_mut(&txid) {
@@ -10348,14 +10342,6 @@ This indicates a bug inside LDK. Please report this error at https://github.com/
 			}
 		}
 
-		if !update_actions.is_empty()
-			|| !htlc_forwards.is_empty()
-			|| !finalized_claimed_htlcs.is_empty()
-			|| !failed_htlcs.is_empty()
-			|| !committed_outbound_htlc_sources.is_empty()
-		{
-			needs_persist = true;
-		}
 		self.handle_monitor_update_completion_actions(update_actions);
 
 		self.forward_htlcs(htlc_forwards);
@@ -10377,8 +10363,6 @@ This indicates a bug inside LDK. Please report this error at https://github.com/
 			user_channel_id,
 			committed_outbound_htlc_sources,
 		);
-
-		needs_persist
 	}
 
 	fn handle_monitor_update_completion_actions<
@@ -10770,10 +10754,8 @@ This indicates a bug inside LDK. Please report this error at https://github.com/
 	/// after locks are released. If blocked updates remain, only the update actions are returned
 	/// and the caller should persist if any are present.
 	///
-	/// This method only prepares the post-monitor-update work while locks are held. Any
-	/// persistence decision for the unblocked case is deferred until
-	/// [`Self::handle_post_monitor_update_chan_resume`] executes the returned work after locks are
-	/// released.
+	/// This method also determines whether the prepared work mutates `ChannelManager` state in a
+	/// way that should be persisted before returning control to the caller.
 	///
 	/// Note: This method takes individual fields from [`PeerState`] rather than the whole struct
 	/// to avoid borrow checker issues when the channel is borrowed from `peer_state.channel_by_id`.
@@ -10867,9 +10849,16 @@ This indicates a bug inside LDK. Please report this error at https://github.com/
 
 			let unbroadcasted_batch_funding_txid =
 				chan.context.unbroadcasted_batch_funding_txid(&chan.funding);
+			let needs_persist = has_state_changes
+				|| !update_actions.is_empty()
+				|| unbroadcasted_batch_funding_txid.is_some()
+				|| !htlc_forwards.is_empty()
+				|| !updates.finalized_claimed_htlcs.is_empty()
+				|| !updates.failed_htlcs.is_empty()
+				|| !updates.committed_outbound_htlc_sources.is_empty();
 
 			PostMonitorUpdateChanResume::Unblocked {
-				has_state_changes,
+				needs_persist,
 				channel_id: chan_id,
 				counterparty_node_id,
 				funding_txo: chan.funding_outpoint(),
@@ -10978,7 +10967,7 @@ This indicates a bug inside LDK. Please report this error at https://github.com/
 				needs_persist
 			},
 			PostMonitorUpdateChanResume::Unblocked {
-				has_state_changes,
+				needs_persist,
 				channel_id,
 				counterparty_node_id,
 				funding_txo,
@@ -10990,7 +10979,7 @@ This indicates a bug inside LDK. Please report this error at https://github.com/
 				failed_htlcs,
 				committed_outbound_htlc_sources,
 			} => {
-				let post_unlock_persist = self.post_monitor_update_unlock(
+				self.post_monitor_update_unlock(
 					channel_id,
 					counterparty_node_id,
 					funding_txo,
@@ -11002,7 +10991,7 @@ This indicates a bug inside LDK. Please report this error at https://github.com/
 					failed_htlcs,
 					committed_outbound_htlc_sources,
 				);
-				has_state_changes || post_unlock_persist
+				needs_persist
 			},
 		}
 	}
