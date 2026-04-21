@@ -942,6 +942,21 @@ enum ChanType {
 	ZeroFeeCommitments,
 }
 
+// While delivering messages, select across three possible message selection
+// processes to maximize coverage. See the individual enum variants for details.
+#[derive(Copy, Clone, PartialEq, Eq)]
+enum ProcessMessages {
+	/// Deliver all available messages, including fetching any new messages from
+	/// `get_and_clear_pending_msg_events()` which may have side effects.
+	AllMessages,
+	/// Call `get_and_clear_pending_msg_events()` first, then deliver up to one
+	/// message, which may already be queued.
+	OneMessage,
+	/// Deliver up to one already-queued message. This avoids the side effects of
+	/// `get_and_clear_pending_msg_events()`, such as freeing the HTLC holding cell.
+	OnePendingMessage,
+}
+
 struct HarnessNode<'a> {
 	node_id: u8,
 	node: ChanMan<'a>,
@@ -1695,6 +1710,266 @@ fn lock_fundings(nodes: &[HarnessNode<'_>; 3]) {
 	}
 }
 
+fn process_msg_events_impl<Out: Output + MaybeSend + MaybeSync>(
+	node_idx: usize, corrupt_forward: bool, limit_events: ProcessMessages,
+	nodes: &[HarnessNode<'_>; 3], out: &Out, queues: &mut EventQueues,
+) -> bool {
+	fn find_destination_node(nodes: &[HarnessNode<'_>; 3], node_id: &PublicKey) -> usize {
+		nodes
+			.iter()
+			.position(|node| node.our_node_id() == *node_id)
+			.expect("message destination should be a known harness node")
+	}
+
+	fn log_msg_delivery<Out: Output + MaybeSend + MaybeSync>(
+		node_idx: usize, dest_idx: usize, msg_name: &str, out: &Out,
+	) {
+		out.locked_write(
+			format!("Delivering {} from node {} to node {}.\n", msg_name, node_idx, dest_idx)
+				.as_bytes(),
+		);
+	}
+
+	fn log_peer_message<Out: Output + MaybeSend + MaybeSync>(
+		node_idx: usize, node_id: &PublicKey, nodes: &[HarnessNode<'_>; 3], out: &Out,
+		msg_name: &str,
+	) -> usize {
+		let dest_idx = find_destination_node(nodes, node_id);
+		log_msg_delivery(node_idx, dest_idx, msg_name, out);
+		dest_idx
+	}
+
+	fn handle_update_add_htlc(
+		source_node_id: PublicKey, dest: &HarnessNode<'_>, update_add: &UpdateAddHTLC,
+		corrupt_forward: bool,
+	) {
+		if !corrupt_forward {
+			dest.handle_update_add_htlc(source_node_id, update_add);
+		} else {
+			// Corrupt the update_add_htlc message so that its HMAC check will fail and we
+			// generate an update_fail_malformed_htlc instead of an update_fail_htlc as we do
+			// when we reject a payment.
+			let mut msg_ser = update_add.encode();
+			msg_ser[1000] ^= 0xff;
+			let new_msg = UpdateAddHTLC::read_from_fixed_length_buffer(&mut &msg_ser[..]).unwrap();
+			dest.handle_update_add_htlc(source_node_id, &new_msg);
+		}
+	}
+
+	fn handle_update_htlcs_event<Out: Output + MaybeSend + MaybeSync>(
+		node_idx: usize, source_node_id: PublicKey, node_id: PublicKey, channel_id: ChannelId,
+		updates: CommitmentUpdate, corrupt_forward: bool, limit_events: ProcessMessages,
+		nodes: &[HarnessNode<'_>; 3], out: &Out,
+	) -> Option<MessageSendEvent> {
+		let dest_idx = find_destination_node(nodes, &node_id);
+		let dest = &nodes[dest_idx];
+		let CommitmentUpdate {
+			update_add_htlcs,
+			update_fail_htlcs,
+			update_fulfill_htlcs,
+			update_fail_malformed_htlcs,
+			update_fee,
+			commitment_signed,
+		} = updates;
+
+		for update_add in update_add_htlcs.iter() {
+			log_msg_delivery(node_idx, dest_idx, "update_add_htlc", out);
+			handle_update_add_htlc(source_node_id, dest, update_add, corrupt_forward);
+		}
+		let processed_change = !update_add_htlcs.is_empty()
+			|| !update_fulfill_htlcs.is_empty()
+			|| !update_fail_htlcs.is_empty()
+			|| !update_fail_malformed_htlcs.is_empty();
+		for update_fulfill in update_fulfill_htlcs {
+			log_msg_delivery(node_idx, dest_idx, "update_fulfill_htlc", out);
+			dest.handle_update_fulfill_htlc(source_node_id, update_fulfill);
+		}
+		for update_fail in update_fail_htlcs.iter() {
+			log_msg_delivery(node_idx, dest_idx, "update_fail_htlc", out);
+			dest.handle_update_fail_htlc(source_node_id, update_fail);
+		}
+		for update_fail_malformed in update_fail_malformed_htlcs.iter() {
+			log_msg_delivery(node_idx, dest_idx, "update_fail_malformed_htlc", out);
+			dest.handle_update_fail_malformed_htlc(source_node_id, update_fail_malformed);
+		}
+		if let Some(msg) = update_fee {
+			log_msg_delivery(node_idx, dest_idx, "update_fee", out);
+			dest.handle_update_fee(source_node_id, &msg);
+		}
+		if limit_events != ProcessMessages::AllMessages && processed_change {
+			// If we only want to process some messages, don't deliver the CS until later.
+			return Some(MessageSendEvent::UpdateHTLCs {
+				node_id,
+				channel_id,
+				updates: CommitmentUpdate {
+					update_add_htlcs: Vec::new(),
+					update_fail_htlcs: Vec::new(),
+					update_fulfill_htlcs: Vec::new(),
+					update_fail_malformed_htlcs: Vec::new(),
+					update_fee: None,
+					commitment_signed,
+				},
+			});
+		}
+		log_msg_delivery(node_idx, dest_idx, "commitment_signed", out);
+		dest.handle_commitment_signed_batch_test(source_node_id, &commitment_signed);
+		None
+	}
+
+	fn process_msg_event<Out: Output + MaybeSend + MaybeSync>(
+		node_idx: usize, source_node_id: PublicKey, event: MessageSendEvent, corrupt_forward: bool,
+		limit_events: ProcessMessages, nodes: &[HarnessNode<'_>; 3], out: &Out,
+	) -> Option<MessageSendEvent> {
+		match event {
+			MessageSendEvent::UpdateHTLCs { node_id, channel_id, updates } => {
+				handle_update_htlcs_event(
+					node_idx,
+					source_node_id,
+					node_id,
+					channel_id,
+					updates,
+					corrupt_forward,
+					limit_events,
+					nodes,
+					out,
+				)
+			},
+			MessageSendEvent::SendRevokeAndACK { ref node_id, ref msg } => {
+				let dest_idx = log_peer_message(node_idx, node_id, nodes, out, "revoke_and_ack");
+				nodes[dest_idx].handle_revoke_and_ack(source_node_id, msg);
+				None
+			},
+			MessageSendEvent::SendChannelReestablish { ref node_id, ref msg } => {
+				let dest_idx =
+					log_peer_message(node_idx, node_id, nodes, out, "channel_reestablish");
+				nodes[dest_idx].handle_channel_reestablish(source_node_id, msg);
+				None
+			},
+			MessageSendEvent::SendStfu { ref node_id, ref msg } => {
+				let dest_idx = log_peer_message(node_idx, node_id, nodes, out, "stfu");
+				nodes[dest_idx].handle_stfu(source_node_id, msg);
+				None
+			},
+			MessageSendEvent::SendTxAddInput { ref node_id, ref msg } => {
+				let dest_idx = log_peer_message(node_idx, node_id, nodes, out, "tx_add_input");
+				nodes[dest_idx].handle_tx_add_input(source_node_id, msg);
+				None
+			},
+			MessageSendEvent::SendTxAddOutput { ref node_id, ref msg } => {
+				let dest_idx = log_peer_message(node_idx, node_id, nodes, out, "tx_add_output");
+				nodes[dest_idx].handle_tx_add_output(source_node_id, msg);
+				None
+			},
+			MessageSendEvent::SendTxRemoveInput { ref node_id, ref msg } => {
+				let dest_idx = log_peer_message(node_idx, node_id, nodes, out, "tx_remove_input");
+				nodes[dest_idx].handle_tx_remove_input(source_node_id, msg);
+				None
+			},
+			MessageSendEvent::SendTxRemoveOutput { ref node_id, ref msg } => {
+				let dest_idx = log_peer_message(node_idx, node_id, nodes, out, "tx_remove_output");
+				nodes[dest_idx].handle_tx_remove_output(source_node_id, msg);
+				None
+			},
+			MessageSendEvent::SendTxComplete { ref node_id, ref msg } => {
+				let dest_idx = log_peer_message(node_idx, node_id, nodes, out, "tx_complete");
+				nodes[dest_idx].handle_tx_complete(source_node_id, msg);
+				None
+			},
+			MessageSendEvent::SendTxAbort { ref node_id, ref msg } => {
+				let dest_idx = log_peer_message(node_idx, node_id, nodes, out, "tx_abort");
+				nodes[dest_idx].handle_tx_abort(source_node_id, msg);
+				None
+			},
+			MessageSendEvent::SendTxInitRbf { ref node_id, ref msg } => {
+				let dest_idx = log_peer_message(node_idx, node_id, nodes, out, "tx_init_rbf");
+				nodes[dest_idx].handle_tx_init_rbf(source_node_id, msg);
+				None
+			},
+			MessageSendEvent::SendTxAckRbf { ref node_id, ref msg } => {
+				let dest_idx = log_peer_message(node_idx, node_id, nodes, out, "tx_ack_rbf");
+				nodes[dest_idx].handle_tx_ack_rbf(source_node_id, msg);
+				None
+			},
+			MessageSendEvent::SendTxSignatures { ref node_id, ref msg } => {
+				let dest_idx = log_peer_message(node_idx, node_id, nodes, out, "tx_signatures");
+				nodes[dest_idx].handle_tx_signatures(source_node_id, msg);
+				None
+			},
+			MessageSendEvent::SendSpliceInit { ref node_id, ref msg } => {
+				let dest_idx = log_peer_message(node_idx, node_id, nodes, out, "splice_init");
+				nodes[dest_idx].handle_splice_init(source_node_id, msg);
+				None
+			},
+			MessageSendEvent::SendSpliceAck { ref node_id, ref msg } => {
+				let dest_idx = log_peer_message(node_idx, node_id, nodes, out, "splice_ack");
+				nodes[dest_idx].handle_splice_ack(source_node_id, msg);
+				None
+			},
+			MessageSendEvent::SendSpliceLocked { ref node_id, ref msg } => {
+				let dest_idx = log_peer_message(node_idx, node_id, nodes, out, "splice_locked");
+				nodes[dest_idx].handle_splice_locked(source_node_id, msg);
+				None
+			},
+			MessageSendEvent::HandleError { ref action, .. } => {
+				assert_action_timeout_awaiting_response(action);
+				None
+			},
+			MessageSendEvent::SendChannelReady { .. }
+			| MessageSendEvent::SendAnnouncementSignatures { .. }
+			| MessageSendEvent::SendChannelUpdate { .. } => {
+				// Can be generated as a reestablish response.
+				None
+			},
+			MessageSendEvent::BroadcastChannelUpdate { .. } => {
+				// Can be generated as a result of calling `timer_tick_occurred` enough
+				// times while peers are disconnected.
+				None
+			},
+			_ => panic!("Unhandled message event {:?}", event),
+		}
+	}
+
+	let mut events = queues.take_for_node(node_idx);
+	let mut new_events = Vec::new();
+	if limit_events != ProcessMessages::OnePendingMessage {
+		new_events = nodes[node_idx].get_and_clear_pending_msg_events();
+	}
+	let mut had_events = false;
+	let source_node_id = nodes[node_idx].our_node_id();
+	let mut events_iter = events.drain(..).chain(new_events.drain(..));
+	let mut extra_ev = None;
+	for event in &mut events_iter {
+		had_events = true;
+		extra_ev = process_msg_event(
+			node_idx,
+			source_node_id,
+			event,
+			corrupt_forward,
+			limit_events,
+			nodes,
+			out,
+		);
+		if limit_events != ProcessMessages::AllMessages {
+			break;
+		}
+	}
+	if node_idx == 1 {
+		let remaining = extra_ev.into_iter().chain(events_iter).collect::<Vec<_>>();
+		queues.route_from_middle(remaining, None, nodes);
+	} else if node_idx == 0 {
+		if let Some(ev) = extra_ev {
+			queues.push_for_node(0, ev);
+		}
+		queues.extend_for_node(0, events_iter);
+	} else {
+		if let Some(ev) = extra_ev {
+			queues.push_for_node(2, ev);
+		}
+		queues.extend_for_node(2, events_iter);
+	}
+	had_events
+}
+
 #[inline]
 pub fn do_test<Out: Output + MaybeSend + MaybeSync>(data: &[u8], out: Out) {
 	let router = FuzzRouter {};
@@ -1870,436 +2145,16 @@ pub fn do_test<Out: Output + MaybeSend + MaybeSync>(data: &[u8], out: Out) {
 	}
 
 	loop {
-		// While delivering messages, we select across three possible message selection processes
-		// to ensure we get as much coverage as possible. See the individual enum variants for more
-		// details.
-		#[derive(PartialEq)]
-		enum ProcessMessages {
-			/// Deliver all available messages, including fetching any new messages from
-			/// `get_and_clear_pending_msg_events()` (which may have side effects).
-			AllMessages,
-			/// Call `get_and_clear_pending_msg_events()` first, and then deliver up to one
-			/// message (which may already be queued).
-			OneMessage,
-			/// Deliver up to one already-queued message. This avoids any potential side-effects
-			/// of `get_and_clear_pending_msg_events()` (eg freeing the HTLC holding cell), which
-			/// provides potentially more coverage.
-			OnePendingMessage,
-		}
-
 		macro_rules! process_msg_events {
 			($node: expr, $corrupt_forward: expr, $limit_events: expr) => {{
-				let mut events = queues.take_for_node($node);
-				let mut new_events = Vec::new();
-				if $limit_events != ProcessMessages::OnePendingMessage {
-					new_events = nodes[$node].get_and_clear_pending_msg_events();
-				}
-				let mut had_events = false;
-				let mut events_iter = events.drain(..).chain(new_events.drain(..));
-				let mut extra_ev = None;
-				for event in &mut events_iter {
-					had_events = true;
-					match event {
-						MessageSendEvent::UpdateHTLCs {
-							node_id,
-							channel_id,
-							updates:
-								CommitmentUpdate {
-									update_add_htlcs,
-									update_fail_htlcs,
-									update_fulfill_htlcs,
-									update_fail_malformed_htlcs,
-									update_fee,
-									commitment_signed,
-								},
-						} => {
-							for (idx, dest) in nodes.iter().enumerate() {
-								if dest.get_our_node_id() == node_id {
-									for update_add in update_add_htlcs.iter() {
-										out.locked_write(
-											format!(
-												"Delivering update_add_htlc from node {} to node {}.\n",
-												$node,
-												idx
-											)
-											.as_bytes(),
-										);
-										if !$corrupt_forward {
-											dest.handle_update_add_htlc(
-												nodes[$node].get_our_node_id(),
-												update_add,
-											);
-										} else {
-											// Corrupt the update_add_htlc message so that its HMAC
-											// check will fail and we generate a
-											// update_fail_malformed_htlc instead of an
-											// update_fail_htlc as we do when we reject a payment.
-											let mut msg_ser = update_add.encode();
-											msg_ser[1000] ^= 0xff;
-											let new_msg =
-												UpdateAddHTLC::read_from_fixed_length_buffer(
-													&mut &msg_ser[..],
-												)
-												.unwrap();
-											dest.handle_update_add_htlc(
-												nodes[$node].get_our_node_id(),
-												&new_msg,
-											);
-										}
-									}
-									let processed_change = !update_add_htlcs.is_empty()
-										|| !update_fulfill_htlcs.is_empty()
-										|| !update_fail_htlcs.is_empty()
-										|| !update_fail_malformed_htlcs.is_empty();
-									for update_fulfill in update_fulfill_htlcs {
-										out.locked_write(
-											format!(
-												"Delivering update_fulfill_htlc from node {} to node {}.\n",
-												$node,
-												idx
-											)
-											.as_bytes(),
-										);
-										dest.handle_update_fulfill_htlc(
-											nodes[$node].get_our_node_id(),
-											update_fulfill,
-										);
-									}
-									for update_fail in update_fail_htlcs.iter() {
-										out.locked_write(
-											format!(
-												"Delivering update_fail_htlc from node {} to node {}.\n",
-												$node,
-												idx
-											)
-											.as_bytes(),
-										);
-										dest.handle_update_fail_htlc(
-											nodes[$node].get_our_node_id(),
-											update_fail,
-										);
-									}
-									for update_fail_malformed in update_fail_malformed_htlcs.iter() {
-										out.locked_write(
-											format!(
-												"Delivering update_fail_malformed_htlc from node {} to node {}.\n",
-												$node,
-												idx
-											)
-											.as_bytes(),
-										);
-										dest.handle_update_fail_malformed_htlc(
-											nodes[$node].get_our_node_id(),
-											update_fail_malformed,
-										);
-									}
-									if let Some(msg) = update_fee {
-										out.locked_write(
-											format!(
-												"Delivering update_fee from node {} to node {}.\n",
-												$node,
-												idx
-											)
-											.as_bytes(),
-										);
-										dest.handle_update_fee(nodes[$node].get_our_node_id(), &msg);
-									}
-									if $limit_events != ProcessMessages::AllMessages
-										&& processed_change
-									{
-										// If we only want to process some messages, don't deliver the
-										// CS until later.
-										extra_ev = Some(MessageSendEvent::UpdateHTLCs {
-											node_id,
-											channel_id,
-											updates: CommitmentUpdate {
-												update_add_htlcs: Vec::new(),
-												update_fail_htlcs: Vec::new(),
-												update_fulfill_htlcs: Vec::new(),
-												update_fail_malformed_htlcs: Vec::new(),
-												update_fee: None,
-												commitment_signed,
-											},
-										});
-										break;
-									}
-									out.locked_write(
-										format!(
-											"Delivering commitment_signed from node {} to node {}.\n",
-											$node,
-											idx
-										)
-										.as_bytes(),
-									);
-									dest.handle_commitment_signed_batch_test(
-										nodes[$node].get_our_node_id(),
-										&commitment_signed,
-									);
-									break;
-								}
-							}
-						},
-						MessageSendEvent::SendRevokeAndACK { ref node_id, ref msg } => {
-							for (idx, dest) in nodes.iter().enumerate() {
-								if dest.get_our_node_id() == *node_id {
-									out.locked_write(
-										format!(
-											"Delivering revoke_and_ack from node {} to node {}.\n",
-											$node,
-											idx
-										)
-										.as_bytes(),
-									);
-									dest.handle_revoke_and_ack(nodes[$node].get_our_node_id(), msg);
-								}
-							}
-						},
-						MessageSendEvent::SendChannelReestablish { ref node_id, ref msg } => {
-							for (idx, dest) in nodes.iter().enumerate() {
-								if dest.get_our_node_id() == *node_id {
-									out.locked_write(
-										format!(
-											"Delivering channel_reestablish from node {} to node {}.\n",
-											$node,
-											idx
-										)
-										.as_bytes(),
-									);
-									dest.handle_channel_reestablish(
-										nodes[$node].get_our_node_id(),
-										msg,
-									);
-								}
-							}
-						},
-						MessageSendEvent::SendStfu { ref node_id, ref msg } => {
-							for (idx, dest) in nodes.iter().enumerate() {
-								if dest.get_our_node_id() == *node_id {
-									out.locked_write(
-										format!("Delivering stfu from node {} to node {}.\n", $node, idx)
-											.as_bytes(),
-									);
-									dest.handle_stfu(nodes[$node].get_our_node_id(), msg);
-								}
-							}
-						},
-						MessageSendEvent::SendTxAddInput { ref node_id, ref msg } => {
-							for (idx, dest) in nodes.iter().enumerate() {
-								if dest.get_our_node_id() == *node_id {
-									out.locked_write(
-										format!(
-											"Delivering tx_add_input from node {} to node {}.\n",
-											$node,
-											idx
-										)
-										.as_bytes(),
-									);
-									dest.handle_tx_add_input(nodes[$node].get_our_node_id(), msg);
-								}
-							}
-						},
-						MessageSendEvent::SendTxAddOutput { ref node_id, ref msg } => {
-							for (idx, dest) in nodes.iter().enumerate() {
-								if dest.get_our_node_id() == *node_id {
-									out.locked_write(
-										format!(
-											"Delivering tx_add_output from node {} to node {}.\n",
-											$node,
-											idx
-										)
-										.as_bytes(),
-									);
-									dest.handle_tx_add_output(nodes[$node].get_our_node_id(), msg);
-								}
-							}
-						},
-						MessageSendEvent::SendTxRemoveInput { ref node_id, ref msg } => {
-							for (idx, dest) in nodes.iter().enumerate() {
-								if dest.get_our_node_id() == *node_id {
-									out.locked_write(
-										format!(
-											"Delivering tx_remove_input from node {} to node {}.\n",
-											$node,
-											idx
-										)
-										.as_bytes(),
-									);
-									dest.handle_tx_remove_input(nodes[$node].get_our_node_id(), msg);
-								}
-							}
-						},
-						MessageSendEvent::SendTxRemoveOutput { ref node_id, ref msg } => {
-							for (idx, dest) in nodes.iter().enumerate() {
-								if dest.get_our_node_id() == *node_id {
-									out.locked_write(
-										format!(
-											"Delivering tx_remove_output from node {} to node {}.\n",
-											$node,
-											idx
-										)
-										.as_bytes(),
-									);
-									dest.handle_tx_remove_output(nodes[$node].get_our_node_id(), msg);
-								}
-							}
-						},
-						MessageSendEvent::SendTxComplete { ref node_id, ref msg } => {
-							for (idx, dest) in nodes.iter().enumerate() {
-								if dest.get_our_node_id() == *node_id {
-									out.locked_write(
-										format!(
-											"Delivering tx_complete from node {} to node {}.\n",
-											$node,
-											idx
-										)
-										.as_bytes(),
-									);
-									dest.handle_tx_complete(nodes[$node].get_our_node_id(), msg);
-								}
-							}
-						},
-						MessageSendEvent::SendTxAbort { ref node_id, ref msg } => {
-							for (idx, dest) in nodes.iter().enumerate() {
-								if dest.get_our_node_id() == *node_id {
-									out.locked_write(
-										format!(
-											"Delivering tx_abort from node {} to node {}.\n",
-											$node,
-											idx
-										)
-										.as_bytes(),
-									);
-									dest.handle_tx_abort(nodes[$node].get_our_node_id(), msg);
-								}
-							}
-						},
-						MessageSendEvent::SendTxInitRbf { ref node_id, ref msg } => {
-							for (idx, dest) in nodes.iter().enumerate() {
-								if dest.get_our_node_id() == *node_id {
-									out.locked_write(
-										format!(
-											"Delivering tx_init_rbf from node {} to node {}.\n",
-											$node,
-											idx
-										)
-										.as_bytes(),
-									);
-									dest.handle_tx_init_rbf(nodes[$node].get_our_node_id(), msg);
-								}
-							}
-						},
-						MessageSendEvent::SendTxAckRbf { ref node_id, ref msg } => {
-							for (idx, dest) in nodes.iter().enumerate() {
-								if dest.get_our_node_id() == *node_id {
-									out.locked_write(
-										format!(
-											"Delivering tx_ack_rbf from node {} to node {}.\n",
-											$node,
-											idx
-										)
-										.as_bytes(),
-									);
-									dest.handle_tx_ack_rbf(nodes[$node].get_our_node_id(), msg);
-								}
-							}
-						},
-						MessageSendEvent::SendTxSignatures { ref node_id, ref msg } => {
-							for (idx, dest) in nodes.iter().enumerate() {
-								if dest.get_our_node_id() == *node_id {
-									out.locked_write(
-										format!(
-											"Delivering tx_signatures from node {} to node {}.\n",
-											$node,
-											idx
-										)
-										.as_bytes(),
-									);
-									dest.handle_tx_signatures(nodes[$node].get_our_node_id(), msg);
-								}
-							}
-						},
-						MessageSendEvent::SendSpliceInit { ref node_id, ref msg } => {
-							for (idx, dest) in nodes.iter().enumerate() {
-								if dest.get_our_node_id() == *node_id {
-									out.locked_write(
-										format!(
-											"Delivering splice_init from node {} to node {}.\n",
-											$node,
-											idx
-										)
-										.as_bytes(),
-									);
-									dest.handle_splice_init(nodes[$node].get_our_node_id(), msg);
-								}
-							}
-						},
-						MessageSendEvent::SendSpliceAck { ref node_id, ref msg } => {
-							for (idx, dest) in nodes.iter().enumerate() {
-								if dest.get_our_node_id() == *node_id {
-									out.locked_write(
-										format!(
-											"Delivering splice_ack from node {} to node {}.\n",
-											$node,
-											idx
-										)
-										.as_bytes(),
-									);
-									dest.handle_splice_ack(nodes[$node].get_our_node_id(), msg);
-								}
-							}
-						},
-						MessageSendEvent::SendSpliceLocked { ref node_id, ref msg } => {
-							for (idx, dest) in nodes.iter().enumerate() {
-								if dest.get_our_node_id() == *node_id {
-									out.locked_write(
-										format!(
-											"Delivering splice_locked from node {} to node {}.\n",
-											$node,
-											idx
-										)
-										.as_bytes(),
-									);
-									dest.handle_splice_locked(nodes[$node].get_our_node_id(), msg);
-								}
-							}
-						},
-						MessageSendEvent::HandleError { ref action, .. } => {
-							assert_action_timeout_awaiting_response(action);
-						},
-						MessageSendEvent::SendChannelReady { .. } => {
-							// Can be generated as a reestablish response
-						},
-						MessageSendEvent::SendAnnouncementSignatures { .. } => {
-							// Can be generated as a reestablish response
-						},
-						MessageSendEvent::SendChannelUpdate { .. } => {
-							// Can be generated as a reestablish response
-						},
-						MessageSendEvent::BroadcastChannelUpdate { .. } => {
-							// Can be generated as a result of calling `timer_tick_occurred` enough
-							// times while peers are disconnected
-						},
-						_ => panic!("Unhandled message event {:?}", event),
-					}
-					if $limit_events != ProcessMessages::AllMessages {
-						break;
-					}
-				}
-				if $node == 1 {
-					let remaining = extra_ev.into_iter().chain(events_iter).collect::<Vec<_>>();
-					queues.route_from_middle(remaining, None, &nodes);
-				} else if $node == 0 {
-					if let Some(ev) = extra_ev {
-						queues.push_for_node(0, ev);
-					}
-					queues.extend_for_node(0, events_iter);
-				} else {
-					if let Some(ev) = extra_ev {
-						queues.push_for_node(2, ev);
-					}
-					queues.extend_for_node(2, events_iter);
-				}
-				had_events
+				process_msg_events_impl(
+					$node,
+					$corrupt_forward,
+					$limit_events,
+					&nodes,
+					&out,
+					&mut queues,
+				)
 			}};
 		}
 
