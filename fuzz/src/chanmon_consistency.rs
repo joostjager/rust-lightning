@@ -41,8 +41,7 @@ use lightning::chain;
 use lightning::chain::chaininterface::{
 	BroadcasterInterface, ConfirmationTarget, FeeEstimator, TransactionType,
 };
-use lightning::chain::channelmonitor::{ChannelMonitor, MonitorEvent};
-use lightning::chain::transaction::OutPoint;
+use lightning::chain::channelmonitor::ChannelMonitor;
 use lightning::chain::{
 	chainmonitor, channelmonitor, BlockLocator, ChannelMonitorUpdateStatus, Confirm, Watch,
 };
@@ -87,7 +86,6 @@ use lightning::util::wallet_utils::{WalletSourceSync, WalletSync};
 use lightning_invoice::RawBolt11Invoice;
 
 use crate::utils::test_logger::{self, Output};
-use crate::utils::test_persister::TestPersister;
 
 use bitcoin::secp256k1::ecdh::SharedSecret;
 use bitcoin::secp256k1::ecdsa::{RecoverableSignature, Signature};
@@ -104,6 +102,7 @@ use std::sync::atomic;
 use std::sync::{Arc, Mutex};
 
 const MAX_FEE: u32 = 10_000;
+
 struct FuzzEstimator {
 	ret_val: atomic::AtomicU32,
 }
@@ -293,6 +292,12 @@ impl Writer for VecWriter {
 	}
 }
 
+fn serialize_monitor(monitor: &ChannelMonitor<TestChannelSigner>) -> Vec<u8> {
+	let mut ser = VecWriter(Vec::new());
+	monitor.write(&mut ser).unwrap();
+	ser.0
+}
+
 /// The LDK API requires that any time we tell it we're done persisting a `ChannelMonitor[Update]`
 /// we never pass it in as the "latest" `ChannelMonitor` on startup. However, we can pass
 /// out-of-date monitors as long as we never told LDK we finished persisting them, which we do by
@@ -314,120 +319,154 @@ struct LatestMonitorState {
 	pending_monitors: Vec<(u64, Vec<u8>)>,
 }
 
-struct TestChainMonitor {
-	pub logger: Arc<dyn Logger>,
-	pub keys: Arc<KeyProvider>,
-	pub persister: Arc<TestPersister>,
-	pub chain_monitor: Arc<
-		chainmonitor::ChainMonitor<
-			TestChannelSigner,
-			Arc<dyn chain::Filter>,
-			Arc<TestBroadcaster>,
-			Arc<FuzzEstimator>,
-			Arc<dyn Logger>,
-			Arc<TestPersister>,
-			Arc<KeyProvider>,
-		>,
-	>,
-	pub latest_monitors: Mutex<HashMap<ChannelId, LatestMonitorState>>,
+struct HarnessPersister {
+	pub update_ret: Mutex<chain::ChannelMonitorUpdateStatus>,
+	pub latest_monitors: Arc<Mutex<HashMap<ChannelId, LatestMonitorState>>>,
 }
+impl HarnessPersister {
+	fn track_monitor_update(
+		&self, channel_id: ChannelId, monitor_id: u64, serialized_monitor: Vec<u8>,
+		status: chain::ChannelMonitorUpdateStatus,
+	) {
+		let mut latest_monitors = self.latest_monitors.lock().unwrap();
+		if let Some(state) = latest_monitors.get_mut(&channel_id) {
+			match status {
+				chain::ChannelMonitorUpdateStatus::Completed => {
+					// Completing update N makes any older in-flight monitor blobs unusable on
+					// restart. A newer ChannelManager serialization will no longer advertise those
+					// earlier updates as blocked, so reloading them would violate the Watch API.
+					state.pending_monitors.retain(|(id, _)| *id > monitor_id);
+					state.persisted_monitor_id = monitor_id;
+					state.persisted_monitor = serialized_monitor;
+				},
+				chain::ChannelMonitorUpdateStatus::InProgress => {
+					if let Some((_, pending_monitor)) =
+						state.pending_monitors.iter_mut().find(|(id, _)| *id == monitor_id)
+					{
+						*pending_monitor = serialized_monitor;
+					} else {
+						state.pending_monitors.push((monitor_id, serialized_monitor));
+						state.pending_monitors.sort_by_key(|(id, _)| *id);
+					}
+				},
+				chain::ChannelMonitorUpdateStatus::UnrecoverableError => {},
+			}
+		} else {
+			let state = match status {
+				chain::ChannelMonitorUpdateStatus::Completed => LatestMonitorState {
+					persisted_monitor_id: monitor_id,
+					persisted_monitor: serialized_monitor,
+					pending_monitors: Vec::new(),
+				},
+				chain::ChannelMonitorUpdateStatus::InProgress => LatestMonitorState {
+					persisted_monitor_id: monitor_id,
+					persisted_monitor: Vec::new(),
+					pending_monitors: vec![(monitor_id, serialized_monitor)],
+				},
+				chain::ChannelMonitorUpdateStatus::UnrecoverableError => return,
+			};
+			assert!(
+				latest_monitors.insert(channel_id, state).is_none(),
+				"Already had monitor state pre-persist"
+			);
+		}
+	}
+
+	fn mark_update_completed(
+		&self, channel_id: ChannelId, monitor_id: u64, serialized_monitor: Vec<u8>,
+	) {
+		if let Some(state) = self.latest_monitors.lock().unwrap().get_mut(&channel_id) {
+			// Once LDK acknowledges update N as completed, any older pending monitor blob is fully
+			// superseded and must not be offered back on restart.
+			state.pending_monitors.retain(|(id, _)| *id > monitor_id);
+			if monitor_id >= state.persisted_monitor_id {
+				state.persisted_monitor_id = monitor_id;
+				state.persisted_monitor = serialized_monitor;
+			}
+		}
+	}
+}
+impl chainmonitor::Persist<TestChannelSigner> for HarnessPersister {
+	fn persist_new_channel(
+		&self, _monitor_name: lightning::util::persist::MonitorName,
+		data: &channelmonitor::ChannelMonitor<TestChannelSigner>,
+	) -> chain::ChannelMonitorUpdateStatus {
+		let status = self.update_ret.lock().unwrap().clone();
+		let monitor_id = data.get_latest_update_id();
+		let serialized_monitor = serialize_monitor(data);
+		self.track_monitor_update(data.channel_id(), monitor_id, serialized_monitor, status);
+		status
+	}
+
+	fn update_persisted_channel(
+		&self, _monitor_name: lightning::util::persist::MonitorName,
+		update: Option<&channelmonitor::ChannelMonitorUpdate>,
+		data: &channelmonitor::ChannelMonitor<TestChannelSigner>,
+	) -> chain::ChannelMonitorUpdateStatus {
+		let status = self.update_ret.lock().unwrap().clone();
+		let monitor_id = update.map_or_else(|| data.get_latest_update_id(), |upd| upd.update_id);
+		let serialized_monitor = serialize_monitor(data);
+		self.track_monitor_update(data.channel_id(), monitor_id, serialized_monitor, status);
+		status
+	}
+
+	fn archive_persisted_channel(&self, _monitor_name: lightning::util::persist::MonitorName) {}
+}
+
+type InnerChainMonitor = chainmonitor::ChainMonitor<
+	TestChannelSigner,
+	Arc<dyn chain::Filter>,
+	Arc<TestBroadcaster>,
+	Arc<FuzzEstimator>,
+	Arc<dyn Logger>,
+	Arc<HarnessPersister>,
+	Arc<KeyProvider>,
+>;
+
+struct TestChainMonitor {
+	pub persister: Arc<HarnessPersister>,
+	pub chain_monitor: Arc<InnerChainMonitor>,
+	pub latest_monitors: Arc<Mutex<HashMap<ChannelId, LatestMonitorState>>>,
+}
+
 impl TestChainMonitor {
 	pub fn new(
 		broadcaster: Arc<TestBroadcaster>, logger: Arc<dyn Logger>, feeest: Arc<FuzzEstimator>,
-		persister: Arc<TestPersister>, keys: Arc<KeyProvider>,
+		initial_update_ret: ChannelMonitorUpdateStatus, keys: Arc<KeyProvider>,
 	) -> Self {
+		let latest_monitors = Arc::new(Mutex::new(new_hash_map()));
+		let persister = Arc::new(HarnessPersister {
+			update_ret: Mutex::new(initial_update_ret),
+			latest_monitors: Arc::clone(&latest_monitors),
+		});
 		Self {
 			chain_monitor: Arc::new(chainmonitor::ChainMonitor::new(
 				None,
 				broadcaster,
-				logger.clone(),
+				logger,
 				feeest,
 				Arc::clone(&persister),
 				Arc::clone(&keys),
 				keys.get_peer_storage_key(),
 				false,
 			)),
-			logger,
-			keys,
 			persister,
-			latest_monitors: Mutex::new(new_hash_map()),
+			latest_monitors,
 		}
+	}
+
+	fn mark_update_completed(
+		&self, channel_id: ChannelId, monitor_id: u64, serialized_monitor: Vec<u8>,
+	) {
+		self.persister.mark_update_completed(channel_id, monitor_id, serialized_monitor);
 	}
 }
-impl chain::Watch<TestChannelSigner> for TestChainMonitor {
-	fn watch_channel(
-		&self, channel_id: ChannelId, monitor: channelmonitor::ChannelMonitor<TestChannelSigner>,
-	) -> Result<chain::ChannelMonitorUpdateStatus, ()> {
-		let mut ser = VecWriter(Vec::new());
-		monitor.write(&mut ser).unwrap();
-		let monitor_id = monitor.get_latest_update_id();
-		let res = self.chain_monitor.watch_channel(channel_id, monitor);
-		let state = match res {
-			Ok(chain::ChannelMonitorUpdateStatus::Completed) => LatestMonitorState {
-				persisted_monitor_id: monitor_id,
-				persisted_monitor: ser.0,
-				pending_monitors: Vec::new(),
-			},
-			Ok(chain::ChannelMonitorUpdateStatus::InProgress) => LatestMonitorState {
-				persisted_monitor_id: monitor_id,
-				persisted_monitor: Vec::new(),
-				pending_monitors: vec![(monitor_id, ser.0)],
-			},
-			Ok(chain::ChannelMonitorUpdateStatus::UnrecoverableError) => panic!(),
-			Err(()) => panic!(),
-		};
-		if self.latest_monitors.lock().unwrap().insert(channel_id, state).is_some() {
-			panic!("Already had monitor pre-watch_channel");
-		}
-		res
-	}
 
-	fn update_channel(
-		&self, channel_id: ChannelId, update: &channelmonitor::ChannelMonitorUpdate,
-	) -> chain::ChannelMonitorUpdateStatus {
-		let mut map_lock = self.latest_monitors.lock().unwrap();
-		let map_entry = map_lock.get_mut(&channel_id).expect("Didn't have monitor on update call");
-		let latest_monitor_data = map_entry
-			.pending_monitors
-			.last()
-			.as_ref()
-			.map(|(_, data)| data)
-			.unwrap_or(&map_entry.persisted_monitor);
-		let deserialized_monitor =
-			<(BlockLocator, channelmonitor::ChannelMonitor<TestChannelSigner>)>::read(
-				&mut &latest_monitor_data[..],
-				(&*self.keys, &*self.keys),
-			)
-			.unwrap()
-			.1;
-		deserialized_monitor
-			.update_monitor(
-				update,
-				&&TestBroadcaster { txn_broadcasted: RefCell::new(Vec::new()) },
-				&&FuzzEstimator { ret_val: atomic::AtomicU32::new(253) },
-				&self.logger,
-			)
-			.unwrap();
-		let mut ser = VecWriter(Vec::new());
-		deserialized_monitor.write(&mut ser).unwrap();
-		let res = self.chain_monitor.update_channel(channel_id, update);
-		match res {
-			chain::ChannelMonitorUpdateStatus::Completed => {
-				map_entry.persisted_monitor_id = update.update_id;
-				map_entry.persisted_monitor = ser.0;
-			},
-			chain::ChannelMonitorUpdateStatus::InProgress => {
-				map_entry.pending_monitors.push((update.update_id, ser.0));
-			},
-			chain::ChannelMonitorUpdateStatus::UnrecoverableError => panic!(),
-		}
-		res
-	}
+impl std::ops::Deref for TestChainMonitor {
+	type Target = InnerChainMonitor;
 
-	fn release_pending_monitor_events(
-		&self,
-	) -> Vec<(OutPoint, ChannelId, Vec<MonitorEvent>, PublicKey)> {
-		return self.chain_monitor.release_pending_monitor_events();
+	fn deref(&self) -> &Self::Target {
+		self.chain_monitor.as_ref()
 	}
 }
 
@@ -777,7 +816,6 @@ fn send_mpp_payment(
 	if num_paths == 0 {
 		return false;
 	}
-
 	let amt_per_path = amt / num_paths as u64;
 	let mut paths = Vec::with_capacity(num_paths);
 
@@ -991,7 +1029,7 @@ impl<'a> HarnessNode<'a> {
 			Arc::clone(broadcaster),
 			logger_for_monitor,
 			Arc::clone(fee_estimator),
-			Arc::new(TestPersister { update_ret: Mutex::new(persistence_style) }),
+			persistence_style,
 			Arc::clone(keys_manager),
 		))
 	}
@@ -1060,64 +1098,73 @@ impl<'a> HarnessNode<'a> {
 		self.persistence_style = style;
 	}
 
-	fn complete_all_monitor_updates(&self, chan_id: &ChannelId) {
-		if let Some(state) = self.monitor.latest_monitors.lock().unwrap().get_mut(chan_id) {
-			assert!(
-				state.pending_monitors.windows(2).all(|pair| pair[0].0 < pair[1].0),
-				"updates should be sorted by id"
-			);
-			for (id, data) in state.pending_monitors.drain(..) {
-				self.monitor.chain_monitor.channel_monitor_updated(*chan_id, id).unwrap();
-				if id > state.persisted_monitor_id {
-					state.persisted_monitor_id = id;
-					state.persisted_monitor = data;
-				}
+	fn complete_all_monitor_updates(&self, chan_id: &ChannelId) -> bool {
+		let completed_updates = {
+			let mut latest_monitors = self.monitor.latest_monitors.lock().unwrap();
+			if let Some(state) = latest_monitors.get_mut(chan_id) {
+				assert!(
+					state.pending_monitors.windows(2).all(|pair| pair[0].0 < pair[1].0),
+					"updates should be sorted by id"
+				);
+				state.pending_monitors.drain(..).collect::<Vec<_>>()
+			} else {
+				Vec::new()
 			}
+		};
+		let mut completed_any = false;
+		for (monitor_id, data) in completed_updates {
+			completed_any = true;
+			self.monitor.channel_monitor_updated(*chan_id, monitor_id).unwrap();
+			self.monitor.mark_update_completed(*chan_id, monitor_id, data);
 		}
+		completed_any
 	}
 
 	fn complete_all_pending_monitor_updates(&self) {
+		let mut completed_updates = Vec::new();
 		for (channel_id, state) in self.monitor.latest_monitors.lock().unwrap().iter_mut() {
-			for (id, data) in state.pending_monitors.drain(..) {
-				self.monitor.chain_monitor.channel_monitor_updated(*channel_id, id).unwrap();
-				if id >= state.persisted_monitor_id {
-					state.persisted_monitor_id = id;
-					state.persisted_monitor = data;
-				}
+			for (monitor_id, data) in state.pending_monitors.drain(..) {
+				completed_updates.push((*channel_id, monitor_id, data));
 			}
+		}
+		for (channel_id, monitor_id, data) in completed_updates {
+			self.monitor.channel_monitor_updated(channel_id, monitor_id).unwrap();
+			self.monitor.mark_update_completed(channel_id, monitor_id, data);
 		}
 	}
 
 	fn complete_monitor_update(&self, chan_id: &ChannelId, selector: MonitorUpdateSelector) {
-		if let Some(state) = self.monitor.latest_monitors.lock().unwrap().get_mut(chan_id) {
-			assert!(
-				state.pending_monitors.windows(2).all(|pair| pair[0].0 < pair[1].0),
-				"updates should be sorted by id"
-			);
-			let update = match selector {
-				MonitorUpdateSelector::First => {
-					if state.pending_monitors.is_empty() {
-						None
-					} else {
-						Some(state.pending_monitors.remove(0))
-					}
-				},
-				MonitorUpdateSelector::Second => {
-					if state.pending_monitors.len() > 1 {
-						Some(state.pending_monitors.remove(1))
-					} else {
-						None
-					}
-				},
-				MonitorUpdateSelector::Last => state.pending_monitors.pop(),
-			};
-			if let Some((id, data)) = update {
-				self.monitor.chain_monitor.channel_monitor_updated(*chan_id, id).unwrap();
-				if id > state.persisted_monitor_id {
-					state.persisted_monitor_id = id;
-					state.persisted_monitor = data;
+		let completed_update = {
+			let mut latest_monitors = self.monitor.latest_monitors.lock().unwrap();
+			if let Some(state) = latest_monitors.get_mut(chan_id) {
+				assert!(
+					state.pending_monitors.windows(2).all(|pair| pair[0].0 < pair[1].0),
+					"updates should be sorted by id"
+				);
+				match selector {
+					MonitorUpdateSelector::First => {
+						if state.pending_monitors.is_empty() {
+							None
+						} else {
+							Some(state.pending_monitors.remove(0))
+						}
+					},
+					MonitorUpdateSelector::Second => {
+						if state.pending_monitors.len() > 1 {
+							Some(state.pending_monitors.remove(1))
+						} else {
+							None
+						}
+					},
+					MonitorUpdateSelector::Last => state.pending_monitors.pop(),
 				}
+			} else {
+				None
 			}
+		};
+		if let Some((monitor_id, data)) = completed_update {
+			self.monitor.channel_monitor_updated(*chan_id, monitor_id).unwrap();
+			self.monitor.mark_update_completed(*chan_id, monitor_id, data);
 		}
 	}
 
@@ -1312,13 +1359,11 @@ impl<'a> HarnessNode<'a> {
 
 		let manager = <(BlockLocator, ChanMan)>::read(&mut &self.serialized_manager[..], read_args)
 			.expect("Failed to read manager");
+		let expected_status = self.persistence_style;
+		*chain_monitor.persister.update_ret.lock().unwrap() = expected_status;
 		for (channel_id, mon) in monitors.drain() {
-			assert_eq!(
-				chain_monitor.chain_monitor.watch_channel(channel_id, mon),
-				Ok(ChannelMonitorUpdateStatus::Completed)
-			);
+			assert_eq!(chain_monitor.watch_channel(channel_id, mon), Ok(expected_status));
 		}
-		*chain_monitor.persister.update_ret.lock().unwrap() = self.persistence_style;
 		self.node = manager.1;
 		self.monitor = chain_monitor;
 		self.logger = logger;
@@ -1822,7 +1867,6 @@ fn assert_test_invariants(nodes: &[HarnessNode<'_>; 3]) {
 	assert_eq!(nodes[0].node.list_channels().len(), 3);
 	assert_eq!(nodes[1].node.list_channels().len(), 6);
 	assert_eq!(nodes[2].node.list_channels().len(), 3);
-
 	// All broadcasters should be empty. Broadcast transactions are handled explicitly.
 	assert!(nodes[0].broadcaster.txn_broadcasted.borrow().is_empty());
 	assert!(nodes[1].broadcaster.txn_broadcasted.borrow().is_empty());
@@ -2104,6 +2148,7 @@ impl<'a, 'd, Out: Output + MaybeSend + MaybeSync> Harness<'a, 'd, Out> {
 				chan_type,
 			),
 		];
+
 		let mut chain_state = ChainState::new();
 
 		// Connect peers first, then create channels.
@@ -2796,7 +2841,6 @@ pub fn do_test<Out: Output + MaybeSend + MaybeSync>(data: &[u8], out: Out) {
 			0x15 => {
 				harness.process_msg_events(0, false, ProcessMessages::OnePendingMessage);
 			},
-
 			0x16 => {
 				harness.process_events(0, true);
 			},
@@ -2822,7 +2866,6 @@ pub fn do_test<Out: Output + MaybeSend + MaybeSync>(data: &[u8], out: Out) {
 			0x1d => {
 				harness.process_msg_events(1, false, ProcessMessages::OnePendingMessage);
 			},
-
 			0x1e => {
 				harness.process_events(1, true);
 			},
@@ -2848,7 +2891,6 @@ pub fn do_test<Out: Output + MaybeSend + MaybeSync>(data: &[u8], out: Out) {
 			0x25 => {
 				harness.process_msg_events(2, false, ProcessMessages::OnePendingMessage);
 			},
-
 			0x26 => {
 				harness.process_events(2, true);
 			},
@@ -3078,7 +3120,6 @@ pub fn do_test<Out: Output + MaybeSend + MaybeSync>(data: &[u8], out: Out) {
 				let cp_node_id = harness.nodes[1].our_node_id();
 				harness.nodes[2].splice_in(&cp_node_id, &harness.chan_b_id());
 			},
-
 			0xa4 => {
 				if !cfg!(splicing) {
 					assert_test_invariants(&harness.nodes);
@@ -3111,7 +3152,6 @@ pub fn do_test<Out: Output + MaybeSend + MaybeSync>(data: &[u8], out: Out) {
 				let cp_node_id = harness.nodes[1].our_node_id();
 				harness.nodes[2].splice_out(&cp_node_id, &harness.chan_b_id());
 			},
-
 			// Sync node by 1 block to cover confirmation of a transaction.
 			0xa8 => {
 				harness.chain_state.confirm_pending_txs();
@@ -3258,7 +3298,6 @@ pub fn do_test<Out: Output + MaybeSend + MaybeSync>(data: &[u8], out: Out) {
 					MonitorUpdateSelector::Last,
 				);
 			},
-
 			0xf4 => {
 				harness.ab_link.complete_monitor_updates_for_node(
 					1,
@@ -3280,7 +3319,6 @@ pub fn do_test<Out: Output + MaybeSend + MaybeSync>(data: &[u8], out: Out) {
 					MonitorUpdateSelector::Last,
 				);
 			},
-
 			0xf8 => {
 				harness.bc_link.complete_monitor_updates_for_node(
 					1,
@@ -3302,7 +3340,6 @@ pub fn do_test<Out: Output + MaybeSend + MaybeSync>(data: &[u8], out: Out) {
 					MonitorUpdateSelector::Last,
 				);
 			},
-
 			0xfc => {
 				harness.bc_link.complete_monitor_updates_for_node(
 					2,
@@ -3324,7 +3361,6 @@ pub fn do_test<Out: Output + MaybeSend + MaybeSync>(data: &[u8], out: Out) {
 					MonitorUpdateSelector::Last,
 				);
 			},
-
 			0xff => {
 				// Test that no channel is in a stuck state where neither party can send funds even
 				// after we resolve all pending events.
