@@ -632,7 +632,7 @@ type ChanMan<'a> = ChannelManager<
 #[inline]
 fn get_payment_secret_hash(
 	dest: &ChanMan, payment_ctr: &mut u64,
-	payment_preimages: &RefCell<HashMap<PaymentHash, PaymentPreimage>>,
+	payment_preimages: &mut HashMap<PaymentHash, PaymentPreimage>,
 ) -> (PaymentSecret, PaymentHash) {
 	*payment_ctr += 1;
 	let mut payment_preimage = PaymentPreimage([0; 32]);
@@ -641,7 +641,7 @@ fn get_payment_secret_hash(
 	let payment_secret = dest
 		.create_inbound_payment_for_hash(payment_hash, None, 3600, None)
 		.expect("create_inbound_payment_for_hash failed");
-	assert!(payment_preimages.borrow_mut().insert(payment_hash, payment_preimage).is_none());
+	assert!(payment_preimages.insert(payment_hash, payment_preimage).is_none());
 	(payment_secret, payment_hash)
 }
 
@@ -1610,6 +1610,179 @@ impl PeerLink {
 	}
 }
 
+struct PaymentTracker {
+	pending_payments: [Vec<PaymentId>; 3],
+	resolved_payments: [HashMap<PaymentId, Option<PaymentHash>>; 3],
+	claimed_payment_hashes: HashSet<PaymentHash>,
+	payment_preimages: HashMap<PaymentHash, PaymentPreimage>,
+	payment_ctr: u64,
+}
+
+impl PaymentTracker {
+	fn new() -> Self {
+		Self {
+			pending_payments: [Vec::new(), Vec::new(), Vec::new()],
+			resolved_payments: [new_hash_map(), new_hash_map(), new_hash_map()],
+			claimed_payment_hashes: HashSet::new(),
+			payment_preimages: new_hash_map(),
+			payment_ctr: 0,
+		}
+	}
+
+	fn next_payment(&mut self, dest: &ChanMan) -> (PaymentSecret, PaymentHash, PaymentId) {
+		let (secret, hash) =
+			get_payment_secret_hash(dest, &mut self.payment_ctr, &mut self.payment_preimages);
+		let mut id = PaymentId([0; 32]);
+		id.0[0..8].copy_from_slice(&self.payment_ctr.to_ne_bytes());
+		(secret, hash, id)
+	}
+
+	fn send_direct(
+		&mut self, nodes: &[HarnessNode<'_>; 3], source_idx: usize, dest_idx: usize,
+		dest_chan_id: ChannelId, amt: u64,
+	) -> bool {
+		let source = &nodes[source_idx];
+		let dest = &nodes[dest_idx];
+		let (secret, hash, id) = self.next_payment(dest);
+		let succeeded = send_payment(source, dest, dest_chan_id, amt, secret, hash, id);
+		if succeeded {
+			self.pending_payments[source_idx].push(id);
+		}
+		succeeded
+	}
+
+	fn send_hop(
+		&mut self, nodes: &[HarnessNode<'_>; 3], source_idx: usize, middle_idx: usize,
+		middle_chan_id: ChannelId, dest_idx: usize, dest_chan_id: ChannelId, amt: u64,
+	) {
+		let source = &nodes[source_idx];
+		let middle = &nodes[middle_idx];
+		let dest = &nodes[dest_idx];
+		let (secret, hash, id) = self.next_payment(dest);
+		let succeeded = send_hop_payment(
+			source,
+			middle,
+			middle_chan_id,
+			dest,
+			dest_chan_id,
+			amt,
+			secret,
+			hash,
+			id,
+		);
+		if succeeded {
+			self.pending_payments[source_idx].push(id);
+		}
+	}
+
+	fn send_mpp_direct(
+		&mut self, nodes: &[HarnessNode<'_>; 3], source_idx: usize, dest_idx: usize,
+		dest_chan_ids: &[ChannelId], amt: u64,
+	) {
+		let source = &nodes[source_idx];
+		let dest = &nodes[dest_idx];
+		let (secret, hash, id) = self.next_payment(dest);
+		let succeeded = send_mpp_payment(source, dest, dest_chan_ids, amt, secret, hash, id);
+		if succeeded {
+			self.pending_payments[source_idx].push(id);
+		}
+	}
+
+	fn send_mpp_hop(
+		&mut self, nodes: &[HarnessNode<'_>; 3], source_idx: usize, middle_idx: usize,
+		middle_chan_ids: &[ChannelId], dest_idx: usize, dest_chan_ids: &[ChannelId], amt: u64,
+	) {
+		let source = &nodes[source_idx];
+		let middle = &nodes[middle_idx];
+		let dest = &nodes[dest_idx];
+		let (secret, hash, id) = self.next_payment(dest);
+		let succeeded = send_mpp_hop_payment(
+			source,
+			middle,
+			middle_chan_ids,
+			dest,
+			dest_chan_ids,
+			amt,
+			secret,
+			hash,
+			id,
+		);
+		if succeeded {
+			self.pending_payments[source_idx].push(id);
+		}
+	}
+
+	fn claim_payment(&mut self, node: &HarnessNode<'_>, payment_hash: PaymentHash, fail: bool) {
+		if fail {
+			node.fail_htlc_backwards(&payment_hash);
+		} else {
+			let payment_preimage = *self
+				.payment_preimages
+				.get(&payment_hash)
+				.expect("PaymentClaimable for unknown payment hash");
+			node.claim_funds(payment_preimage);
+			self.claimed_payment_hashes.insert(payment_hash);
+		}
+	}
+
+	fn mark_sent(&mut self, node_idx: usize, sent_id: PaymentId, payment_hash: PaymentHash) {
+		let idx_opt = self.pending_payments[node_idx].iter().position(|id| *id == sent_id);
+		if let Some(idx) = idx_opt {
+			self.pending_payments[node_idx].remove(idx);
+			self.resolved_payments[node_idx].insert(sent_id, Some(payment_hash));
+		} else {
+			assert!(self.resolved_payments[node_idx].contains_key(&sent_id));
+		}
+	}
+
+	fn mark_resolved_without_hash(&mut self, node_idx: usize, payment_id: PaymentId) {
+		let idx_opt = self.pending_payments[node_idx].iter().position(|id| *id == payment_id);
+		if let Some(idx) = idx_opt {
+			self.pending_payments[node_idx].remove(idx);
+			self.resolved_payments[node_idx].insert(payment_id, None);
+		} else if !self.resolved_payments[node_idx].contains_key(&payment_id) {
+			// Some resolutions can arrive immediately, before the send helper records
+			// the payment as pending. Track them so later duplicate events are accepted.
+			self.resolved_payments[node_idx].insert(payment_id, None);
+		}
+	}
+
+	fn mark_successful_probe(&mut self, node_idx: usize, payment_id: PaymentId) {
+		let idx_opt = self.pending_payments[node_idx].iter().position(|id| *id == payment_id);
+		if let Some(idx) = idx_opt {
+			self.pending_payments[node_idx].remove(idx);
+			self.resolved_payments[node_idx].insert(payment_id, None);
+		} else {
+			assert!(self.resolved_payments[node_idx].contains_key(&payment_id));
+		}
+	}
+
+	fn assert_all_resolved(&self) {
+		for (idx, pending) in self.pending_payments.iter().enumerate() {
+			assert!(
+				pending.is_empty(),
+				"Node {} has {} stuck pending payments after settling all state",
+				idx,
+				pending.len()
+			);
+		}
+	}
+
+	fn assert_claims_reported(&self) {
+		for hash in self.claimed_payment_hashes.iter() {
+			let found = self
+				.resolved_payments
+				.iter()
+				.any(|node_resolved| node_resolved.values().any(|h| h.as_ref() == Some(hash)));
+			assert!(
+				found,
+				"Payment {:?} was claimed by receiver but sender never got PaymentSent",
+				hash
+			);
+		}
+	}
+}
+
 fn build_node_config(chan_type: ChanType) -> UserConfig {
 	let mut config = UserConfig::default();
 	config.channel_config.forwarding_fee_proportional_millionths = 0;
@@ -2088,6 +2261,125 @@ fn process_msg_events_impl<Out: Output + MaybeSend + MaybeSync>(
 	had_events
 }
 
+fn process_events_impl(
+	node_idx: usize, fail: bool, nodes: &[HarnessNode<'_>; 3], chain_state: &mut ChainState,
+	payments: &mut PaymentTracker,
+) -> bool {
+	// Multiple HTLCs can resolve for the same payment hash, so deduplicate
+	// claim/fail handling per event batch.
+	let mut claim_set = new_hash_map();
+	let mut events = nodes[node_idx].get_and_clear_pending_events();
+	let had_events = !events.is_empty();
+	for event in events.drain(..) {
+		match event {
+			events::Event::PaymentClaimable { payment_hash, .. } => {
+				if claim_set.insert(payment_hash.0, ()).is_none() {
+					payments.claim_payment(&nodes[node_idx], payment_hash, fail);
+				}
+			},
+			events::Event::PaymentSent { payment_id, payment_hash, .. } => {
+				payments.mark_sent(node_idx, payment_id.unwrap(), payment_hash);
+			},
+			// Even though we don't explicitly send probes, because probes are detected based on
+			// hashing the payment hash+preimage, it is rather trivial for the fuzzer to build
+			// payments that accidentally end up looking like probes.
+			events::Event::ProbeSuccessful { payment_id, .. } => {
+				payments.mark_successful_probe(node_idx, payment_id);
+			},
+			events::Event::PaymentFailed { payment_id, .. }
+			| events::Event::ProbeFailed { payment_id, .. } => {
+				payments.mark_resolved_without_hash(node_idx, payment_id);
+			},
+			events::Event::PaymentClaimed { .. } => {},
+			events::Event::PaymentPathSuccessful { .. } => {},
+			events::Event::PaymentPathFailed { .. } => {},
+			events::Event::PaymentForwarded { .. } if node_idx == 1 => {},
+			events::Event::ChannelReady { .. } => {},
+			events::Event::HTLCHandlingFailed { .. } => {},
+			events::Event::FundingTransactionReadyForSigning {
+				channel_id,
+				counterparty_node_id,
+				unsigned_transaction,
+				..
+			} => {
+				let signed_tx = nodes[node_idx].wallet.sign_tx(unsigned_transaction).unwrap();
+				nodes[node_idx]
+					.funding_transaction_signed(&channel_id, &counterparty_node_id, signed_tx)
+					.unwrap();
+			},
+			events::Event::SplicePending { new_funding_txo, .. } => {
+				let mut txs = nodes[node_idx].broadcaster.txn_broadcasted.borrow_mut();
+				assert!(txs.len() >= 1);
+				let splice_tx = txs.remove(0);
+				assert_eq!(new_funding_txo.txid, splice_tx.compute_txid());
+				chain_state.add_pending_tx(splice_tx);
+			},
+			events::Event::SpliceFailed { .. } => {},
+			events::Event::DiscardFunding {
+				funding_info:
+					events::FundingInfo::Contribution { .. } | events::FundingInfo::Tx { .. },
+				..
+			} => {},
+			_ => panic!("Unhandled event"),
+		}
+	}
+	while nodes[node_idx].needs_pending_htlc_processing() {
+		nodes[node_idx].process_pending_htlc_forwards();
+	}
+	had_events
+}
+
+fn process_all_events_impl<Out: Output + MaybeSend + MaybeSync>(
+	nodes: &[HarnessNode<'_>; 3], out: &Out, ab_link: &PeerLink, bc_link: &PeerLink,
+	chain_state: &mut ChainState, payments: &mut PaymentTracker, queues: &mut EventQueues,
+) {
+	let mut last_pass_no_updates = false;
+	for i in 0..std::usize::MAX {
+		if i == 100 {
+			panic!(
+				"It may take may iterations to settle the state, but it should not take forever"
+			);
+		}
+		// First, make sure no monitor updates are pending.
+		ab_link.complete_all_monitor_updates(nodes);
+		bc_link.complete_all_monitor_updates(nodes);
+		// Then, make sure any current forwards make their way to their destination.
+		if process_msg_events_impl(0, false, ProcessMessages::AllMessages, nodes, out, queues) {
+			last_pass_no_updates = false;
+			continue;
+		}
+		if process_msg_events_impl(1, false, ProcessMessages::AllMessages, nodes, out, queues) {
+			last_pass_no_updates = false;
+			continue;
+		}
+		if process_msg_events_impl(2, false, ProcessMessages::AllMessages, nodes, out, queues) {
+			last_pass_no_updates = false;
+			continue;
+		}
+		// Finally, make sure any payments are claimed.
+		if process_events_impl(0, false, nodes, chain_state, payments) {
+			last_pass_no_updates = false;
+			continue;
+		}
+		if process_events_impl(1, false, nodes, chain_state, payments) {
+			last_pass_no_updates = false;
+			continue;
+		}
+		if process_events_impl(2, false, nodes, chain_state, payments) {
+			last_pass_no_updates = false;
+			continue;
+		}
+		if last_pass_no_updates {
+			// In some cases, `process_msg_events_impl` may generate a message to send, but
+			// block sending until `complete_all_monitor_updates` gets called on the next
+			// iteration. Thus, we only exit if we manage two iterations with no messages or
+			// events to process.
+			break;
+		}
+		last_pass_no_updates = true;
+	}
+}
+
 #[inline]
 pub fn do_test<Out: Output + MaybeSend + MaybeSync>(data: &[u8], out: Out) {
 	let router = FuzzRouter {};
@@ -2230,18 +2522,11 @@ pub fn do_test<Out: Output + MaybeSend + MaybeSync>(data: &[u8], out: Out) {
 	let chan_a_id = ab_link.first_channel_id();
 	let chan_b_id = bc_link.first_channel_id();
 	let mut queues = EventQueues::new();
-	let mut p_ctr: u64 = 0;
+	let mut payments = PaymentTracker::new();
 
 	for node in &mut nodes {
 		node.serialized_manager = node.encode();
 	}
-
-	let pending_payments = RefCell::new([Vec::new(), Vec::new(), Vec::new()]);
-	let resolved_payments: RefCell<[HashMap<PaymentId, Option<PaymentHash>>; 3]> =
-		RefCell::new([new_hash_map(), new_hash_map(), new_hash_map()]);
-	let claimed_payment_hashes: RefCell<HashSet<PaymentHash>> = RefCell::new(HashSet::new());
-	let payment_preimages: RefCell<HashMap<PaymentHash, PaymentPreimage>> =
-		RefCell::new(new_hash_map());
 
 	macro_rules! test_return {
 		() => {{
@@ -2284,112 +2569,7 @@ pub fn do_test<Out: Output + MaybeSend + MaybeSync>(data: &[u8], out: Out) {
 
 		macro_rules! process_events {
 			($node: expr, $fail: expr) => {{
-				// Multiple HTLCs can resolve for the same payment hash, so deduplicate
-				// claim/fail handling per event batch.
-				let mut claim_set = new_hash_map();
-				let mut events = nodes[$node].get_and_clear_pending_events();
-				let had_events = !events.is_empty();
-				let mut pending_payments = pending_payments.borrow_mut();
-				let mut resolved_payments = resolved_payments.borrow_mut();
-				for event in events.drain(..) {
-					match event {
-						events::Event::PaymentClaimable { payment_hash, .. } => {
-							if claim_set.insert(payment_hash.0, ()).is_none() {
-								if $fail {
-									nodes[$node].fail_htlc_backwards(&payment_hash);
-								} else {
-									let payment_preimage = *payment_preimages
-										.borrow()
-										.get(&payment_hash)
-										.expect("PaymentClaimable for unknown payment hash");
-									nodes[$node].claim_funds(payment_preimage);
-									claimed_payment_hashes.borrow_mut().insert(payment_hash);
-								}
-							}
-						},
-						events::Event::PaymentSent { payment_id, payment_hash, .. } => {
-							let sent_id = payment_id.unwrap();
-							let idx_opt =
-								pending_payments[$node].iter().position(|id| *id == sent_id);
-							if let Some(idx) = idx_opt {
-								pending_payments[$node].remove(idx);
-								resolved_payments[$node].insert(sent_id, Some(payment_hash));
-							} else {
-								assert!(resolved_payments[$node].contains_key(&sent_id));
-							}
-						},
-						// Even though we don't explicitly send probes, because probes are
-						// detected based on hashing the payment hash+preimage, its rather
-						// trivial for the fuzzer to build payments that accidentally end up
-						// looking like probes.
-						events::Event::ProbeSuccessful { payment_id, .. } => {
-							let idx_opt =
-								pending_payments[$node].iter().position(|id| *id == payment_id);
-							if let Some(idx) = idx_opt {
-								pending_payments[$node].remove(idx);
-								resolved_payments[$node].insert(payment_id, None);
-							} else {
-								assert!(resolved_payments[$node].contains_key(&payment_id));
-							}
-						},
-						events::Event::PaymentFailed { payment_id, .. }
-						| events::Event::ProbeFailed { payment_id, .. } => {
-							let idx_opt =
-								pending_payments[$node].iter().position(|id| *id == payment_id);
-							if let Some(idx) = idx_opt {
-								pending_payments[$node].remove(idx);
-								resolved_payments[$node].insert(payment_id, None);
-							} else if !resolved_payments[$node].contains_key(&payment_id) {
-								// Payment failed immediately on send, so it was never added to
-								// pending_payments. Add it to resolved_payments to track it.
-								resolved_payments[$node].insert(payment_id, None);
-							}
-						},
-						events::Event::PaymentClaimed { .. } => {},
-						events::Event::PaymentPathSuccessful { .. } => {},
-						events::Event::PaymentPathFailed { .. } => {},
-						events::Event::PaymentForwarded { .. } if $node == 1 => {},
-						events::Event::ChannelReady { .. } => {},
-						events::Event::HTLCHandlingFailed { .. } => {},
-
-						events::Event::FundingTransactionReadyForSigning {
-							channel_id,
-							counterparty_node_id,
-							unsigned_transaction,
-							..
-						} => {
-							let signed_tx =
-								nodes[$node].wallet.sign_tx(unsigned_transaction).unwrap();
-							nodes[$node]
-								.funding_transaction_signed(
-									&channel_id,
-									&counterparty_node_id,
-									signed_tx,
-								)
-								.unwrap();
-						},
-						events::Event::SplicePending { new_funding_txo, .. } => {
-							let mut txs = nodes[$node].broadcaster.txn_broadcasted.borrow_mut();
-							assert!(txs.len() >= 1);
-							let splice_tx = txs.remove(0);
-							assert_eq!(new_funding_txo.txid, splice_tx.compute_txid());
-							chain_state.add_pending_tx(splice_tx);
-						},
-						events::Event::SpliceFailed { .. } => {},
-						events::Event::DiscardFunding {
-							funding_info:
-								events::FundingInfo::Contribution { .. }
-								| events::FundingInfo::Tx { .. },
-							..
-						} => {},
-
-						_ => panic!("Unhandled event: {:?}", event),
-					}
-				}
-				while nodes[$node].needs_pending_htlc_processing() {
-					nodes[$node].process_pending_htlc_forwards();
-				}
-				had_events
+				process_events_impl($node, $fail, &nodes, &mut chain_state, &mut payments)
 			}};
 		}
 
@@ -2398,97 +2578,6 @@ pub fn do_test<Out: Output + MaybeSend + MaybeSync>(data: &[u8], out: Out) {
 				process_events!($node, $fail);
 			}};
 		}
-
-		let send =
-			|source_idx: usize, dest_idx: usize, dest_chan_id, amt, payment_ctr: &mut u64| {
-				let source = &nodes[source_idx];
-				let dest = &nodes[dest_idx];
-				let (secret, hash) = get_payment_secret_hash(dest, payment_ctr, &payment_preimages);
-				let mut id = PaymentId([0; 32]);
-				id.0[0..8].copy_from_slice(&payment_ctr.to_ne_bytes());
-				let succeeded = send_payment(source, dest, dest_chan_id, amt, secret, hash, id);
-				if succeeded {
-					pending_payments.borrow_mut()[source_idx].push(id);
-				}
-				succeeded
-			};
-		let send_noret = |source_idx, dest_idx, dest_chan_id, amt, payment_ctr: &mut u64| {
-			send(source_idx, dest_idx, dest_chan_id, amt, payment_ctr);
-		};
-
-		let send_hop_noret = |source_idx: usize,
-		                      middle_idx: usize,
-		                      middle_chan_id: ChannelId,
-		                      dest_idx: usize,
-		                      dest_chan_id: ChannelId,
-		                      amt: u64,
-		                      payment_ctr: &mut u64| {
-			let source = &nodes[source_idx];
-			let middle = &nodes[middle_idx];
-			let dest = &nodes[dest_idx];
-			let (secret, hash) = get_payment_secret_hash(dest, payment_ctr, &payment_preimages);
-			let mut id = PaymentId([0; 32]);
-			id.0[0..8].copy_from_slice(&payment_ctr.to_ne_bytes());
-			let succeeded = send_hop_payment(
-				source,
-				middle,
-				middle_chan_id,
-				dest,
-				dest_chan_id,
-				amt,
-				secret,
-				hash,
-				id,
-			);
-			if succeeded {
-				pending_payments.borrow_mut()[source_idx].push(id);
-			}
-		};
-
-		let send_mpp_direct = |source_idx: usize,
-		                       dest_idx: usize,
-		                       dest_chan_ids: &[ChannelId],
-		                       amt: u64,
-		                       payment_ctr: &mut u64| {
-			let source = &nodes[source_idx];
-			let dest = &nodes[dest_idx];
-			let (secret, hash) = get_payment_secret_hash(dest, payment_ctr, &payment_preimages);
-			let mut id = PaymentId([0; 32]);
-			id.0[0..8].copy_from_slice(&payment_ctr.to_ne_bytes());
-			let succeeded = send_mpp_payment(source, dest, dest_chan_ids, amt, secret, hash, id);
-			if succeeded {
-				pending_payments.borrow_mut()[source_idx].push(id);
-			}
-		};
-
-		let send_mpp_hop = |source_idx: usize,
-		                    middle_idx: usize,
-		                    middle_chan_ids: &[ChannelId],
-		                    dest_idx: usize,
-		                    dest_chan_ids: &[ChannelId],
-		                    amt: u64,
-		                    payment_ctr: &mut u64| {
-			let source = &nodes[source_idx];
-			let middle = &nodes[middle_idx];
-			let dest = &nodes[dest_idx];
-			let (secret, hash) = get_payment_secret_hash(dest, payment_ctr, &payment_preimages);
-			let mut id = PaymentId([0; 32]);
-			id.0[0..8].copy_from_slice(&payment_ctr.to_ne_bytes());
-			let succeeded = send_mpp_hop_payment(
-				source,
-				middle,
-				middle_chan_ids,
-				dest,
-				dest_chan_ids,
-				amt,
-				secret,
-				hash,
-				id,
-			);
-			if succeeded {
-				pending_payments.borrow_mut()[source_idx].push(id);
-			}
-		};
 
 		let v = get_slice!(1)[0];
 		out.locked_write(format!("READ A BYTE! HANDLING INPUT {:x}...........\n", v).as_bytes());
@@ -2560,74 +2649,208 @@ pub fn do_test<Out: Output + MaybeSend + MaybeSync>(data: &[u8], out: Out) {
 			0x27 => process_ev_noret!(2, false),
 
 			// 1/10th the channel size:
-			0x30 => send_noret(0, 1, chan_a_id, 10_000_000, &mut p_ctr),
-			0x31 => send_noret(1, 0, chan_a_id, 10_000_000, &mut p_ctr),
-			0x32 => send_noret(1, 2, chan_b_id, 10_000_000, &mut p_ctr),
-			0x33 => send_noret(2, 1, chan_b_id, 10_000_000, &mut p_ctr),
-			0x34 => send_hop_noret(0, 1, chan_a_id, 2, chan_b_id, 10_000_000, &mut p_ctr),
-			0x35 => send_hop_noret(2, 1, chan_b_id, 0, chan_a_id, 10_000_000, &mut p_ctr),
+			0x30 => {
+				payments.send_direct(&nodes, 0, 1, chan_a_id, 10_000_000);
+			},
+			0x31 => {
+				payments.send_direct(&nodes, 1, 0, chan_a_id, 10_000_000);
+			},
+			0x32 => {
+				payments.send_direct(&nodes, 1, 2, chan_b_id, 10_000_000);
+			},
+			0x33 => {
+				payments.send_direct(&nodes, 2, 1, chan_b_id, 10_000_000);
+			},
+			0x34 => {
+				payments.send_hop(&nodes, 0, 1, chan_a_id, 2, chan_b_id, 10_000_000);
+			},
+			0x35 => {
+				payments.send_hop(&nodes, 2, 1, chan_b_id, 0, chan_a_id, 10_000_000);
+			},
 
-			0x38 => send_noret(0, 1, chan_a_id, 1_000_000, &mut p_ctr),
-			0x39 => send_noret(1, 0, chan_a_id, 1_000_000, &mut p_ctr),
-			0x3a => send_noret(1, 2, chan_b_id, 1_000_000, &mut p_ctr),
-			0x3b => send_noret(2, 1, chan_b_id, 1_000_000, &mut p_ctr),
-			0x3c => send_hop_noret(0, 1, chan_a_id, 2, chan_b_id, 1_000_000, &mut p_ctr),
-			0x3d => send_hop_noret(2, 1, chan_b_id, 0, chan_a_id, 1_000_000, &mut p_ctr),
+			0x38 => {
+				payments.send_direct(&nodes, 0, 1, chan_a_id, 1_000_000);
+			},
+			0x39 => {
+				payments.send_direct(&nodes, 1, 0, chan_a_id, 1_000_000);
+			},
+			0x3a => {
+				payments.send_direct(&nodes, 1, 2, chan_b_id, 1_000_000);
+			},
+			0x3b => {
+				payments.send_direct(&nodes, 2, 1, chan_b_id, 1_000_000);
+			},
+			0x3c => {
+				payments.send_hop(&nodes, 0, 1, chan_a_id, 2, chan_b_id, 1_000_000);
+			},
+			0x3d => {
+				payments.send_hop(&nodes, 2, 1, chan_b_id, 0, chan_a_id, 1_000_000);
+			},
 
-			0x40 => send_noret(0, 1, chan_a_id, 100_000, &mut p_ctr),
-			0x41 => send_noret(1, 0, chan_a_id, 100_000, &mut p_ctr),
-			0x42 => send_noret(1, 2, chan_b_id, 100_000, &mut p_ctr),
-			0x43 => send_noret(2, 1, chan_b_id, 100_000, &mut p_ctr),
-			0x44 => send_hop_noret(0, 1, chan_a_id, 2, chan_b_id, 100_000, &mut p_ctr),
-			0x45 => send_hop_noret(2, 1, chan_b_id, 0, chan_a_id, 100_000, &mut p_ctr),
+			0x40 => {
+				payments.send_direct(&nodes, 0, 1, chan_a_id, 100_000);
+			},
+			0x41 => {
+				payments.send_direct(&nodes, 1, 0, chan_a_id, 100_000);
+			},
+			0x42 => {
+				payments.send_direct(&nodes, 1, 2, chan_b_id, 100_000);
+			},
+			0x43 => {
+				payments.send_direct(&nodes, 2, 1, chan_b_id, 100_000);
+			},
+			0x44 => {
+				payments.send_hop(&nodes, 0, 1, chan_a_id, 2, chan_b_id, 100_000);
+			},
+			0x45 => {
+				payments.send_hop(&nodes, 2, 1, chan_b_id, 0, chan_a_id, 100_000);
+			},
 
-			0x48 => send_noret(0, 1, chan_a_id, 10_000, &mut p_ctr),
-			0x49 => send_noret(1, 0, chan_a_id, 10_000, &mut p_ctr),
-			0x4a => send_noret(1, 2, chan_b_id, 10_000, &mut p_ctr),
-			0x4b => send_noret(2, 1, chan_b_id, 10_000, &mut p_ctr),
-			0x4c => send_hop_noret(0, 1, chan_a_id, 2, chan_b_id, 10_000, &mut p_ctr),
-			0x4d => send_hop_noret(2, 1, chan_b_id, 0, chan_a_id, 10_000, &mut p_ctr),
+			0x48 => {
+				payments.send_direct(&nodes, 0, 1, chan_a_id, 10_000);
+			},
+			0x49 => {
+				payments.send_direct(&nodes, 1, 0, chan_a_id, 10_000);
+			},
+			0x4a => {
+				payments.send_direct(&nodes, 1, 2, chan_b_id, 10_000);
+			},
+			0x4b => {
+				payments.send_direct(&nodes, 2, 1, chan_b_id, 10_000);
+			},
+			0x4c => {
+				payments.send_hop(&nodes, 0, 1, chan_a_id, 2, chan_b_id, 10_000);
+			},
+			0x4d => {
+				payments.send_hop(&nodes, 2, 1, chan_b_id, 0, chan_a_id, 10_000);
+			},
 
-			0x50 => send_noret(0, 1, chan_a_id, 1_000, &mut p_ctr),
-			0x51 => send_noret(1, 0, chan_a_id, 1_000, &mut p_ctr),
-			0x52 => send_noret(1, 2, chan_b_id, 1_000, &mut p_ctr),
-			0x53 => send_noret(2, 1, chan_b_id, 1_000, &mut p_ctr),
-			0x54 => send_hop_noret(0, 1, chan_a_id, 2, chan_b_id, 1_000, &mut p_ctr),
-			0x55 => send_hop_noret(2, 1, chan_b_id, 0, chan_a_id, 1_000, &mut p_ctr),
+			0x50 => {
+				payments.send_direct(&nodes, 0, 1, chan_a_id, 1_000);
+			},
+			0x51 => {
+				payments.send_direct(&nodes, 1, 0, chan_a_id, 1_000);
+			},
+			0x52 => {
+				payments.send_direct(&nodes, 1, 2, chan_b_id, 1_000);
+			},
+			0x53 => {
+				payments.send_direct(&nodes, 2, 1, chan_b_id, 1_000);
+			},
+			0x54 => {
+				payments.send_hop(&nodes, 0, 1, chan_a_id, 2, chan_b_id, 1_000);
+			},
+			0x55 => {
+				payments.send_hop(&nodes, 2, 1, chan_b_id, 0, chan_a_id, 1_000);
+			},
 
-			0x58 => send_noret(0, 1, chan_a_id, 100, &mut p_ctr),
-			0x59 => send_noret(1, 0, chan_a_id, 100, &mut p_ctr),
-			0x5a => send_noret(1, 2, chan_b_id, 100, &mut p_ctr),
-			0x5b => send_noret(2, 1, chan_b_id, 100, &mut p_ctr),
-			0x5c => send_hop_noret(0, 1, chan_a_id, 2, chan_b_id, 100, &mut p_ctr),
-			0x5d => send_hop_noret(2, 1, chan_b_id, 0, chan_a_id, 100, &mut p_ctr),
+			0x58 => {
+				payments.send_direct(&nodes, 0, 1, chan_a_id, 100);
+			},
+			0x59 => {
+				payments.send_direct(&nodes, 1, 0, chan_a_id, 100);
+			},
+			0x5a => {
+				payments.send_direct(&nodes, 1, 2, chan_b_id, 100);
+			},
+			0x5b => {
+				payments.send_direct(&nodes, 2, 1, chan_b_id, 100);
+			},
+			0x5c => {
+				payments.send_hop(&nodes, 0, 1, chan_a_id, 2, chan_b_id, 100);
+			},
+			0x5d => {
+				payments.send_hop(&nodes, 2, 1, chan_b_id, 0, chan_a_id, 100);
+			},
 
-			0x60 => send_noret(0, 1, chan_a_id, 10, &mut p_ctr),
-			0x61 => send_noret(1, 0, chan_a_id, 10, &mut p_ctr),
-			0x62 => send_noret(1, 2, chan_b_id, 10, &mut p_ctr),
-			0x63 => send_noret(2, 1, chan_b_id, 10, &mut p_ctr),
-			0x64 => send_hop_noret(0, 1, chan_a_id, 2, chan_b_id, 10, &mut p_ctr),
-			0x65 => send_hop_noret(2, 1, chan_b_id, 0, chan_a_id, 10, &mut p_ctr),
+			0x60 => {
+				payments.send_direct(&nodes, 0, 1, chan_a_id, 10);
+			},
+			0x61 => {
+				payments.send_direct(&nodes, 1, 0, chan_a_id, 10);
+			},
+			0x62 => {
+				payments.send_direct(&nodes, 1, 2, chan_b_id, 10);
+			},
+			0x63 => {
+				payments.send_direct(&nodes, 2, 1, chan_b_id, 10);
+			},
+			0x64 => {
+				payments.send_hop(&nodes, 0, 1, chan_a_id, 2, chan_b_id, 10);
+			},
+			0x65 => {
+				payments.send_hop(&nodes, 2, 1, chan_b_id, 0, chan_a_id, 10);
+			},
 
-			0x68 => send_noret(0, 1, chan_a_id, 1, &mut p_ctr),
-			0x69 => send_noret(1, 0, chan_a_id, 1, &mut p_ctr),
-			0x6a => send_noret(1, 2, chan_b_id, 1, &mut p_ctr),
-			0x6b => send_noret(2, 1, chan_b_id, 1, &mut p_ctr),
-			0x6c => send_hop_noret(0, 1, chan_a_id, 2, chan_b_id, 1, &mut p_ctr),
-			0x6d => send_hop_noret(2, 1, chan_b_id, 0, chan_a_id, 1, &mut p_ctr),
+			0x68 => {
+				payments.send_direct(&nodes, 0, 1, chan_a_id, 1);
+			},
+			0x69 => {
+				payments.send_direct(&nodes, 1, 0, chan_a_id, 1);
+			},
+			0x6a => {
+				payments.send_direct(&nodes, 1, 2, chan_b_id, 1);
+			},
+			0x6b => {
+				payments.send_direct(&nodes, 2, 1, chan_b_id, 1);
+			},
+			0x6c => {
+				payments.send_hop(&nodes, 0, 1, chan_a_id, 2, chan_b_id, 1);
+			},
+			0x6d => {
+				payments.send_hop(&nodes, 2, 1, chan_b_id, 0, chan_a_id, 1);
+			},
 
 			// MPP payments
 			// 0x70: direct MPP from 0 to 1 (multi A-B channels)
-			0x70 => send_mpp_direct(0, 1, &chan_ab_ids, 1_000_000, &mut p_ctr),
+			0x70 => {
+				payments.send_mpp_direct(&nodes, 0, 1, ab_link.channel_ids(), 1_000_000);
+			},
 			// 0x71: MPP 0->1->2, multi channels on first hop (A-B)
-			0x71 => send_mpp_hop(0, 1, &chan_ab_ids, 2, &[chan_b_id], 1_000_000, &mut p_ctr),
+			0x71 => {
+				payments.send_mpp_hop(
+					&nodes,
+					0,
+					1,
+					ab_link.channel_ids(),
+					2,
+					&[chan_b_id],
+					1_000_000,
+				);
+			},
 			// 0x72: MPP 0->1->2, multi channels on both hops (A-B and B-C)
-			0x72 => send_mpp_hop(0, 1, &chan_ab_ids, 2, &chan_bc_ids, 1_000_000, &mut p_ctr),
+			0x72 => {
+				payments.send_mpp_hop(
+					&nodes,
+					0,
+					1,
+					ab_link.channel_ids(),
+					2,
+					bc_link.channel_ids(),
+					1_000_000,
+				);
+			},
 			// 0x73: MPP 0->1->2, multi channels on second hop (B-C)
-			0x73 => send_mpp_hop(0, 1, &[chan_a_id], 2, &chan_bc_ids, 1_000_000, &mut p_ctr),
+			0x73 => {
+				payments.send_mpp_hop(
+					&nodes,
+					0,
+					1,
+					&[chan_a_id],
+					2,
+					bc_link.channel_ids(),
+					1_000_000,
+				);
+			},
 			// 0x74: direct MPP from 0 to 1, multi parts over single channel
 			0x74 => {
-				send_mpp_direct(0, 1, &[chan_a_id, chan_a_id, chan_a_id], 1_000_000, &mut p_ctr)
+				payments.send_mpp_direct(
+					&nodes,
+					0,
+					1,
+					&[chan_a_id, chan_a_id, chan_a_id],
+					1_000_000,
+				);
 			},
 
 			0x80 => nodes[0].bump_fee_estimate(chan_type),
@@ -2858,50 +3081,15 @@ pub fn do_test<Out: Output + MaybeSend + MaybeSync>(data: &[u8], out: Out) {
 				nodes[1].signer_unblocked(None);
 				nodes[2].signer_unblocked(None);
 
-				macro_rules! process_all_events {
-					() => {{
-						let mut last_pass_no_updates = false;
-						for i in 0..std::usize::MAX {
-							if i == 100 {
-								panic!(
-									"It may take may iterations to settle the state, but it should not take forever"
-								);
-							}
-							ab_link.complete_all_monitor_updates(&nodes);
-							bc_link.complete_all_monitor_updates(&nodes);
-							if process_msg_events!(0, false, ProcessMessages::AllMessages) {
-								last_pass_no_updates = false;
-								continue;
-							}
-							if process_msg_events!(1, false, ProcessMessages::AllMessages) {
-								last_pass_no_updates = false;
-								continue;
-							}
-							if process_msg_events!(2, false, ProcessMessages::AllMessages) {
-								last_pass_no_updates = false;
-								continue;
-							}
-							if process_events!(0, false) {
-								last_pass_no_updates = false;
-								continue;
-							}
-							if process_events!(1, false) {
-								last_pass_no_updates = false;
-								continue;
-							}
-							if process_events!(2, false) {
-								last_pass_no_updates = false;
-								continue;
-							}
-							if last_pass_no_updates {
-								break;
-							}
-							last_pass_no_updates = true;
-						}
-					}};
-				}
-
-				process_all_events!();
+				process_all_events_impl(
+					&nodes,
+					&out,
+					&ab_link,
+					&bc_link,
+					&mut chain_state,
+					&mut payments,
+					&mut queues,
+				);
 
 				// Since MPP payments are supported, we wait until we fully settle the state of all
 				// channels to see if we have any committed HTLC parts of an MPP payment that need
@@ -2909,57 +3097,30 @@ pub fn do_test<Out: Output + MaybeSend + MaybeSync>(data: &[u8], out: Out) {
 				for node in &nodes {
 					node.timer_tick_occurred();
 				}
-				process_all_events!();
+				process_all_events_impl(
+					&nodes,
+					&out,
+					&ab_link,
+					&bc_link,
+					&mut chain_state,
+					&mut payments,
+					&mut queues,
+				);
 
-				for (idx, pending) in pending_payments.borrow().iter().enumerate() {
-					assert!(
-						pending.is_empty(),
-						"Node {} has {} stuck pending payments after settling all state",
-						idx,
-						pending.len()
-					);
-				}
-
-				let resolved = resolved_payments.borrow();
-				for hash in claimed_payment_hashes.borrow().iter() {
-					let found = resolved.iter().any(|node_resolved| {
-						node_resolved.values().any(|h| h.as_ref() == Some(hash))
-					});
-					assert!(
-						found,
-						"Payment {:?} was claimed by receiver but sender never got PaymentSent",
-						hash
-					);
-				}
+				payments.assert_all_resolved();
+				payments.assert_claims_reported();
 
 				// Finally, make sure that at least one end of each channel can make a substantial payment
-				let send_after_settle = |source_idx: usize,
-				                         dest_idx: usize,
-				                         dest_chan_id,
-				                         amt,
-				                         payment_ctr: &mut u64| {
-					let source = &nodes[source_idx];
-					let dest = &nodes[dest_idx];
-					let (secret, hash) =
-						get_payment_secret_hash(dest, payment_ctr, &payment_preimages);
-					let mut id = PaymentId([0; 32]);
-					id.0[0..8].copy_from_slice(&payment_ctr.to_ne_bytes());
-					let succeeded = send_payment(source, dest, dest_chan_id, amt, secret, hash, id);
-					if succeeded {
-						pending_payments.borrow_mut()[source_idx].push(id);
-					}
-					succeeded
-				};
 				for &chan_id in ab_link.channel_ids() {
 					assert!(
-						send_after_settle(0, 1, chan_id, 10_000_000, &mut p_ctr)
-							|| send_after_settle(1, 0, chan_id, 10_000_000, &mut p_ctr)
+						payments.send_direct(&nodes, 0, 1, chan_id, 10_000_000)
+							|| payments.send_direct(&nodes, 1, 0, chan_id, 10_000_000)
 					);
 				}
 				for &chan_id in bc_link.channel_ids() {
 					assert!(
-						send_after_settle(1, 2, chan_id, 10_000_000, &mut p_ctr)
-							|| send_after_settle(2, 1, chan_id, 10_000_000, &mut p_ctr)
+						payments.send_direct(&nodes, 1, 2, chan_id, 10_000_000)
+							|| payments.send_direct(&nodes, 2, 1, chan_id, 10_000_000)
 					);
 				}
 
