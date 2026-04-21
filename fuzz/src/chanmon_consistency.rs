@@ -15,7 +15,8 @@
 //! actions such as sending payments, handling events, or changing monitor update return values on
 //! a per-node basis. This should allow it to find any cases where the ordering of actions results
 //! in us getting out of sync with ourselves, and, assuming at least one of our recieve- or
-//! send-side handling is correct, other peers.
+//! send-side handling is correct, other peers. The fuzzer also exercises user-initiated
+//! force-closes with on-chain commitment transaction confirmation.
 
 use bitcoin::amount::Amount;
 use bitcoin::constants::genesis_block;
@@ -49,7 +50,7 @@ use lightning::events::{self, EventsProvider};
 use lightning::ln::channel::{
 	FEE_SPIKE_BUFFER_FEE_INCREASE_MULTIPLE, MAX_STD_OUTPUT_DUST_LIMIT_SATOSHIS,
 };
-use lightning::ln::channel_state::ChannelDetails;
+use lightning::ln::channel_state::{ChannelDetails, InboundHTLCDetails, OutboundHTLCDetails};
 use lightning::ln::channelmanager::{
 	ChainParameters, ChannelManager, ChannelManagerReadArgs, PaymentId, RecentPaymentDetails,
 	TrustedChannelFeatures,
@@ -648,10 +649,12 @@ impl SignerProvider for KeyProvider {
 	}
 }
 
-const SUPPORTED_SIGNER_OPS: [SignerOp; 3] = [
+const SUPPORTED_SIGNER_OPS: [SignerOp; 5] = [
 	SignerOp::SignCounterpartyCommitment,
 	SignerOp::GetPerCommitmentPoint,
 	SignerOp::ReleaseCommitmentSecret,
+	SignerOp::SignHolderCommitment,
+	SignerOp::SignHolderHtlcTransaction,
 ];
 
 impl KeyProvider {
@@ -1270,6 +1273,12 @@ impl<'a> HarnessNode<'a> {
 		self.node.timer_tick_occurred();
 	}
 
+	fn enable_holder_signer_ops(&self) {
+		self.keys_manager.enable_op_for_all_signers(SignerOp::SignHolderCommitment);
+		self.keys_manager.enable_op_for_all_signers(SignerOp::SignHolderHtlcTransaction);
+		self.node.signer_unblocked(None);
+	}
+
 	fn current_feerate_sat_per_kw(&self) -> FeeRate {
 		self.fee_estimator.feerate_sat_per_kw()
 	}
@@ -1430,6 +1439,16 @@ impl<'a> HarnessNode<'a> {
 		self.monitor = chain_monitor;
 		self.logger = logger;
 	}
+}
+
+#[inline]
+fn inbound_dust_blocks_path(htlc: &InboundHTLCDetails) -> bool {
+	htlc.is_dust
+}
+
+#[inline]
+fn outbound_dust_blocks_path(htlc: &OutboundHTLCDetails) -> bool {
+	htlc.is_dust
 }
 
 struct EventQueues {
@@ -3150,6 +3169,65 @@ impl<'a, 'd, Out: Output + MaybeSend + MaybeSync> Harness<'a, 'd, Out> {
 		assert!(settled, "message-only settle exceeded budget: {}", self.pending_work_summary(),);
 	}
 
+	fn record_force_close_dust(&self, closer_idx: usize, channel_id: ChannelId) {
+		if let Some(channel) = self.nodes[closer_idx]
+			.node
+			.list_channels()
+			.into_iter()
+			.find(|chan| chan.channel_id == channel_id)
+		{
+			let mut dust_parts = channel
+				.pending_inbound_htlcs
+				.iter()
+				.filter(|htlc| inbound_dust_blocks_path(htlc))
+				.map(|htlc| (htlc.payment_hash, htlc.amount_msat))
+				.chain(
+					channel
+						.pending_outbound_htlcs
+						.iter()
+						.filter(|htlc| outbound_dust_blocks_path(htlc))
+						.map(|htlc| (htlc.payment_hash, htlc.amount_msat)),
+				)
+				.collect::<Vec<_>>();
+			let payment_paths = self.payments.payment_paths_by_hash.borrow();
+			let mut blocked_paths = self.payments.blocked_dust_paths_by_hash.borrow_mut();
+			for (payment_hash, amount_msat) in dust_parts.drain(..) {
+				let Some(paths) = payment_paths.get(&payment_hash) else {
+					continue;
+				};
+				let blocked_for_hash =
+					blocked_paths.entry(payment_hash).or_insert_with(HashSet::new);
+				if let Some((path_idx, _)) = paths.iter().enumerate().find(|(path_idx, path)| {
+					!blocked_for_hash.contains(path_idx)
+						&& path.iter().any(|(chan_id, part_amt)| {
+							*chan_id == channel_id && *part_amt == amount_msat
+						})
+				}) {
+					blocked_for_hash.insert(path_idx);
+				}
+			}
+		}
+	}
+
+	fn force_close(
+		&mut self, closer_idx: usize, channel_id: ChannelId, counterparty_idx: usize, reason: &str,
+	) {
+		self.flush_progress(32);
+		self.record_force_close_dust(closer_idx, channel_id);
+		if self.nodes[closer_idx]
+			.node
+			.force_close_broadcasting_latest_txn(
+				&channel_id,
+				&self.nodes[counterparty_idx].our_node_id(),
+				reason.to_string(),
+			)
+			.is_ok()
+		{
+			self.payments.closed_channels.borrow_mut().insert(channel_id);
+			self.flush_progress(32);
+		}
+	}
+
 	fn probe_amount_for_direction(
 		&self, source_idx: usize, dest_chan_id: ChannelId,
 	) -> Option<u64> {
@@ -4091,26 +4169,19 @@ pub fn do_test<Out: Output + MaybeSend + MaybeSync>(data: &[u8], out: Out) {
 					.enable_op_for_all_signers(SignerOp::ReleaseCommitmentSecret);
 				harness.nodes[2].node.signer_unblocked(None);
 			},
-			0xcc => {
-				harness.nodes[1]
-					.keys_manager
-					.enable_op_for_all_signers(SignerOp::ReleaseCommitmentSecret);
-				let filter = Some((harness.nodes[0].our_node_id(), harness.chan_a_id()));
-				harness.nodes[1].node.signer_unblocked(filter);
+			0xcc => harness.nodes[0].enable_holder_signer_ops(),
+			0xcd => harness.nodes[1].enable_holder_signer_ops(),
+			0xce => harness.nodes[2].enable_holder_signer_ops(),
+			0xcf => {
+				harness.nodes[0].enable_holder_signer_ops();
+				harness.nodes[1].enable_holder_signer_ops();
+				harness.nodes[2].enable_holder_signer_ops();
 			},
-			0xcd => {
-				harness.nodes[1]
-					.keys_manager
-					.enable_op_for_all_signers(SignerOp::ReleaseCommitmentSecret);
-				let filter = Some((harness.nodes[2].our_node_id(), harness.chan_b_id()));
-				harness.nodes[1].node.signer_unblocked(filter);
-			},
-			0xce => {
-				harness.nodes[2]
-					.keys_manager
-					.enable_op_for_all_signers(SignerOp::ReleaseCommitmentSecret);
-				harness.nodes[2].node.signer_unblocked(None);
-			},
+
+			0xd0 => harness.force_close(0, harness.chan_a_id(), 1, "]]]]]]]]]"),
+			0xd1 => harness.force_close(1, harness.chan_b_id(), 2, "]]]]]]]]"),
+			0xd2 => harness.force_close(1, harness.chan_a_id(), 0, "]]]]]]]"),
+			0xd3 => harness.force_close(2, harness.chan_b_id(), 1, "]]]]]"),
 
 			0xd8 => harness.confirm_broadcasts_for_node(0),
 			0xd9 => harness.confirm_broadcasts_for_node(1),
