@@ -716,7 +716,7 @@ type ChanMan<'a> = ChannelManager<
 #[inline]
 fn get_payment_secret_hash(
 	dest: &ChanMan, payment_ctr: &mut u64,
-	payment_preimages: &mut HashMap<PaymentHash, PaymentPreimage>,
+	payment_preimages: &RefCell<HashMap<PaymentHash, PaymentPreimage>>,
 ) -> (PaymentSecret, PaymentHash) {
 	*payment_ctr += 1;
 	let mut payment_preimage = PaymentPreimage([0; 32]);
@@ -725,7 +725,7 @@ fn get_payment_secret_hash(
 	let payment_secret = dest
 		.create_inbound_payment_for_hash(payment_hash, None, 3600, None)
 		.expect("create_inbound_payment_for_hash failed");
-	assert!(payment_preimages.insert(payment_hash, payment_preimage).is_none());
+	assert!(payment_preimages.borrow_mut().insert(payment_hash, payment_preimage).is_none());
 	(payment_secret, payment_hash)
 }
 
@@ -857,23 +857,25 @@ fn send_mpp_payment(
 	source: &ChanMan, dest: &ChanMan, dest_chan_ids: &[ChannelId], amt: u64,
 	payment_secret: PaymentSecret, payment_hash: PaymentHash, payment_id: PaymentId,
 ) -> bool {
-	let num_paths = dest_chan_ids.len();
+	let mut paths = Vec::new();
+
+	let dest_chans = dest.list_channels();
+	let dest_scids: Vec<_> = dest_chan_ids
+		.iter()
+		.filter_map(|chan_id| {
+			dest_chans
+				.iter()
+				.find(|chan| chan.channel_id == *chan_id)
+				.and_then(|chan| chan.short_channel_id)
+		})
+		.collect();
+	let num_paths = dest_scids.len();
 	if num_paths == 0 {
 		return false;
 	}
 	let amt_per_path = amt / num_paths as u64;
-	let mut paths = Vec::with_capacity(num_paths);
 
-	let dest_chans = dest.list_channels();
-	let dest_scids = dest_chan_ids.iter().map(|chan_id| {
-		dest_chans
-			.iter()
-			.find(|chan| chan.channel_id == *chan_id)
-			.and_then(|chan| chan.short_channel_id)
-			.unwrap()
-	});
-
-	for (i, dest_scid) in dest_scids.enumerate() {
+	for (i, dest_scid) in dest_scids.into_iter().enumerate() {
 		let path_amt = if i == num_paths - 1 {
 			amt - amt_per_path * (num_paths as u64 - 1)
 		} else {
@@ -915,9 +917,30 @@ fn send_mpp_hop_payment(
 	dest_chan_ids: &[ChannelId], amt: u64, payment_secret: PaymentSecret,
 	payment_hash: PaymentHash, payment_id: PaymentId,
 ) -> bool {
-	// Create paths by pairing middle_scids with dest_scids
-	let num_paths = middle_chan_ids.len().max(dest_chan_ids.len());
-	if num_paths == 0 {
+	let middle_chans = middle.list_channels();
+	let middle_scids: Vec<_> = middle_chan_ids
+		.iter()
+		.filter_map(|chan_id| {
+			middle_chans
+				.iter()
+				.find(|chan| chan.channel_id == *chan_id)
+				.and_then(|chan| chan.short_channel_id)
+		})
+		.collect();
+
+	let dest_chans = dest.list_channels();
+	let dest_scids: Vec<_> = dest_chan_ids
+		.iter()
+		.filter_map(|chan_id| {
+			dest_chans
+				.iter()
+				.find(|chan| chan.channel_id == *chan_id)
+				.and_then(|chan| chan.short_channel_id)
+		})
+		.collect();
+
+	let num_paths = middle_scids.len().max(dest_scids.len());
+	if middle_scids.is_empty() || dest_scids.is_empty() {
 		return false;
 	}
 
@@ -925,30 +948,6 @@ fn send_mpp_hop_payment(
 	let amt_per_path = amt / num_paths as u64;
 	let fee_per_path = first_hop_fee / num_paths as u64;
 	let mut paths = Vec::with_capacity(num_paths);
-
-	let middle_chans = middle.list_channels();
-	let middle_scids: Vec<_> = middle_chan_ids
-		.iter()
-		.map(|chan_id| {
-			middle_chans
-				.iter()
-				.find(|chan| chan.channel_id == *chan_id)
-				.and_then(|chan| chan.short_channel_id)
-		})
-		.map(Option::unwrap)
-		.collect();
-
-	let dest_chans = dest.list_channels();
-	let dest_scids: Vec<_> = dest_chan_ids
-		.iter()
-		.map(|chan_id| {
-			dest_chans
-				.iter()
-				.find(|chan| chan.channel_id == *chan_id)
-				.and_then(|chan| chan.short_channel_id)
-		})
-		.map(Option::unwrap)
-		.collect();
 
 	for i in 0..num_paths {
 		let middle_scid = middle_scids[i % middle_scids.len()];
@@ -1726,28 +1725,107 @@ enum MonitorUpdateSelector {
 
 struct PaymentTracker {
 	payment_ctr: u64,
-	pending_payments: [Vec<PaymentId>; 3],
-	resolved_payments: [HashMap<PaymentId, Option<PaymentHash>>; 3],
-	claimed_payment_hashes: HashSet<PaymentHash>,
-	payment_preimages: HashMap<PaymentHash, PaymentPreimage>,
+	pending_payments: RefCell<[Vec<PaymentId>; 3]>,
+	resolved_payment_ids: RefCell<[HashSet<PaymentId>; 3]>,
+	claimed_payment_hashes: RefCell<HashSet<PaymentHash>>,
+	receiver_claimed_payment_hashes: RefCell<HashSet<PaymentHash>>,
+	sender_sent_payment_hashes: RefCell<HashSet<PaymentHash>>,
+	sender_failed_payment_hashes: RefCell<HashSet<PaymentHash>>,
+	payment_hashes_by_id: RefCell<HashMap<PaymentId, PaymentHash>>,
+	payment_paths_by_hash: RefCell<HashMap<PaymentHash, Vec<Vec<(ChannelId, u64)>>>>,
+	blocked_dust_paths_by_hash: RefCell<HashMap<PaymentHash, HashSet<usize>>>,
+	payment_preimages: RefCell<HashMap<PaymentHash, PaymentPreimage>>,
+	closed_channels: RefCell<HashSet<ChannelId>>,
 }
 
 impl PaymentTracker {
 	fn new() -> Self {
 		Self {
 			payment_ctr: 0,
-			pending_payments: [Vec::new(), Vec::new(), Vec::new()],
-			resolved_payments: [new_hash_map(), new_hash_map(), new_hash_map()],
-			claimed_payment_hashes: HashSet::new(),
-			payment_preimages: new_hash_map(),
+			pending_payments: RefCell::new([Vec::new(), Vec::new(), Vec::new()]),
+			resolved_payment_ids: RefCell::new([HashSet::new(), HashSet::new(), HashSet::new()]),
+			claimed_payment_hashes: RefCell::new(HashSet::new()),
+			receiver_claimed_payment_hashes: RefCell::new(HashSet::new()),
+			sender_sent_payment_hashes: RefCell::new(HashSet::new()),
+			sender_failed_payment_hashes: RefCell::new(HashSet::new()),
+			payment_hashes_by_id: RefCell::new(new_hash_map()),
+			payment_paths_by_hash: RefCell::new(new_hash_map()),
+			blocked_dust_paths_by_hash: RefCell::new(new_hash_map()),
+			payment_preimages: RefCell::new(new_hash_map()),
+			closed_channels: RefCell::new(HashSet::new()),
 		}
+	}
+
+	fn register_payment(
+		&self, source_idx: usize, payment_id: PaymentId, payment_hash: PaymentHash,
+		payment_paths: Vec<Vec<(ChannelId, u64)>>,
+	) {
+		assert!(
+			self.payment_hashes_by_id.borrow_mut().insert(payment_id, payment_hash).is_none(),
+			"duplicate payment_id {:?}",
+			payment_id
+		);
+		assert!(
+			self.payment_paths_by_hash.borrow_mut().insert(payment_hash, payment_paths).is_none(),
+			"duplicate payment_hash {:?}",
+			payment_hash
+		);
+		self.pending_payments.borrow_mut()[source_idx].push(payment_id);
+	}
+
+	fn claim_allows_sender_failure(&self, hash: &PaymentHash) -> bool {
+		self.blocked_dust_paths_by_hash
+			.borrow()
+			.get(hash)
+			.is_some_and(|blocked_paths| !blocked_paths.is_empty())
+	}
+
+	fn summarize_claim_tracking(&self) -> String {
+		let claim_requested = self.claimed_payment_hashes.borrow();
+		let receiver_claimed = self.receiver_claimed_payment_hashes.borrow();
+		let sender_sent = self.sender_sent_payment_hashes.borrow();
+		let sender_failed = self.sender_failed_payment_hashes.borrow();
+		let failure_allowed_count =
+			claim_requested.iter().filter(|hash| self.claim_allows_sender_failure(hash)).count();
+		let missing_receiver =
+			claim_requested.iter().filter(|hash| !receiver_claimed.contains(*hash)).count();
+		let missing_sender = claim_requested
+			.iter()
+			.filter(|hash| !sender_sent.contains(*hash) && !sender_failed.contains(*hash))
+			.count();
+		format!(
+			"claims requested={} receiver_claimed={} sender_sent={} sender_failed={} failure_allowed={} missing_receiver={} missing_sender={}",
+			claim_requested.len(),
+			receiver_claimed.len(),
+			sender_sent.len(),
+			sender_failed.len(),
+			failure_allowed_count,
+			missing_receiver,
+			missing_sender,
+		)
+	}
+
+	fn has_unfinished_claims(&self) -> bool {
+		let claim_requested = self.claimed_payment_hashes.borrow();
+		let receiver_claimed = self.receiver_claimed_payment_hashes.borrow();
+		let sender_sent = self.sender_sent_payment_hashes.borrow();
+		let sender_failed = self.sender_failed_payment_hashes.borrow();
+		claim_requested.iter().any(|hash| {
+			!receiver_claimed.contains(hash)
+				|| (!sender_sent.contains(hash) && !sender_failed.contains(hash))
+		})
+	}
+
+	fn has_live_payment_work(&self) -> bool {
+		self.pending_payments.borrow().iter().any(|payments| !payments.is_empty())
+			|| self.has_unfinished_claims()
 	}
 }
 
 impl PaymentTracker {
 	fn next_payment(&mut self, dest: &ChanMan) -> (PaymentSecret, PaymentHash, PaymentId) {
 		let (secret, hash) =
-			get_payment_secret_hash(dest, &mut self.payment_ctr, &mut self.payment_preimages);
+			get_payment_secret_hash(dest, &mut self.payment_ctr, &self.payment_preimages);
 		let mut id = PaymentId([0; 32]);
 		id.0[0..8].copy_from_slice(&self.payment_ctr.to_ne_bytes());
 		(secret, hash, id)
@@ -1757,12 +1835,15 @@ impl PaymentTracker {
 		&mut self, nodes: &[HarnessNode<'_>; 3], source_idx: usize, dest_idx: usize,
 		dest_chan_id: ChannelId, amt: u64,
 	) -> bool {
+		if self.closed_channels.borrow().contains(&dest_chan_id) {
+			return false;
+		}
 		let source = &nodes[source_idx].node;
 		let dest = &nodes[dest_idx].node;
 		let (secret, hash, id) = self.next_payment(dest);
 		let succeeded = send_payment(source, dest, dest_chan_id, amt, secret, hash, id);
 		if succeeded {
-			self.pending_payments[source_idx].push(id);
+			self.register_payment(source_idx, id, hash, vec![vec![(dest_chan_id, amt)]]);
 		}
 		succeeded
 	}
@@ -1771,10 +1852,16 @@ impl PaymentTracker {
 		&mut self, nodes: &[HarnessNode<'_>; 3], source_idx: usize, middle_idx: usize,
 		middle_chan_id: ChannelId, dest_idx: usize, dest_chan_id: ChannelId, amt: u64,
 	) {
+		let closed_channels = self.closed_channels.borrow();
+		if closed_channels.contains(&middle_chan_id) || closed_channels.contains(&dest_chan_id) {
+			return;
+		}
+		drop(closed_channels);
 		let source = &nodes[source_idx].node;
 		let middle = &nodes[middle_idx].node;
 		let dest = &nodes[dest_idx].node;
 		let (secret, hash, id) = self.next_payment(dest);
+		let first_hop_fee = 50_000;
 		let succeeded = send_hop_payment(
 			source,
 			middle,
@@ -1787,7 +1874,12 @@ impl PaymentTracker {
 			id,
 		);
 		if succeeded {
-			self.pending_payments[source_idx].push(id);
+			self.register_payment(
+				source_idx,
+				id,
+				hash,
+				vec![vec![(middle_chan_id, amt + first_hop_fee), (dest_chan_id, amt)]],
+			);
 		}
 	}
 
@@ -1795,12 +1887,38 @@ impl PaymentTracker {
 		&mut self, nodes: &[HarnessNode<'_>; 3], source_idx: usize, dest_idx: usize,
 		dest_chan_ids: &[ChannelId], amt: u64,
 	) {
+		let live_dest_chan_ids = {
+			let closed_channels = self.closed_channels.borrow();
+			dest_chan_ids
+				.iter()
+				.copied()
+				.filter(|chan_id| !closed_channels.contains(chan_id))
+				.collect::<Vec<_>>()
+		};
+		if live_dest_chan_ids.is_empty() {
+			return;
+		}
 		let source = &nodes[source_idx].node;
 		let dest = &nodes[dest_idx].node;
 		let (secret, hash, id) = self.next_payment(dest);
-		let succeeded = send_mpp_payment(source, dest, dest_chan_ids, amt, secret, hash, id);
+		let succeeded = send_mpp_payment(source, dest, &live_dest_chan_ids, amt, secret, hash, id);
 		if succeeded {
-			self.pending_payments[source_idx].push(id);
+			let num_paths = live_dest_chan_ids.len();
+			let amt_per_path = amt / num_paths as u64;
+			let payment_paths = live_dest_chan_ids
+				.iter()
+				.copied()
+				.enumerate()
+				.map(|(i, chan_id)| {
+					let path_amt = if i == num_paths - 1 {
+						amt - amt_per_path * (num_paths as u64 - 1)
+					} else {
+						amt_per_path
+					};
+					vec![(chan_id, path_amt)]
+				})
+				.collect();
+			self.register_payment(source_idx, id, hash, payment_paths);
 		}
 	}
 
@@ -1808,23 +1926,62 @@ impl PaymentTracker {
 		&mut self, nodes: &[HarnessNode<'_>; 3], source_idx: usize, middle_idx: usize,
 		middle_chan_ids: &[ChannelId], dest_idx: usize, dest_chan_ids: &[ChannelId], amt: u64,
 	) {
+		let (live_middle_chan_ids, live_dest_chan_ids) = {
+			let closed_channels = self.closed_channels.borrow();
+			(
+				middle_chan_ids
+					.iter()
+					.copied()
+					.filter(|chan_id| !closed_channels.contains(chan_id))
+					.collect::<Vec<_>>(),
+				dest_chan_ids
+					.iter()
+					.copied()
+					.filter(|chan_id| !closed_channels.contains(chan_id))
+					.collect::<Vec<_>>(),
+			)
+		};
+		if live_middle_chan_ids.is_empty() || live_dest_chan_ids.is_empty() {
+			return;
+		}
 		let source = &nodes[source_idx].node;
 		let middle = &nodes[middle_idx].node;
 		let dest = &nodes[dest_idx].node;
 		let (secret, hash, id) = self.next_payment(dest);
+		let num_paths = live_middle_chan_ids.len().max(live_dest_chan_ids.len());
+		let first_hop_fee = 50_000;
+		let amt_per_path = amt / num_paths as u64;
+		let fee_per_path = first_hop_fee / num_paths as u64;
 		let succeeded = send_mpp_hop_payment(
 			source,
 			middle,
-			middle_chan_ids,
+			&live_middle_chan_ids,
 			dest,
-			dest_chan_ids,
+			&live_dest_chan_ids,
 			amt,
 			secret,
 			hash,
 			id,
 		);
 		if succeeded {
-			self.pending_payments[source_idx].push(id);
+			let payment_paths = (0..num_paths)
+				.map(|i| {
+					let middle_chan_id = live_middle_chan_ids[i % live_middle_chan_ids.len()];
+					let dest_chan_id = live_dest_chan_ids[i % live_dest_chan_ids.len()];
+					let path_amt = if i == num_paths - 1 {
+						amt - amt_per_path * (num_paths as u64 - 1)
+					} else {
+						amt_per_path
+					};
+					let path_fee = if i == num_paths - 1 {
+						first_hop_fee - fee_per_path * (num_paths as u64 - 1)
+					} else {
+						fee_per_path
+					};
+					vec![(middle_chan_id, path_amt + path_fee), (dest_chan_id, path_amt)]
+				})
+				.collect();
+			self.register_payment(source_idx, id, hash, payment_paths);
 		}
 	}
 
@@ -1834,67 +1991,55 @@ impl PaymentTracker {
 		} else {
 			let payment_preimage = *self
 				.payment_preimages
+				.borrow()
 				.get(&payment_hash)
 				.expect("PaymentClaimable for unknown payment hash");
 			node.node.claim_funds(payment_preimage);
-			self.claimed_payment_hashes.insert(payment_hash);
+			self.claimed_payment_hashes.borrow_mut().insert(payment_hash);
 		}
 	}
 
 	fn mark_sent(&mut self, node_idx: usize, sent_id: PaymentId, payment_hash: PaymentHash) {
-		let idx_opt = self.pending_payments[node_idx].iter().position(|id| *id == sent_id);
-		if let Some(idx) = idx_opt {
-			self.pending_payments[node_idx].remove(idx);
-			self.resolved_payments[node_idx].insert(sent_id, Some(payment_hash));
-		} else {
-			assert!(self.resolved_payments[node_idx].contains_key(&sent_id));
+		self.sender_sent_payment_hashes.borrow_mut().insert(payment_hash);
+		self.mark_resolved_payment(node_idx, sent_id, true);
+	}
+
+	fn mark_failed(
+		&mut self, node_idx: usize, payment_id: PaymentId, payment_hash: Option<PaymentHash>,
+	) {
+		let payment_hash =
+			payment_hash.or_else(|| self.payment_hashes_by_id.borrow().get(&payment_id).copied());
+		if let Some(payment_hash) = payment_hash {
+			self.sender_failed_payment_hashes.borrow_mut().insert(payment_hash);
 		}
+		self.mark_resolved_payment(node_idx, payment_id, false);
 	}
 
 	fn mark_resolved_without_hash(&mut self, node_idx: usize, payment_id: PaymentId) {
-		let idx_opt = self.pending_payments[node_idx].iter().position(|id| *id == payment_id);
+		self.mark_resolved_payment(node_idx, payment_id, false);
+	}
+
+	fn mark_receiver_claimed(&mut self, payment_hash: PaymentHash) {
+		self.receiver_claimed_payment_hashes.borrow_mut().insert(payment_hash);
+	}
+
+	fn mark_channel_closed(&mut self, channel_id: ChannelId) {
+		self.closed_channels.borrow_mut().insert(channel_id);
+	}
+
+	fn mark_resolved_payment(
+		&self, node_idx: usize, payment_id: PaymentId, assert_already_resolved: bool,
+	) {
+		let mut pending_payments = self.pending_payments.borrow_mut();
+		let mut resolved_payment_ids = self.resolved_payment_ids.borrow_mut();
+		let idx_opt = pending_payments[node_idx].iter().position(|id| *id == payment_id);
 		if let Some(idx) = idx_opt {
-			self.pending_payments[node_idx].remove(idx);
-			self.resolved_payments[node_idx].insert(payment_id, None);
-		} else if !self.resolved_payments[node_idx].contains_key(&payment_id) {
-			// Some resolutions can arrive immediately, before the send helper records
-			// the payment as pending. Track them so later duplicate events are accepted.
-			self.resolved_payments[node_idx].insert(payment_id, None);
-		}
-	}
-
-	fn mark_successful_probe(&mut self, node_idx: usize, payment_id: PaymentId) {
-		let idx_opt = self.pending_payments[node_idx].iter().position(|id| *id == payment_id);
-		if let Some(idx) = idx_opt {
-			self.pending_payments[node_idx].remove(idx);
-			self.resolved_payments[node_idx].insert(payment_id, None);
-		} else {
-			assert!(self.resolved_payments[node_idx].contains_key(&payment_id));
-		}
-	}
-
-	fn assert_all_resolved(&self) {
-		for (idx, pending) in self.pending_payments.iter().enumerate() {
-			assert!(
-				pending.is_empty(),
-				"Node {} has {} stuck pending payments after settling all state",
-				idx,
-				pending.len()
-			);
-		}
-	}
-
-	fn assert_claims_reported(&self) {
-		for hash in self.claimed_payment_hashes.iter() {
-			let found = self
-				.resolved_payments
-				.iter()
-				.any(|node_resolved| node_resolved.values().any(|h| h.as_ref() == Some(hash)));
-			assert!(
-				found,
-				"Payment {:?} was claimed by receiver but sender never got PaymentSent",
-				hash
-			);
+			pending_payments[node_idx].remove(idx);
+			resolved_payment_ids[node_idx].insert(payment_id);
+		} else if assert_already_resolved {
+			assert!(resolved_payment_ids[node_idx].contains(&payment_id));
+		} else if !resolved_payment_ids[node_idx].contains(&payment_id) {
+			resolved_payment_ids[node_idx].insert(payment_id);
 		}
 	}
 }
@@ -2480,34 +2625,141 @@ impl<'a, 'd, Out: Output + MaybeSend + MaybeSync> Harness<'a, 'd, Out> {
 		}
 		self.process_all_events();
 
-		for _ in 0..4096 {
-			self.flush_progress(32);
-			if !self.has_pending_work() {
-				break;
-			}
-			for node in self.nodes.iter() {
-				node.node.timer_tick_occurred();
-			}
-			self.flush_progress(32);
-			if !self.has_pending_work() {
-				break;
-			}
-			self.chain_state.advance_height(1);
-			self.flush_progress(32);
-			if !self.has_pending_work() {
-				break;
+		if !self.payments.closed_channels.borrow().is_empty() {
+			for _ in 0..4096 {
+				self.flush_progress(32);
+				for node in self.nodes.iter() {
+					node.node.timer_tick_occurred();
+				}
+				self.flush_progress(32);
+				let open_channels = self.open_channels();
+				let open_refs: Vec<_> = open_channels.iter().collect();
+				let balances_a = self.nodes[0].monitor.get_claimable_balances(&open_refs);
+				let balances_b = self.nodes[1].monitor.get_claimable_balances(&open_refs);
+				let balances_c = self.nodes[2].monitor.get_claimable_balances(&open_refs);
+				let needs_payment_completion = self.payments.has_live_payment_work();
+				let has_cleanup_balances =
+					!balances_a.is_empty() || !balances_b.is_empty() || !balances_c.is_empty();
+				let can_drive_more_cleanup = has_cleanup_balances || self.has_pending_work();
+				let next_claimed_htlc_boundary = {
+					let claimed_hashes = self.payments.claimed_payment_hashes.borrow();
+					let sender_sent = self.payments.sender_sent_payment_hashes.borrow();
+					let sender_failed = self.payments.sender_failed_payment_hashes.borrow();
+					balances_a
+						.iter()
+						.chain(balances_b.iter())
+						.chain(balances_c.iter())
+						.filter_map(|balance| match balance {
+							Balance::ContentiousClaimable {
+								timeout_height, payment_hash, ..
+							} if claimed_hashes.contains(payment_hash)
+								&& !sender_sent.contains(payment_hash)
+								&& !sender_failed.contains(payment_hash) =>
+							{
+								Some(*timeout_height)
+							},
+							Balance::MaybeTimeoutClaimableHTLC {
+								claimable_height,
+								payment_hash,
+								..
+							} if claimed_hashes.contains(payment_hash)
+								&& !sender_sent.contains(payment_hash)
+								&& !sender_failed.contains(payment_hash) =>
+							{
+								Some(*claimable_height)
+							},
+							Balance::MaybePreimageClaimableHTLC {
+								expiry_height,
+								payment_hash,
+								..
+							} if claimed_hashes.contains(payment_hash)
+								&& !sender_sent.contains(payment_hash)
+								&& !sender_failed.contains(payment_hash) =>
+							{
+								Some(*expiry_height)
+							},
+							_ => None,
+						})
+						.min()
+				};
+				let can_advance_without_claimed_expiry = next_claimed_htlc_boundary
+					.map_or(true, |boundary| {
+						self.chain_state.tip_height().saturating_add(1) < boundary
+					});
+				if !needs_payment_completion || !can_drive_more_cleanup {
+					break;
+				}
+				if self.payments.has_unfinished_claims() && !can_advance_without_claimed_expiry {
+					break;
+				}
+				self.chain_state.advance_height(1);
+				self.flush_progress(32);
 			}
 		}
 
-		self.payments.assert_all_resolved();
-		// Verify that every payment claimed by a receiver resulted in a PaymentSent event at
-		// the sender.
-		self.payments.assert_claims_reported();
+		{
+			let payment_hashes = self.payments.payment_hashes_by_id.borrow();
+			let claimed = self.payments.claimed_payment_hashes.borrow();
+			let receiver_claimed = self.payments.receiver_claimed_payment_hashes.borrow();
+			let sender_sent = self.payments.sender_sent_payment_hashes.borrow();
+			let sender_failed = self.payments.sender_failed_payment_hashes.borrow();
+			let mut pending = self.payments.pending_payments.borrow_mut();
+			let mut resolved = self.payments.resolved_payment_ids.borrow_mut();
+			for (node_idx, payment_ids) in pending.iter_mut().enumerate() {
+				payment_ids.retain(|payment_id| {
+					let payment_hash = *payment_hashes
+						.get(payment_id)
+						.expect("pending payment missing payment hash");
+					let keep = claimed.contains(&payment_hash)
+						|| receiver_claimed.contains(&payment_hash)
+						|| sender_sent.contains(&payment_hash)
+						|| sender_failed.contains(&payment_hash);
+					if !keep {
+						resolved[node_idx].insert(*payment_id);
+					}
+					keep
+				});
+			}
+		}
+
+		for (idx, pending) in self.payments.pending_payments.borrow().iter().enumerate() {
+			assert!(
+				pending.is_empty(),
+				"Node {} has {} stuck pending payments after settling all state: ids={:?}; {}",
+				idx,
+				pending.len(),
+				pending,
+				self.pending_work_summary(),
+			);
+		}
+
+		let claimed_hashes =
+			self.payments.claimed_payment_hashes.borrow().iter().copied().collect::<Vec<_>>();
+		for hash in claimed_hashes {
+			let receiver_saw_claim =
+				self.payments.receiver_claimed_payment_hashes.borrow().contains(&hash);
+			assert!(
+				receiver_saw_claim,
+				"Payment {:?} was claimed with claim_funds but receiver never got PaymentClaimed",
+				hash,
+			);
+			let sender_saw_sent = self.payments.sender_sent_payment_hashes.borrow().contains(&hash);
+			let sender_saw_failed =
+				self.payments.sender_failed_payment_hashes.borrow().contains(&hash);
+			assert!(!(sender_saw_sent && sender_saw_failed));
+			assert!(sender_saw_sent || sender_saw_failed);
+			if sender_saw_failed {
+				assert!(self.payments.claim_allows_sender_failure(&hash));
+			}
+		}
 
 		self.ab_link.complete_all_monitor_updates(&self.nodes);
 		self.bc_link.complete_all_monitor_updates(&self.nodes);
 
 		for chan_id in *self.ab_link.channel_ids() {
+			if self.payments.closed_channels.borrow().contains(&chan_id) {
+				continue;
+			}
 			if self.probe_amount_for_direction(0, chan_id).is_some() {
 				assert!(self.can_send_after_settle(0, 1, chan_id));
 			} else if self.probe_amount_for_direction(1, chan_id).is_some() {
@@ -2515,6 +2767,9 @@ impl<'a, 'd, Out: Output + MaybeSend + MaybeSync> Harness<'a, 'd, Out> {
 			}
 		}
 		for chan_id in *self.bc_link.channel_ids() {
+			if self.payments.closed_channels.borrow().contains(&chan_id) {
+				continue;
+			}
 			if self.probe_amount_for_direction(1, chan_id).is_some() {
 				assert!(self.can_send_after_settle(1, 2, chan_id));
 			} else if self.probe_amount_for_direction(2, chan_id).is_some() {
@@ -2621,9 +2876,9 @@ impl<'a, 'd, Out: Output + MaybeSend + MaybeSync> Harness<'a, 'd, Out> {
 		let balances_a = self.nodes[0].monitor.get_claimable_balances(&open_refs);
 		let balances_b = self.nodes[1].monitor.get_claimable_balances(&open_refs);
 		let balances_c = self.nodes[2].monitor.get_claimable_balances(&open_refs);
-		let pending_payments = &self.payments.pending_payments;
+		let pending_payments = self.payments.pending_payments.borrow();
 		format!(
-			"queues ab={} ba={} bc={} cb={} pending_txs={} bcast=({},{},{}) pending=({},{},{}) monitor_updates={} timed_work={} heights=({},{},{}) tip={} balances_a=[{}] balances_b=[{}] balances_c=[{}]",
+			"queues ab={} ba={} bc={} cb={} pending_txs={} bcast=({},{},{}) pending=({},{},{}) monitor_updates={} timed_work={} heights=({},{},{}) tip={} {} balances_a=[{}] balances_b=[{}] balances_c=[{}]",
 			self.queues.ab.len(),
 			self.queues.ba.len(),
 			self.queues.bc.len(),
@@ -2641,6 +2896,7 @@ impl<'a, 'd, Out: Output + MaybeSend + MaybeSync> Harness<'a, 'd, Out> {
 			self.nodes[1].height,
 			self.nodes[2].height,
 			self.chain_state.tip_height(),
+			self.payments.summarize_claim_tracking(),
 			summarize_balances(&balances_a),
 			summarize_balances(&balances_b),
 			summarize_balances(&balances_c),
@@ -2809,15 +3065,19 @@ impl<'a, 'd, Out: Output + MaybeSend + MaybeSync> Harness<'a, 'd, Out> {
 	}
 
 	fn advance_chain_carefully(&mut self, num_blocks: u32) {
-		for _ in 0..num_blocks {
+		if self.payments.has_live_payment_work() {
 			self.flush_progress(32);
-			if !self.has_pending_work() {
-				break;
-			}
-			self.chain_state.advance_height(1);
-			self.flush_progress(32);
-			if !self.has_pending_work() {
-				break;
+		} else {
+			for _ in 0..num_blocks {
+				self.flush_progress(32);
+				if !self.has_pending_work() {
+					break;
+				}
+				self.chain_state.advance_height(1);
+				self.flush_progress(32);
+				if !self.has_pending_work() {
+					break;
+				}
 			}
 		}
 	}
@@ -2914,6 +3174,9 @@ impl<'a, 'd, Out: Output + MaybeSend + MaybeSync> Harness<'a, 'd, Out> {
 	fn can_send_after_settle(
 		&mut self, source_idx: usize, dest_idx: usize, dest_chan_id: ChannelId,
 	) -> bool {
+		if self.payments.closed_channels.borrow().contains(&dest_chan_id) {
+			return false;
+		}
 		let Some(amt) = self.probe_amount_for_direction(source_idx, dest_chan_id) else {
 			return false;
 		};
@@ -3244,17 +3507,31 @@ fn process_events_impl(
 			// hashing the payment hash+preimage, it is rather trivial for the fuzzer to build
 			// payments that accidentally end up looking like probes.
 			events::Event::ProbeSuccessful { payment_id, .. } => {
-				payments.mark_successful_probe(node_idx, payment_id);
-			},
-			events::Event::PaymentFailed { payment_id, .. }
-			| events::Event::ProbeFailed { payment_id, .. } => {
 				payments.mark_resolved_without_hash(node_idx, payment_id);
 			},
-			events::Event::PaymentClaimed { .. } => {},
+			events::Event::PaymentFailed { payment_id, payment_hash, .. } => {
+				payments.mark_failed(node_idx, payment_id, payment_hash);
+			},
+			events::Event::ProbeFailed { payment_id, .. } => {
+				payments.mark_resolved_without_hash(node_idx, payment_id);
+			},
+			events::Event::PaymentClaimed { payment_hash, .. } => {
+				payments.mark_receiver_claimed(payment_hash);
+			},
 			events::Event::PaymentPathSuccessful { .. } => {},
 			events::Event::PaymentPathFailed { .. } => {},
 			events::Event::PaymentForwarded { .. } if node_idx == 1 => {},
 			events::Event::ChannelReady { .. } => {},
+			events::Event::HTLCHandlingFailed {
+				failure_type: events::HTLCHandlingFailureType::Receive { payment_hash },
+				..
+			} => {
+				assert!(
+					!payments.claimed_payment_hashes.borrow().contains(&payment_hash),
+					"Payment {:?} hit HTLCHandlingFailed::Receive after claim_funds",
+					payment_hash,
+				);
+			},
 			events::Event::HTLCHandlingFailed { .. } => {},
 			events::Event::FundingTransactionReadyForSigning {
 				channel_id,
@@ -3280,7 +3557,9 @@ fn process_events_impl(
 				}
 			},
 			events::Event::SpliceFailed { .. } => {},
-			events::Event::ChannelClosed { .. } => {},
+			events::Event::ChannelClosed { channel_id, .. } => {
+				payments.mark_channel_closed(channel_id);
+			},
 			events::Event::DiscardFunding { .. } => {},
 			events::Event::SpendableOutputs { .. } => {},
 			events::Event::BumpTransaction(..) => {},
