@@ -10325,7 +10325,23 @@ where
 			}
 		}
 
-		let announcement_sigs = self.get_announcement_sigs(node_signer, chain_hash, user_config, best_block.height, logger);
+		// If the counterparty's `my_current_funding_locked` matches the splice we've already
+		// confirmed and are about to promote, any `announcement_signatures` we'd generate here
+		// would be for the soon-to-be-superseded pre-splice funding. Skip them;
+		// `maybe_promote_splice_funding` will emit correct post-splice sigs once
+		// `inferred_splice_locked` is processed.
+		let our_splice_txid =
+			self.pending_splice.as_ref().and_then(|ps| ps.sent_funding_txid);
+		let splice_promotion_pending = msg
+			.my_current_funding_locked
+			.as_ref()
+			.map(|funding_locked| Some(funding_locked.txid) == our_splice_txid)
+			.unwrap_or(false);
+		let announcement_sigs = if splice_promotion_pending {
+			None
+		} else {
+			self.get_announcement_sigs(node_signer, chain_hash, user_config, best_block.height, logger)
+		};
 
 		let mut commitment_update = None;
 		let mut tx_signatures = None;
