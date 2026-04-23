@@ -12,7 +12,7 @@ use crate::chain::chaininterface::{
 	BroadcasterInterface, ConfirmationTarget, FeeEstimator, TransactionType,
 };
 use crate::chain::channelmonitor::{ANTI_REORG_DELAY, ARCHIVAL_DELAY_BLOCKS};
-use crate::chain::{self, BestBlock, Confirm, Filter, Listen, WatchedOutput};
+use crate::chain::{self, BlockLocator, Confirm, Filter, Listen, WatchedOutput};
 use crate::io;
 use crate::ln::msgs::DecodeError;
 use crate::ln::types::ChannelId;
@@ -386,7 +386,7 @@ where
 	/// If chain data is provided via the [`Confirm`] interface or via filtered blocks, users also
 	/// need to register their [`Filter`] implementation via the given `chain_data_source`.
 	pub fn new(
-		best_block: BestBlock, broadcaster: B, fee_estimator: E, chain_data_source: Option<F>,
+		best_block: BlockLocator, broadcaster: B, fee_estimator: E, chain_data_source: Option<F>,
 		output_spender: O, change_destination_source: D, kv_store: K, logger: L,
 	) -> Self {
 		let outputs = Vec::new();
@@ -472,7 +472,7 @@ where
 
 	/// Gets the latest best block which was connected either via the [`Listen`] or
 	/// [`Confirm`] interfaces.
-	pub fn current_best_block(&self) -> BestBlock {
+	pub fn current_best_block(&self) -> BlockLocator {
 		self.sweeper_state.lock().unwrap().best_block
 	}
 
@@ -766,7 +766,7 @@ where
 		self.best_block_updated_internal(&mut state_lock, header, height);
 	}
 
-	fn blocks_disconnected(&self, fork_point: BestBlock) {
+	fn blocks_disconnected(&self, fork_point: BlockLocator) {
 		let mut state_lock = self.sweeper_state.lock().unwrap();
 
 		assert!(state_lock.best_block.height > fork_point.height,
@@ -854,7 +854,7 @@ where
 #[derive(Debug, Clone)]
 struct SweeperState {
 	outputs: Vec<TrackedSpendableOutput>,
-	best_block: BestBlock,
+	best_block: BlockLocator,
 	dirty: bool,
 }
 
@@ -889,7 +889,7 @@ impl<
 		K: KVStore,
 		L: Logger,
 		O: OutputSpender,
-	> ReadableArgs<(B, E, Option<F>, O, D, K, L)> for (BestBlock, OutputSweeper<B, D, E, F, K, L, O>)
+	> ReadableArgs<(B, E, Option<F>, O, D, K, L)> for (BlockLocator, OutputSweeper<B, D, E, F, K, L, O>)
 where
 	D::Target: ChangeDestinationSource,
 {
@@ -986,7 +986,7 @@ where
 	/// If chain data is provided via the [`Confirm`] interface or via filtered blocks, users also
 	/// need to register their [`Filter`] implementation via the given `chain_data_source`.
 	pub fn new(
-		best_block: BestBlock, broadcaster: B, fee_estimator: E, chain_data_source: Option<F>,
+		best_block: BlockLocator, broadcaster: B, fee_estimator: E, chain_data_source: Option<F>,
 		output_spender: O, change_destination_source: D, kv_store: K, logger: L,
 	) -> Self {
 		let change_destination_source =
@@ -1054,7 +1054,7 @@ where
 
 	/// Gets the latest best block which was connected either via [`Listen`] or [`Confirm`]
 	/// interfaces.
-	pub fn current_best_block(&self) -> BestBlock {
+	pub fn current_best_block(&self) -> BlockLocator {
 		self.sweeper.current_best_block()
 	}
 
@@ -1111,7 +1111,7 @@ where
 		self.sweeper.filtered_block_connected(header, txdata, height);
 	}
 
-	fn blocks_disconnected(&self, fork_point: BestBlock) {
+	fn blocks_disconnected(&self, fork_point: BlockLocator) {
 		self.sweeper.blocks_disconnected(fork_point);
 	}
 }
@@ -1157,7 +1157,7 @@ impl<
 		L: Logger,
 		O: OutputSpender,
 	> ReadableArgs<(B, E, Option<F>, O, D, K, L)>
-	for (BestBlock, OutputSweeperSync<B, D, E, F, K, L, O>)
+	for (BlockLocator, OutputSweeperSync<B, D, E, F, K, L, O>)
 where
 	D::Target: ChangeDestinationSourceSync,
 	K::Target: KVStoreSync,
@@ -1172,7 +1172,7 @@ where
 		let kv_store = KVStoreSyncWrapper(kv_store);
 		let args = (a, b, c, d, change_destination_source, kv_store, e);
 		let (best_block, sweeper) =
-			<(BestBlock, OutputSweeper<_, _, _, _, _, _, _>)>::read(reader, args)?;
+			<(BlockLocator, OutputSweeper<_, _, _, _, _, _, _>)>::read(reader, args)?;
 		Ok((best_block, OutputSweeperSync { sweeper }))
 	}
 }

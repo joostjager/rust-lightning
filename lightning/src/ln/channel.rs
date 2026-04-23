@@ -35,7 +35,7 @@ use crate::chain::channelmonitor::{
 	LATENCY_GRACE_PERIOD_BLOCKS,
 };
 use crate::chain::transaction::{OutPoint, TransactionData};
-use crate::chain::BestBlock;
+use crate::chain::BlockLocator;
 use crate::events::{ClosureReason, FundingInfo};
 use crate::ln::chan_utils;
 use crate::ln::chan_utils::{
@@ -2053,7 +2053,7 @@ where
 
 	#[rustfmt::skip]
 	pub fn funding_signed<L: Logger>(
-		&mut self, msg: &msgs::FundingSigned, best_block: BestBlock, signer_provider: &SP, logger: &L
+		&mut self, msg: &msgs::FundingSigned, best_block: BlockLocator, signer_provider: &SP, logger: &L
 	) -> Result<(&mut FundedChannel<SP>, ChannelMonitor<SP::EcdsaSigner>), ChannelError> {
 		let phase = core::mem::replace(&mut self.phase, ChannelPhase::Undefined);
 		let result = if let ChannelPhase::UnfundedOutboundV1(chan) = phase {
@@ -2326,7 +2326,7 @@ where
 
 	#[rustfmt::skip]
 	pub fn commitment_signed<F: FeeEstimator, L: Logger>(
-		&mut self, msg: &msgs::CommitmentSigned, best_block: BestBlock, signer_provider: &SP, fee_estimator: &LowerBoundedFeeEstimator<F>, logger: &L
+		&mut self, msg: &msgs::CommitmentSigned, best_block: BlockLocator, signer_provider: &SP, fee_estimator: &LowerBoundedFeeEstimator<F>, logger: &L
 	) -> Result<(Option<ChannelMonitor<SP::EcdsaSigner>>, Option<ChannelMonitorUpdate>), ChannelError> {
 		let phase = core::mem::replace(&mut self.phase, ChannelPhase::Undefined);
 		match phase {
@@ -3542,7 +3542,7 @@ trait InitialRemoteCommitmentReceiver<SP: SignerProvider> {
 	#[rustfmt::skip]
 	fn initial_commitment_signed<L: Logger>(
 		&mut self, channel_id: ChannelId, counterparty_signature: Signature, holder_commitment_point: &mut HolderCommitmentPoint,
-		best_block: BestBlock, signer_provider: &SP, logger: &L,
+		best_block: BlockLocator, signer_provider: &SP, logger: &L,
 	) -> Result<(ChannelMonitor<SP::EcdsaSigner>, CommitmentTransaction), ChannelError> {
 		let initial_commitment_tx = match self.check_counterparty_commitment_signature(&counterparty_signature, holder_commitment_point, logger) {
 			Ok(res) => res,
@@ -7837,7 +7837,7 @@ where
 	#[rustfmt::skip]
 	pub fn channel_ready<NS: NodeSigner, L: Logger>(
 		&mut self, msg: &msgs::ChannelReady, node_signer: &NS, chain_hash: ChainHash,
-		user_config: &UserConfig, best_block: &BestBlock, logger: &L
+		user_config: &UserConfig, best_block: &BlockLocator, logger: &L
 	) -> Result<Option<msgs::AnnouncementSignatures>, ChannelError> {
 		if self.context.channel_state.is_peer_disconnected() {
 			self.context.workaround_lnd_bug_4006 = Some(msg.clone());
@@ -8244,7 +8244,7 @@ where
 	}
 
 	pub fn initial_commitment_signed_v2<L: Logger>(
-		&mut self, msg: &msgs::CommitmentSigned, best_block: BestBlock, signer_provider: &SP,
+		&mut self, msg: &msgs::CommitmentSigned, best_block: BlockLocator, signer_provider: &SP,
 		logger: &L,
 	) -> Result<ChannelMonitor<SP::EcdsaSigner>, ChannelError> {
 		if let Some(signing_session) = self.context.interactive_tx_signing_session.as_ref() {
@@ -10237,7 +10237,7 @@ where
 	#[rustfmt::skip]
 	pub fn channel_reestablish<L: Logger, NS: NodeSigner, CBP>(
 		&mut self, msg: &msgs::ChannelReestablish, logger: &L, node_signer: &NS,
-		chain_hash: ChainHash, user_config: &UserConfig, best_block: &BestBlock,
+		chain_hash: ChainHash, user_config: &UserConfig, best_block: &BlockLocator,
 		path_for_release_htlc: CBP,
 	) -> Result<ReestablishResponses, ChannelError>
 	where
@@ -14572,7 +14572,7 @@ impl<SP: SignerProvider> OutboundV1Channel<SP> {
 	/// Handles a funding_signed message from the remote end.
 	/// If this call is successful, broadcast the funding transaction (and not before!)
 	pub fn funding_signed<L: Logger>(
-		mut self, msg: &msgs::FundingSigned, best_block: BestBlock, signer_provider: &SP,
+		mut self, msg: &msgs::FundingSigned, best_block: BlockLocator, signer_provider: &SP,
 		logger: &L,
 	) -> Result<
 		(FundedChannel<SP>, ChannelMonitor<SP::EcdsaSigner>),
@@ -14866,7 +14866,7 @@ impl<SP: SignerProvider> InboundV1Channel<SP> {
 	}
 
 	pub fn funding_created<L: Logger>(
-		mut self, msg: &msgs::FundingCreated, best_block: BestBlock, signer_provider: &SP,
+		mut self, msg: &msgs::FundingCreated, best_block: BlockLocator, signer_provider: &SP,
 		logger: &L,
 	) -> Result<
 		(FundedChannel<SP>, Option<msgs::FundingSigned>, ChannelMonitor<SP::EcdsaSigner>),
@@ -16801,7 +16801,7 @@ pub(crate) fn hold_time_since(send_timestamp: Option<Duration>) -> Option<u32> {
 mod tests {
 	use crate::chain::chaininterface::LowerBoundedFeeEstimator;
 	use crate::chain::transaction::OutPoint;
-	use crate::chain::BestBlock;
+	use crate::chain::BlockLocator;
 	use crate::ln::chan_utils::{self, commit_tx_fee_sat, ChannelTransactionParameters};
 	use crate::ln::channel::{
 		AwaitingChannelReadyFlags, ChannelState, FundedChannel, HTLCUpdateAwaitingACK,
@@ -17000,7 +17000,7 @@ mod tests {
 		let network = Network::Testnet;
 		let keys_provider = TestKeysInterface::new(&seed, network);
 		let logger = TestLogger::new();
-		let best_block = BestBlock::from_network(network);
+		let best_block = BlockLocator::from_network(network);
 
 		// Go through the flow of opening a channel between two nodes, making sure
 		// they have different dust limits.
@@ -17146,7 +17146,7 @@ mod tests {
 		let secp_ctx = Secp256k1::new();
 		let seed = [42; 32];
 		let network = Network::Testnet;
-		let best_block = BestBlock::from_network(network);
+		let best_block = BlockLocator::from_network(network);
 		let chain_hash = ChainHash::using_genesis_block(network);
 		let keys_provider = TestKeysInterface::new(&seed, network);
 
@@ -17382,7 +17382,7 @@ mod tests {
 		let secp_ctx = Secp256k1::new();
 		let seed = [42; 32];
 		let network = Network::Testnet;
-		let best_block = BestBlock::from_network(network);
+		let best_block = BlockLocator::from_network(network);
 		let chain_hash = ChainHash::using_genesis_block(network);
 		let keys_provider = TestKeysInterface::new(&seed, network);
 
@@ -17460,7 +17460,7 @@ mod tests {
 		let secp_ctx = Secp256k1::new();
 		let seed = [42; 32];
 		let network = Network::Testnet;
-		let best_block = BestBlock::from_network(network);
+		let best_block = BlockLocator::from_network(network);
 		let keys_provider = TestKeysInterface::new(&seed, network);
 
 		let node_b_node_id =
@@ -19115,7 +19115,7 @@ mod tests {
 		let secp_ctx = Secp256k1::new();
 		let seed = [42; 32];
 		let network = Network::Testnet;
-		let best_block = BestBlock::from_network(network);
+		let best_block = BlockLocator::from_network(network);
 		let chain_hash = ChainHash::using_genesis_block(network);
 		let keys_provider = TestKeysInterface::new(&seed, network);
 

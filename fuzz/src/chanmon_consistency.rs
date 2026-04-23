@@ -44,7 +44,7 @@ use lightning::chain::chaininterface::{
 use lightning::chain::channelmonitor::{ChannelMonitor, MonitorEvent};
 use lightning::chain::transaction::OutPoint;
 use lightning::chain::{
-	chainmonitor, channelmonitor, BestBlock, ChannelMonitorUpdateStatus, Confirm, Watch,
+	chainmonitor, channelmonitor, BlockLocator, ChannelMonitorUpdateStatus, Confirm, Watch,
 };
 use lightning::events;
 use lightning::ln::channel::{
@@ -332,7 +332,7 @@ impl chain::Watch<TestChannelSigner> for TestChainMonitor {
 			.map(|(_, data)| data)
 			.unwrap_or(&map_entry.persisted_monitor);
 		let deserialized_monitor =
-			<(BestBlock, channelmonitor::ChannelMonitor<TestChannelSigner>)>::read(
+			<(BlockLocator, channelmonitor::ChannelMonitor<TestChannelSigner>)>::read(
 				&mut &latest_monitor_data[..],
 				(&*self.keys, &*self.keys),
 			)
@@ -958,7 +958,7 @@ pub fn do_test<Out: Output + MaybeSend + MaybeSync>(data: &[u8], out: Out) {
 			}
 			let network = Network::Bitcoin;
 			let best_block_timestamp = genesis_block(network).header.time;
-			let params = ChainParameters { network, best_block: BestBlock::from_network(network) };
+			let params = ChainParameters { network, best_block: BlockLocator::from_network(network) };
 			(
 				ChannelManager::new(
 					$fee_estimator.clone(),
@@ -1039,7 +1039,7 @@ pub fn do_test<Out: Output + MaybeSend + MaybeSync>(data: &[u8], out: Out) {
 			// Use a different value of `use_old_mons` if we have another monitor (only for node B)
 			// by shifting `use_old_mons` one in base-3.
 			use_old_mons /= 3;
-			let mon = <(BestBlock, ChannelMonitor<TestChannelSigner>)>::read(
+			let mon = <(BlockLocator, ChannelMonitor<TestChannelSigner>)>::read(
 				&mut &serialized_mon[..],
 				(&**keys, &**keys),
 			)
@@ -1074,7 +1074,7 @@ pub fn do_test<Out: Output + MaybeSend + MaybeSync>(data: &[u8], out: Out) {
 		};
 
 		let manager =
-			<(BestBlock, ChanMan)>::read(&mut &ser[..], read_args).expect("Failed to read manager");
+			<(BlockLocator, ChanMan)>::read(&mut &ser[..], read_args).expect("Failed to read manager");
 		let res = (manager.1, chain_monitor.clone());
 		for (channel_id, mon) in monitors.drain() {
 			assert_eq!(
