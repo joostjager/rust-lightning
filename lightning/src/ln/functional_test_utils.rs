@@ -15,7 +15,7 @@ use crate::blinded_path::payment::{
 };
 use crate::chain::channelmonitor::{ChannelMonitor, HTLC_FAIL_BACK_BUFFER};
 use crate::chain::transaction::OutPoint;
-use crate::chain::{BestBlock, ChannelMonitorUpdateStatus, Confirm, Listen, Watch};
+use crate::chain::{BlockLocator, ChannelMonitorUpdateStatus, Confirm, Listen, Watch};
 use crate::events::bump_transaction::sync::BumpTransactionEventHandlerSync;
 use crate::events::bump_transaction::BumpTransactionEvent;
 use crate::events::{
@@ -447,13 +447,13 @@ pub fn disconnect_blocks<'a, 'b, 'c, 'd>(node: &'a Node<'b, 'c, 'd>, count: u32)
 
 		match *node.connect_style.borrow() {
 			ConnectStyle::FullBlockViaListen => {
-				let best_block = BestBlock::new(orig.0.header.prev_blockhash, orig.1 - 1);
+				let best_block = BlockLocator::new(orig.0.header.prev_blockhash, orig.1 - 1);
 				node.chain_monitor.chain_monitor.blocks_disconnected(best_block);
 				Listen::blocks_disconnected(node.node, best_block);
 			},
 			ConnectStyle::FullBlockDisconnectionsSkippingViaListen => {
 				if i == count - 1 {
-					let best_block = BestBlock::new(orig.0.header.prev_blockhash, orig.1 - 1);
+					let best_block = BlockLocator::new(orig.0.header.prev_blockhash, orig.1 - 1);
 					node.chain_monitor.chain_monitor.blocks_disconnected(best_block);
 					Listen::blocks_disconnected(node.node, best_block);
 				}
@@ -848,7 +848,7 @@ impl<'a, 'b, 'c> Drop for Node<'a, 'b, 'c> {
 					let mon = self.chain_monitor.chain_monitor.get_monitor(channel_id).unwrap();
 					mon.write(&mut w).unwrap();
 					let (_, deserialized_monitor) =
-						<(BestBlock, ChannelMonitor<TestChannelSigner>)>::read(
+						<(BlockLocator, ChannelMonitor<TestChannelSigner>)>::read(
 							&mut io::Cursor::new(&w.0),
 							(self.keys_manager, self.keys_manager),
 						)
@@ -877,7 +877,7 @@ impl<'a, 'b, 'c> Drop for Node<'a, 'b, 'c> {
 				let mut w = test_utils::TestVecWriter(Vec::new());
 				self.node.write(&mut w).unwrap();
 				<(
-					BestBlock,
+					BlockLocator,
 					ChannelManager<
 						&test_utils::TestChainMonitor,
 						&test_utils::TestBroadcaster,
@@ -1312,7 +1312,7 @@ pub fn _reload_node<'a, 'b, 'c>(
 	let mut monitors_read = Vec::with_capacity(monitors_encoded.len());
 	for encoded in monitors_encoded {
 		let mut monitor_read = &encoded[..];
-		let (_, monitor) = <(BestBlock, ChannelMonitor<TestChannelSigner>)>::read(
+		let (_, monitor) = <(BlockLocator, ChannelMonitor<TestChannelSigner>)>::read(
 			&mut monitor_read,
 			(node.keys_manager, node.keys_manager),
 		)
@@ -1327,7 +1327,7 @@ pub fn _reload_node<'a, 'b, 'c>(
 		for monitor in monitors_read.iter() {
 			assert!(channel_monitors.insert(monitor.channel_id(), monitor).is_none());
 		}
-		<(BestBlock, TestChannelManager<'b, 'c>)>::read(
+		<(BlockLocator, TestChannelManager<'b, 'c>)>::read(
 			&mut node_read,
 			ChannelManagerReadArgs {
 				config,
@@ -4716,7 +4716,7 @@ pub fn create_node_chanmgrs<'a, 'b>(
 	for i in 0..node_count {
 		let network = Network::Testnet;
 		let genesis_block = bitcoin::constants::genesis_block(network);
-		let params = ChainParameters { network, best_block: BestBlock::from_network(network) };
+		let params = ChainParameters { network, best_block: BlockLocator::from_network(network) };
 		let node = ChannelManager::new(
 			cfgs[i].fee_estimator,
 			&cfgs[i].chain_monitor,

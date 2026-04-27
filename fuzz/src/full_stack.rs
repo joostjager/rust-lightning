@@ -39,7 +39,7 @@ use lightning::chain::chaininterface::{
 };
 use lightning::chain::chainmonitor;
 use lightning::chain::transaction::OutPoint;
-use lightning::chain::{BestBlock, ChannelMonitorUpdateStatus, Confirm, Listen};
+use lightning::chain::{BlockLocator, ChannelMonitorUpdateStatus, Confirm, Listen};
 use lightning::events::Event;
 use lightning::ln::channel_state::ChannelDetails;
 use lightning::ln::channelmanager::{ChainParameters, ChannelManager, InterceptId, PaymentId};
@@ -354,7 +354,7 @@ impl<'a> MoneyLossDetector<'a> {
 				self.header_hashes[self.height - 1].0,
 				self.header_hashes[self.height].1,
 			);
-			let best_block = BestBlock::new(header.prev_blockhash, self.height as u32 - 1);
+			let best_block = BlockLocator::new(header.prev_blockhash, self.height as u32 - 1);
 			self.manager.blocks_disconnected(best_block);
 			self.monitor.blocks_disconnected(best_block);
 			self.height -= 1;
@@ -606,7 +606,7 @@ pub fn do_test(mut data: &[u8], logger: &Arc<dyn Logger + MaybeSend + MaybeSync>
 
 	let network = Network::Bitcoin;
 	let best_block_timestamp = genesis_block(network).header.time;
-	let params = ChainParameters { network, best_block: BestBlock::from_network(network) };
+	let params = ChainParameters { network, best_block: BlockLocator::from_network(network) };
 	let channelmanager = Arc::new(ChannelManager::new(
 		fee_est.clone(),
 		monitor.clone(),

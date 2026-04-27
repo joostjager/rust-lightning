@@ -48,7 +48,7 @@ use crate::chain::channelmonitor::{
 	LATENCY_GRACE_PERIOD_BLOCKS, MAX_BLOCKS_FOR_CONF,
 };
 use crate::chain::transaction::{OutPoint, TransactionData};
-use crate::chain::{BestBlock, ChannelMonitorUpdateStatus, Confirm, Watch};
+use crate::chain::{BlockLocator, ChannelMonitorUpdateStatus, Confirm, Watch};
 use crate::events::{
 	self, ClosureReason, Event, EventHandler, EventsProvider, HTLCHandlingFailureType,
 	InboundChannelFunds, PaymentFailureReason, ReplayEvent,
@@ -2126,7 +2126,7 @@ impl<
 ///
 /// ```
 /// use bitcoin::network::Network;
-/// use lightning::chain::BestBlock;
+/// use lightning::chain::BlockLocator;
 /// # use lightning::chain::channelmonitor::ChannelMonitor;
 /// use lightning::ln::channelmanager::{ChainParameters, ChannelManager, ChannelManagerReadArgs};
 /// # use lightning::routing::gossip::NetworkGraph;
@@ -2152,7 +2152,7 @@ impl<
 /// #     entropy_source: &ES,
 /// #     node_signer: &dyn lightning::sign::NodeSigner,
 /// #     signer_provider: &lightning::sign::DynSignerProvider,
-/// #     best_block: lightning::chain::BestBlock,
+/// #     best_block: lightning::chain::BlockLocator,
 /// #     current_timestamp: u32,
 /// #     mut reader: R,
 /// # ) -> Result<(), lightning::ln::msgs::DecodeError> {
@@ -2174,7 +2174,7 @@ impl<
 ///     router, message_router, logger, config, channel_monitors.iter().collect(),
 /// );
 /// let (best_block, channel_manager) =
-///     <(BestBlock, ChannelManager<_, _, _, _, _, _, _, _, _>)>::read(&mut reader, args)?;
+///     <(BlockLocator, ChannelManager<_, _, _, _, _, _, _, _, _>)>::read(&mut reader, args)?;
 ///
 /// // Update the ChannelManager and ChannelMonitors with the latest chain data
 /// // ...
@@ -2741,9 +2741,10 @@ impl<
 /// [`read`], those channels will be force-closed based on the `ChannelMonitor` state and no funds
 /// will be lost (modulo on-chain transaction fees).
 ///
-/// Note that the deserializer is only implemented for `(`[`BestBlock`]`, `[`ChannelManager`]`)`, which
-/// tells you the last block hash which was connected. You should get the best block tip before using the manager.
-/// See [`chain::Listen`] and [`chain::Confirm`] for more details.
+/// Note that the deserializer is only implemented for `(`[`BlockLocator`]`, `[`ChannelManager`]`)`,
+/// which provides a locator for the best chain as of the last write. You should sync to the
+/// current best chain tip before using the manager. See [`chain::Listen`] and [`chain::Confirm`]
+/// for more details.
 ///
 /// # `ChannelUpdate` Messages
 ///
@@ -2835,9 +2836,9 @@ pub struct ChannelManager<
 	flow: OffersMessageFlow<MR, L>,
 
 	#[cfg(any(test, feature = "_test_utils"))]
-	pub(super) best_block: RwLock<BestBlock>,
+	pub(super) best_block: RwLock<BlockLocator>,
 	#[cfg(not(any(test, feature = "_test_utils")))]
-	best_block: RwLock<BestBlock>,
+	best_block: RwLock<BlockLocator>,
 	pub(super) secp_ctx: Secp256k1<secp256k1::All>,
 
 	/// The session_priv bytes and retry metadata of outbound payments which are pending resolution.
@@ -3045,7 +3046,7 @@ pub struct ChainParameters {
 	/// The hash and height of the latest block successfully connected.
 	///
 	/// Used to track on-chain channel funding outputs and send payments with reliable timelocks.
-	pub best_block: BestBlock,
+	pub best_block: BlockLocator,
 }
 
 #[derive(Copy, Clone, PartialEq)]
@@ -3673,7 +3674,7 @@ impl<
 	///
 	/// [`block_connected`]: chain::Listen::block_connected
 	/// [`blocks_disconnected`]: chain::Listen::blocks_disconnected
-	/// [`params.best_block.block_hash`]: chain::BestBlock::block_hash
+	/// [`params.best_block.block_hash`]: chain::BlockLocator::block_hash
 	#[rustfmt::skip]
 	pub fn new(
 		fee_est: F, chain_monitor: M, tx_broadcaster: T, router: R, message_router: MR, logger: L,
@@ -15934,7 +15935,7 @@ impl<
 		self.best_block_updated(header, height);
 	}
 
-	fn blocks_disconnected(&self, fork_point: BestBlock) {
+	fn blocks_disconnected(&self, fork_point: BlockLocator) {
 		let _persistence_guard =
 			PersistenceNotifierGuard::optionally_notify_skipping_background_events(
 				self,
@@ -16431,7 +16432,7 @@ impl<
 
 	/// Gets the latest best block which was connected either via the [`chain::Listen`] or
 	/// [`chain::Confirm`] interfaces.
-	pub fn current_best_block(&self) -> BestBlock {
+	pub fn current_best_block(&self) -> BlockLocator {
 		self.best_block.read().unwrap().clone()
 	}
 
@@ -18372,7 +18373,7 @@ impl Readable for AmountlessClaimablePaymentHTLCOnion {
 // This is an internal DTO used in the two-stage deserialization process.
 pub(super) struct ChannelManagerData<SP: SignerProvider> {
 	chain_hash: ChainHash,
-	best_block: BestBlock,
+	best_block: BlockLocator,
 	channels: Vec<FundedChannel<SP>>,
 	claimable_payments: HashMap<PaymentHash, ClaimablePayment>,
 	peer_init_features: Vec<(PublicKey, InitFeatures)>,
@@ -18694,7 +18695,7 @@ impl<'a, ES: EntropySource, SP: SignerProvider, L: Logger>
 
 		Ok(ChannelManagerData {
 			chain_hash,
-			best_block: BestBlock {
+			best_block: BlockLocator {
 				block_hash: best_block_hash,
 				height: best_block_height,
 				previous_blocks: best_block_previous_blocks.unwrap_or([None; 12]),
@@ -18731,7 +18732,7 @@ impl<'a, ES: EntropySource, SP: SignerProvider, L: Logger>
 /// is:
 /// 1) Deserialize all stored [`ChannelMonitor`]s.
 /// 2) Deserialize the [`ChannelManager`] by filling in this struct and calling:
-///    `<(BestBlock, ChannelManager)>::read(reader, args)`
+///    `<(BlockLocator, ChannelManager)>::read(reader, args)`
 ///    This may result in closing some channels if the [`ChannelMonitor`] is newer than the stored
 ///    [`ChannelManager`] state to ensure no loss of funds. Thus, transactions may be broadcasted.
 /// 3) If you are not fetching full blocks, register all relevant [`ChannelMonitor`] outpoints the
@@ -18932,13 +18933,13 @@ impl<
 		MR: MessageRouter,
 		L: Logger + Clone,
 	> ReadableArgs<ChannelManagerReadArgs<'a, M, T, ES, NS, SP, F, R, MR, L>>
-	for (BestBlock, Arc<ChannelManager<M, T, ES, NS, SP, F, R, MR, L>>)
+	for (BlockLocator, Arc<ChannelManager<M, T, ES, NS, SP, F, R, MR, L>>)
 {
 	fn read<Reader: io::Read>(
 		reader: &mut Reader, args: ChannelManagerReadArgs<'a, M, T, ES, NS, SP, F, R, MR, L>,
 	) -> Result<Self, DecodeError> {
 		let (best_block, chan_manager) =
-			<(BestBlock, ChannelManager<M, T, ES, NS, SP, F, R, MR, L>)>::read(reader, args)?;
+			<(BlockLocator, ChannelManager<M, T, ES, NS, SP, F, R, MR, L>)>::read(reader, args)?;
 		Ok((best_block, Arc::new(chan_manager)))
 	}
 }
@@ -18955,7 +18956,7 @@ impl<
 		MR: MessageRouter,
 		L: Logger + Clone,
 	> ReadableArgs<ChannelManagerReadArgs<'a, M, T, ES, NS, SP, F, R, MR, L>>
-	for (BestBlock, ChannelManager<M, T, ES, NS, SP, F, R, MR, L>)
+	for (BlockLocator, ChannelManager<M, T, ES, NS, SP, F, R, MR, L>)
 {
 	fn read<Reader: io::Read>(
 		reader: &mut Reader, args: ChannelManagerReadArgs<'a, M, T, ES, NS, SP, F, R, MR, L>,
@@ -18999,7 +19000,7 @@ impl<
 	pub(super) fn from_channel_manager_data(
 		data: ChannelManagerData<SP>,
 		mut args: ChannelManagerReadArgs<'_, M, T, ES, NS, SP, F, R, MR, L>,
-	) -> Result<(BestBlock, Self), DecodeError> {
+	) -> Result<(BlockLocator, Self), DecodeError> {
 		let ChannelManagerData {
 			chain_hash,
 			best_block,
@@ -21804,7 +21805,7 @@ pub mod bench {
 	use crate::chain::Listen;
 	use crate::events::Event;
 	use crate::ln::channelmanager::{
-		BestBlock, ChainParameters, ChannelManager, PaymentHash, PaymentId, PaymentPreimage,
+		BlockLocator, ChainParameters, ChannelManager, PaymentHash, PaymentId, PaymentPreimage,
 		RecipientOnionFields, Retry,
 	};
 	use crate::ln::functional_test_utils::*;
@@ -21891,7 +21892,7 @@ pub mod bench {
 		let chain_monitor_a = ChainMonitor::new(None, &tx_broadcaster, &logger_a, &fee_estimator, &persister_a, &keys_manager_a, keys_manager_a.get_peer_storage_key(), false);
 		let node_a = ChannelManager::new(&fee_estimator, &chain_monitor_a, &tx_broadcaster, &router, &message_router, &logger_a, &keys_manager_a, &keys_manager_a, &keys_manager_a, config.clone(), ChainParameters {
 			network,
-			best_block: BestBlock::from_network(network),
+			best_block: BlockLocator::from_network(network),
 		}, genesis_block.header.time);
 		let node_a_holder = ANodeHolder { node: &node_a };
 
@@ -21901,7 +21902,7 @@ pub mod bench {
 		let chain_monitor_b = ChainMonitor::new(None, &tx_broadcaster, &logger_a, &fee_estimator, &persister_b, &keys_manager_b, keys_manager_b.get_peer_storage_key(), false);
 		let node_b = ChannelManager::new(&fee_estimator, &chain_monitor_b, &tx_broadcaster, &router, &message_router, &logger_b, &keys_manager_b, &keys_manager_b, &keys_manager_b, config.clone(), ChainParameters {
 			network,
-			best_block: BestBlock::from_network(network),
+			best_block: BlockLocator::from_network(network),
 		}, genesis_block.header.time);
 		let node_b_holder = ANodeHolder { node: &node_b };
 
@@ -21955,7 +21956,7 @@ pub mod bench {
 
 		assert_eq!(&tx_broadcaster.txn_broadcasted.lock().unwrap()[..], &[tx.clone()]);
 
-		let block = create_dummy_block(BestBlock::from_network(network).block_hash, 42, vec![tx]);
+		let block = create_dummy_block(BlockLocator::from_network(network).block_hash, 42, vec![tx]);
 		Listen::block_connected(&node_a, &block, 1);
 		Listen::block_connected(&node_b, &block, 1);
 
