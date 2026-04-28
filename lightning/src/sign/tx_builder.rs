@@ -11,6 +11,7 @@ use crate::ln::chan_utils::{
 };
 use crate::ln::channel::{
 	get_v2_channel_reserve_satoshis, CommitmentStats, ANCHOR_OUTPUT_VALUE_SATOSHI,
+	MIN_CHANNEL_VALUE_SATOSHIS,
 };
 use crate::prelude::*;
 use crate::types::features::ChannelTypeFeatures;
@@ -414,6 +415,11 @@ fn get_next_splice_out_maximum_sat(
 		};
 		next_splice_out_maximum_sat =
 			(local_balance_before_fee_msat / 1000).saturating_sub(min_balance_sat);
+	}
+
+	if channel_value_satoshis < next_splice_out_maximum_sat + MIN_CHANNEL_VALUE_SATOSHIS {
+		next_splice_out_maximum_sat =
+			channel_value_satoshis.saturating_sub(MIN_CHANNEL_VALUE_SATOSHIS);
 	}
 
 	next_splice_out_maximum_sat

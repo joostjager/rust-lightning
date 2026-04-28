@@ -1012,6 +1012,9 @@ pub const MIN_CHAN_DUST_LIMIT_SATOSHIS: u64 = 354;
 // Just a reasonable implementation-specific safe lower bound, higher than the dust limit.
 pub const MIN_THEIR_CHAN_RESERVE_SATOSHIS: u64 = 1000;
 
+// Just a reasonable implementation-specific safe lower bound.
+pub const MIN_CHANNEL_VALUE_SATOSHIS: u64 = 1000;
+
 /// Used to return a simple Error back to ChannelManager. Will get converted to a
 /// msgs::ErrorAction::SendErrorMessage or msgs::ErrorAction::IgnoreError as appropriate with our
 /// channel_id in ChannelManager.
@@ -2786,10 +2789,15 @@ impl FundingScope {
 			),
 		)?;
 
-		let post_channel_value = prev_funding.get_value_satoshis()
+		let post_channel_value_sat = prev_funding.get_value_satoshis()
 			.checked_add_signed(our_funding_contribution.to_sat())
 			.and_then(|v| v.checked_add_signed(their_funding_contribution.to_sat()))
 			.ok_or(format!("The sum of contributions {our_funding_contribution} and {their_funding_contribution} is greater than the channel's value"))?;
+		if post_channel_value_sat < MIN_CHANNEL_VALUE_SATOSHIS {
+			return Err(format!(
+				"Spliced channel value must be at least 1000 satoshis. It would be {post_channel_value_sat}",
+			));
+		}
 
 		let channel_parameters = &prev_funding.channel_transaction_parameters;
 		let mut post_channel_transaction_parameters = ChannelTransactionParameters {
@@ -2801,7 +2809,7 @@ impl FundingScope {
 			funding_outpoint: None, // filled later
 			splice_parent_funding_txid: prev_funding.get_funding_txid(),
 			channel_type_features: channel_parameters.channel_type_features.clone(),
-			channel_value_satoshis: post_channel_value,
+			channel_value_satoshis: post_channel_value_sat,
 		};
 		post_channel_transaction_parameters
 			.counterparty_parameters
@@ -2812,7 +2820,7 @@ impl FundingScope {
 
 		// New reserve values are based on the new channel value and are v2-specific
 		let counterparty_selected_channel_reserve_satoshis = get_v2_channel_reserve_satoshis(
-			post_channel_value,
+			post_channel_value_sat,
 			MIN_CHAN_DUST_LIMIT_SATOSHIS,
 			prev_funding
 				.counterparty_selected_channel_reserve_satoshis
@@ -2820,7 +2828,7 @@ impl FundingScope {
 				== 0,
 		);
 		let holder_selected_channel_reserve_satoshis = get_v2_channel_reserve_satoshis(
-			post_channel_value,
+			post_channel_value_sat,
 			context.counterparty_dust_limit_satoshis,
 			prev_funding.holder_selected_channel_reserve_satoshis == 0,
 		);
@@ -3748,6 +3756,11 @@ impl<SP: SignerProvider> ChannelContext<SP> {
 
 		let channel_value_satoshis =
 			our_funding_satoshis.saturating_add(open_channel_fields.funding_satoshis);
+		if channel_value_satoshis < MIN_CHANNEL_VALUE_SATOSHIS {
+			return Err(ChannelError::close(format!(
+				"Channel value must be at least 1000 satoshis. It was {channel_value_satoshis}",
+			)));
+		}
 
 		let channel_keys_id = signer_provider.generate_channel_keys_id(true, user_id);
 		let holder_signer = signer_provider.derive_channel_signer(channel_keys_id);
@@ -3896,7 +3909,7 @@ impl<SP: SignerProvider> ChannelContext<SP> {
 			&& holder_selected_channel_reserve_satoshis != 0
 		{
 			// Protocol level safety check in place, although it should never happen because
-			// of `MIN_THEIR_CHAN_RESERVE_SATOSHIS`
+			// of `MIN_THEIR_CHAN_RESERVE_SATOSHIS` and `MIN_CHANNEL_VALUE_SATOSHIS`
 			return Err(ChannelError::close(format!(
 				"Suitable channel reserve not found. remote_channel_reserve was ({holder_selected_channel_reserve_satoshis}). dust_limit_satoshis is ({MIN_CHAN_DUST_LIMIT_SATOSHIS})."
 			)));
@@ -14453,7 +14466,7 @@ impl<SP: SignerProvider> OutboundV1Channel<SP> {
 		);
 		if holder_selected_channel_reserve_satoshis < MIN_CHAN_DUST_LIMIT_SATOSHIS && !is_0reserve {
 			// Protocol level safety check in place, although it should never happen because
-			// of `MIN_THEIR_CHAN_RESERVE_SATOSHIS`
+			// of `MIN_THEIR_CHAN_RESERVE_SATOSHIS` and `MIN_CHANNEL_VALUE_SATOSHIS`
 			return Err(APIError::APIMisuseError {
 				err: format!(
 					"Holder selected channel reserve below implementation limit dust_limit_satoshis {holder_selected_channel_reserve_satoshis}"

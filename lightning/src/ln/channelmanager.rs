@@ -3887,7 +3887,7 @@ impl<
 		override_config: Option<UserConfig>,
 		trusted_channel_features: Option<TrustedChannelFeatures>,
 	) -> Result<ChannelId, APIError> {
-		if channel_value_satoshis < 1000 {
+		if channel_value_satoshis < crate::ln::channel::MIN_CHANNEL_VALUE_SATOSHIS {
 			return Err(APIError::APIMisuseError {
 				err: format!(
 					"Channel value must be at least 1000 satoshis. It was {channel_value_satoshis}"

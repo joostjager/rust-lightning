@@ -18,6 +18,7 @@ use crate::ln::chan_utils;
 use crate::ln::channel::{
 	ANCHOR_OUTPUT_VALUE_SATOSHI, CHANNEL_ANNOUNCEMENT_PROPAGATION_DELAY,
 	DISCONNECT_PEER_AWAITING_RESPONSE_TICKS, FEE_SPIKE_BUFFER_FEE_INCREASE_MULTIPLE,
+	MIN_CHANNEL_VALUE_SATOSHIS,
 };
 use crate::ln::channelmanager::{provided_init_features, PaymentId, BREAKDOWN_TIMEOUT};
 use crate::ln::functional_test_utils::*;
@@ -7509,6 +7510,20 @@ fn test_0reserve_splice() {
 
 	assert_eq!(a, ChannelTypeFeatures::anchors_zero_htlc_fee_and_dependencies());
 
+	config.channel_handshake_config.negotiate_anchors_zero_fee_htlc_tx = false;
+	config.channel_handshake_config.negotiate_anchor_zero_fee_commitments = true;
+	let a = do_test_0reserve_splice_holder_validation(false, false, false, config.clone());
+	let _b = do_test_0reserve_splice_holder_validation(true, false, false, config.clone());
+	let _c = do_test_0reserve_splice_holder_validation(false, true, false, config.clone());
+	let _d = do_test_0reserve_splice_holder_validation(true, true, false, config.clone());
+
+	let _e = do_test_0reserve_splice_holder_validation(false, false, true, config.clone());
+	let _f = do_test_0reserve_splice_holder_validation(true, false, true, config.clone());
+	let _g = do_test_0reserve_splice_holder_validation(false, true, true, config.clone());
+	let _h = do_test_0reserve_splice_holder_validation(true, true, true, config.clone());
+
+	assert_eq!(a, ChannelTypeFeatures::anchors_zero_fee_commitments());
+
 	let mut config = test_default_channel_config();
 	config.channel_handshake_config.negotiate_anchors_zero_fee_htlc_tx = false;
 	config.channel_handshake_config.negotiate_anchor_zero_fee_commitments = false;
@@ -7521,6 +7536,7 @@ fn test_0reserve_splice() {
 	let _f = do_test_0reserve_splice_counterparty_validation(true, false, true, config.clone());
 	let _g = do_test_0reserve_splice_counterparty_validation(false, true, true, config.clone());
 	let _h = do_test_0reserve_splice_counterparty_validation(true, true, true, config.clone());
+
 	assert_eq!(a, ChannelTypeFeatures::only_static_remote_key());
 
 	config.channel_handshake_config.negotiate_anchors_zero_fee_htlc_tx = true;
@@ -7534,12 +7550,22 @@ fn test_0reserve_splice() {
 	let _f = do_test_0reserve_splice_counterparty_validation(true, false, true, config.clone());
 	let _g = do_test_0reserve_splice_counterparty_validation(false, true, true, config.clone());
 	let _h = do_test_0reserve_splice_counterparty_validation(true, true, true, config.clone());
+
 	assert_eq!(a, ChannelTypeFeatures::anchors_zero_htlc_fee_and_dependencies());
 
-	// TODO: Skip 0FC channels for now as these always have an output on the commitment, the P2A
-	// output. We will be able to withdraw up to the dust limit of the funding script, which
-	// is checked in interactivetx. Still need to double check whether that's what we actually
-	// want.
+	config.channel_handshake_config.negotiate_anchors_zero_fee_htlc_tx = false;
+	config.channel_handshake_config.negotiate_anchor_zero_fee_commitments = true;
+	let a = do_test_0reserve_splice_counterparty_validation(false, false, false, config.clone());
+	let _b = do_test_0reserve_splice_counterparty_validation(true, false, false, config.clone());
+	let _c = do_test_0reserve_splice_counterparty_validation(false, true, false, config.clone());
+	let _d = do_test_0reserve_splice_counterparty_validation(true, true, false, config.clone());
+
+	let _e = do_test_0reserve_splice_counterparty_validation(false, false, true, config.clone());
+	let _f = do_test_0reserve_splice_counterparty_validation(true, false, true, config.clone());
+	let _g = do_test_0reserve_splice_counterparty_validation(false, true, true, config.clone());
+	let _h = do_test_0reserve_splice_counterparty_validation(true, true, true, config.clone());
+
+	assert_eq!(a, ChannelTypeFeatures::anchors_zero_fee_commitments());
 }
 
 #[cfg(test)]
@@ -7569,13 +7595,12 @@ fn do_test_0reserve_splice_holder_validation(
 	let details = &nodes[0].node.list_channels()[0];
 	let channel_type = details.channel_type.clone().unwrap();
 
-	let feerate = 253;
+	let feerate =
+		if channel_type == ChannelTypeFeatures::anchors_zero_fee_commitments() { 0 } else { 253 };
 	let spiked_feerate = if channel_type == ChannelTypeFeatures::only_static_remote_key() {
 		feerate * FEE_SPIKE_BUFFER_FEE_INCREASE_MULTIPLE as u32
-	} else if channel_type == ChannelTypeFeatures::anchors_zero_htlc_fee_and_dependencies() {
-		feerate
 	} else {
-		panic!("Unexpected channel type");
+		feerate
 	};
 	let anchors_sat =
 		if channel_type == ChannelTypeFeatures::anchors_zero_htlc_fee_and_dependencies() {
@@ -7603,13 +7628,18 @@ fn do_test_0reserve_splice_holder_validation(
 			- chan_utils::commit_tx_fee_sat(feerate, 0, &channel_type) * 1000;
 		assert!(node_0_to_local_output_msat / 1000 < dust_limit_satoshis);
 		let commit_tx = &get_local_commitment_txn!(nodes[0], channel_id)[0];
-		assert_eq!(commit_tx.output.len(), if anchors_sat == 0 { 1 } else { 2 });
+		assert_eq!(
+			commit_tx.output.len(),
+			if channel_type == ChannelTypeFeatures::only_static_remote_key() { 1 } else { 2 }
+		);
 		assert_eq!(
 			commit_tx.output.last().unwrap().value,
 			Amount::from_sat(available_capacity_msat / 1000)
 		);
-		if anchors_sat != 0 {
+		if channel_type == ChannelTypeFeatures::anchors_zero_htlc_fee_and_dependencies() {
 			assert_eq!(commit_tx.output[0].value, Amount::from_sat(330));
+		} else if channel_type == ChannelTypeFeatures::anchors_zero_fee_commitments() {
+			assert_eq!(commit_tx.output[0].value, Amount::ZERO);
 		}
 
 		available_capacity_msat / 1000
@@ -7618,27 +7648,36 @@ fn do_test_0reserve_splice_holder_validation(
 	};
 
 	// The estimated fees to splice out a single output at 253sat/kw
-	let estimated_fees = 183;
-	let splice_out_max_value = if counterparty_has_output && node_0_is_initiator {
+	let estimated_fees_sat = 183;
+	let mut splice_out_max_value = if counterparty_has_output && node_0_is_initiator {
 		let commit_tx_fee_sat = chan_utils::commit_tx_fee_sat(spiked_feerate, 1, &channel_type);
 		Amount::from_sat(
-			initiator_value_to_self_sat - commit_tx_fee_sat - anchors_sat - estimated_fees,
+			initiator_value_to_self_sat - commit_tx_fee_sat - anchors_sat - estimated_fees_sat,
 		)
 	} else if !counterparty_has_output && node_0_is_initiator {
 		let commit_tx_fee_sat = chan_utils::commit_tx_fee_sat(spiked_feerate, 0, &channel_type);
 		Amount::from_sat(
 			initiator_value_to_self_sat
 				- commit_tx_fee_sat
-				- anchors_sat - estimated_fees
+				- anchors_sat - estimated_fees_sat
 				- dust_limit_satoshis,
 		)
 	} else if counterparty_has_output && !node_0_is_initiator {
-		Amount::from_sat(initiator_value_to_self_sat - estimated_fees)
+		Amount::from_sat(initiator_value_to_self_sat - estimated_fees_sat)
 	} else if !counterparty_has_output && !node_0_is_initiator {
-		Amount::from_sat(initiator_value_to_self_sat - estimated_fees - dust_limit_satoshis)
+		Amount::from_sat(initiator_value_to_self_sat - estimated_fees_sat - dust_limit_satoshis)
 	} else {
 		panic!("unexpected case!");
 	};
+
+	if channel_value_sat
+		< splice_out_max_value.to_sat() + estimated_fees_sat + MIN_CHANNEL_VALUE_SATOSHIS
+	{
+		splice_out_max_value = Amount::from_sat(
+			channel_value_sat.saturating_sub(estimated_fees_sat + MIN_CHANNEL_VALUE_SATOSHIS),
+		);
+	}
+
 	let outputs = vec![TxOut {
 		value: splice_out_max_value + if splice_passes { Amount::ZERO } else { Amount::ONE_SAT },
 		script_pubkey: nodes[0].wallet_source.get_change_script().unwrap(),
@@ -7650,7 +7689,7 @@ fn do_test_0reserve_splice_holder_validation(
 	let initiator_details = &initiator.node.list_channels()[0];
 	assert_eq!(
 		initiator_details.next_splice_out_maximum_sat,
-		splice_out_max_value.to_sat() + estimated_fees
+		splice_out_max_value.to_sat() + estimated_fees_sat
 	);
 
 	if splice_passes {
@@ -7663,8 +7702,8 @@ fn do_test_0reserve_splice_holder_validation(
 	} else {
 		assert!(initiate_splice_out(initiator, acceptor, channel_id, outputs).is_err());
 		let splice_out_value =
-			splice_out_max_value + Amount::from_sat(estimated_fees) + Amount::ONE_SAT;
-		let splice_out_max_value = splice_out_max_value + Amount::from_sat(estimated_fees);
+			splice_out_max_value + Amount::from_sat(estimated_fees_sat) + Amount::ONE_SAT;
+		let splice_out_max_value = splice_out_max_value + Amount::from_sat(estimated_fees_sat);
 		let cannot_be_funded = format!(
 			"Channel {channel_id} cannot be funded: Our \
 			splice-out value of {splice_out_value} is greater than the maximum \
@@ -7703,13 +7742,12 @@ fn do_test_0reserve_splice_counterparty_validation(
 	let details = &nodes[0].node.list_channels()[0];
 	let channel_type = details.channel_type.clone().unwrap();
 
-	let feerate = 253;
+	let feerate =
+		if channel_type == ChannelTypeFeatures::anchors_zero_fee_commitments() { 0 } else { 253 };
 	let spiked_feerate = if channel_type == ChannelTypeFeatures::only_static_remote_key() {
 		feerate * FEE_SPIKE_BUFFER_FEE_INCREASE_MULTIPLE as u32
-	} else if channel_type == ChannelTypeFeatures::anchors_zero_htlc_fee_and_dependencies() {
-		feerate
 	} else {
-		panic!("Unexpected channel type");
+		feerate
 	};
 	let anchors_sat =
 		if channel_type == ChannelTypeFeatures::anchors_zero_htlc_fee_and_dependencies() {
@@ -7737,13 +7775,18 @@ fn do_test_0reserve_splice_counterparty_validation(
 			- chan_utils::commit_tx_fee_sat(spiked_feerate, 0, &channel_type) * 1000;
 		assert!(node_0_to_local_output_msat / 1000 < dust_limit_satoshis);
 		let commit_tx = &get_local_commitment_txn!(nodes[0], channel_id)[0];
-		assert_eq!(commit_tx.output.len(), if anchors_sat == 0 { 1 } else { 2 });
+		assert_eq!(
+			commit_tx.output.len(),
+			if channel_type == ChannelTypeFeatures::only_static_remote_key() { 1 } else { 2 }
+		);
 		assert_eq!(
 			commit_tx.output.last().unwrap().value,
 			Amount::from_sat(available_capacity_msat / 1000)
 		);
-		if anchors_sat != 0 {
+		if channel_type == ChannelTypeFeatures::anchors_zero_htlc_fee_and_dependencies() {
 			assert_eq!(commit_tx.output[0].value, Amount::from_sat(330));
+		} else if channel_type == ChannelTypeFeatures::anchors_zero_fee_commitments() {
+			assert_eq!(commit_tx.output[0].value, Amount::ZERO);
 		}
 
 		available_capacity_msat / 1000
@@ -7751,7 +7794,7 @@ fn do_test_0reserve_splice_counterparty_validation(
 		channel_value_sat
 	};
 
-	let splice_out_value_incl_fees = if counterparty_has_output && node_0_is_initiator {
+	let mut splice_out_value_incl_fees = if counterparty_has_output && node_0_is_initiator {
 		let commit_tx_fee_sat = chan_utils::commit_tx_fee_sat(spiked_feerate, 1, &channel_type);
 		Amount::from_sat(initiator_value_to_self_sat - commit_tx_fee_sat - anchors_sat)
 	} else if !counterparty_has_output && node_0_is_initiator {
@@ -7767,6 +7810,10 @@ fn do_test_0reserve_splice_counterparty_validation(
 		panic!("unexpected case!");
 	};
 
+	if channel_value_sat < splice_out_value_incl_fees.to_sat() + MIN_CHANNEL_VALUE_SATOSHIS {
+		splice_out_value_incl_fees =
+			Amount::from_sat(channel_value_sat.saturating_sub(MIN_CHANNEL_VALUE_SATOSHIS));
+	}
 	let (initiator, acceptor) =
 		if node_0_is_initiator { (&nodes[0], &nodes[1]) } else { (&nodes[1], &nodes[0]) };
 
@@ -7775,6 +7822,9 @@ fn do_test_0reserve_splice_counterparty_validation(
 
 	let funding_contribution_sat =
 		-(splice_out_value_incl_fees.to_sat() as i64) - if splice_passes { 0 } else { 1 };
+	let post_channel_value_sat =
+		channel_value_sat.checked_add_signed(funding_contribution_sat).unwrap();
+
 	let outputs = vec![TxOut {
 		// Splice out some dummy amount to get past the initiator's validation,
 		// we'll modify the message in-flight.
@@ -7812,11 +7862,22 @@ fn do_test_0reserve_splice_counterparty_validation(
 		let cannot_splice_out = if u64::try_from(funding_contribution_sat.abs()).unwrap()
 			> initiator_value_to_self_sat
 		{
+			// They obviously can't afford their contribution, so we fail before even
+			// querying `TxBuilder`
 			format!(
 				"Got non-closing error: Their contribution candidate {funding_contribution_sat}sat \
 				is greater than their total balance in the channel {initiator_value_to_self_sat}sat"
 			)
+		} else if post_channel_value_sat < MIN_CHANNEL_VALUE_SATOSHIS {
+			// We require all spliced channels to have a value of at least 1000 satoshis after the splice
+			format!(
+				"Got non-closing error: Spliced channel value must be at least {MIN_CHANNEL_VALUE_SATOSHIS} satoshis. \
+				It would be {post_channel_value_sat}"
+			)
 		} else {
+			// Last but not least, `TxBuilder` decides whether all parties can afford
+			// HTLCs, anchors, and transaction fees while retaining at least one
+			// output on the commitments
 			format!(
 				"Got non-closing error: Channel {channel_id} cannot \
 				be spliced; Balance exhausted on local commitment"
