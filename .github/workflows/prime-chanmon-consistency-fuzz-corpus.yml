@@ -1,0 +1,70 @@
+name: Prime chanmon consistency fuzz corpus
+
+on:
+  workflow_dispatch:
+    inputs:
+      seeds_hex:
+        description: "Comma-separated hex byte strings (e.g. 00,0102,deadbeef)"
+        type: string
+        required: true
+
+permissions:
+  actions: write
+  contents: read
+
+jobs:
+  prime-chanmon-consistency:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Restore latest main corpus
+        uses: actions/cache/restore@v4
+        with:
+          path: fuzz/hfuzz_workspace
+          key: fuzz-corpus-refs/heads/main-prime-${{ github.run_id }}
+          restore-keys: |
+            fuzz-corpus-refs/heads/main-
+
+      - name: Decode and layer seeds
+        env:
+          SEEDS_HEX: ${{ inputs.seeds_hex }}
+        run: |
+          set -euo pipefail
+          TARGET="chanmon_consistency_target"
+          INPUT_DIR="fuzz/hfuzz_workspace/${TARGET}/input"
+          if [ -d "$INPUT_DIR" ]; then
+            RESTORED_COUNT=$(find "$INPUT_DIR" -type f | wc -l)
+          else
+            RESTORED_COUNT=0
+          fi
+          mkdir -p "$INPUT_DIR"
+          echo "Restored $RESTORED_COUNT seed(s)"
+          FIELD_COUNT=0
+          SEED_COUNT=0
+          SEEDS_HEX_CLEAN="${SEEDS_HEX//$'\n'/,}"
+          IFS=',' read -r -a SEED_HEXES <<< "$SEEDS_HEX_CLEAN"
+          for SEED_HEX in "${SEED_HEXES[@]}"; do
+            FIELD_COUNT=$((FIELD_COUNT + 1))
+            SEED_HEX="${SEED_HEX%$'\r'}"
+            SEED_HEX="${SEED_HEX//[[:space:]]/}"
+            [ -n "$SEED_HEX" ] || continue
+            if ! [[ "$SEED_HEX" =~ ^([[:xdigit:]]{2})+$ ]]; then
+              echo "Invalid hex seed in input field $FIELD_COUNT"
+              exit 1
+            fi
+            SEED_COUNT=$((SEED_COUNT + 1))
+            SEED_FILE="$(printf '%s/primed-%s-%04d' "$INPUT_DIR" "$GITHUB_RUN_ID" "$SEED_COUNT")"
+            printf '%s' "$SEED_HEX" | xxd -r -p > "$SEED_FILE"
+            test -s "$SEED_FILE"
+            echo "Wrote seed: $SEED_FILE ($SEED_HEX)"
+          done
+          test "$SEED_COUNT" -gt 0
+          SAVE_COUNT=$(find "$INPUT_DIR" -type f | wc -l)
+          echo "Added $SEED_COUNT seed(s)"
+          echo "Saving $SAVE_COUNT seed(s)"
+
+      - name: Save primed corpus
+        uses: actions/cache/save@v4
+        with:
+          path: fuzz/hfuzz_workspace
+          key: fuzz-corpus-refs/heads/main-prime-${{ github.run_id }}
