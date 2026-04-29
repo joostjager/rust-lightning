@@ -22,6 +22,8 @@ const DEFAULT_BRANCH: &str = "HEAD";
 const SPLIT_REAL_HASHES_TARGET_PATH: &str =
 	"fuzz/fuzz-real-hashes/src/bin/chanmon_consistency_target.rs";
 const REPLAY_RUNS: usize = 10;
+const REPLAY_TIMEOUT_SECS: u64 = 10;
+const REPLAY_TIMEOUT_POLL_MS: u64 = 50;
 const ETA_WINDOW_CASES: usize = 32;
 const ETA_MIN_SAMPLES: usize = 8;
 
@@ -713,6 +715,24 @@ struct ReplayOutcome {
 	cached: bool,
 }
 
+enum ReplayRunResult {
+	Exited(ExitStatus),
+	TimedOut,
+}
+
+impl ReplayRunResult {
+	fn success(&self) -> bool {
+		matches!(self, Self::Exited(status) if status.success())
+	}
+
+	fn exit_code(&self) -> i32 {
+		match self {
+			Self::Exited(status) => exit_code(*status),
+			Self::TimedOut => ReplayVerdict::Fail.exit_code(),
+		}
+	}
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ReplayVerdict {
 	Pass,
@@ -768,9 +788,9 @@ fn replay_cached_commit(
 	}
 
 	if inherit_stdio {
-		let status = run_replay_once(variant.layout, &binary_path, &input_abs, true)?;
-		let verdict = if status.success() { ReplayVerdict::Pass } else { ReplayVerdict::Fail };
-		return Ok(ReplayOutcome { verdict, exit_code: exit_code(status), cached: false });
+		let result = run_replay_once(variant.layout, &binary_path, &input_abs, true)?;
+		let verdict = if result.success() { ReplayVerdict::Pass } else { ReplayVerdict::Fail };
+		return Ok(ReplayOutcome { verdict, exit_code: result.exit_code(), cached: false });
 	}
 
 	let mut handles = Vec::with_capacity(runs);
@@ -785,9 +805,9 @@ fn replay_cached_commit(
 	let mut saw_pass = false;
 	let mut saw_fail = false;
 	for handle in handles {
-		let status =
+		let result =
 			handle.join().map_err(|_| format!("replay thread panicked for {commit}"))??;
-		if status.success() {
+		if result.success() {
 			saw_pass = true;
 		} else {
 			saw_fail = true;
@@ -810,7 +830,7 @@ fn replay_cached_commit(
 
 fn run_replay_once(
 	layout: TargetLayout, binary_path: &Path, input_abs: &Path, inherit_stdio: bool,
-) -> Result<ExitStatus, String> {
+) -> Result<ReplayRunResult, String> {
 	let replay_dir = create_replay_dir()?;
 	let replay_case_dir = replay_dir.join(CASE_DIR);
 	fs::create_dir_all(&replay_case_dir).map_err(|err| {
@@ -839,11 +859,58 @@ fn run_replay_once(
 		command.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
 	}
 
-	let status = command
-		.status()
+	let run_result = run_replay_command_with_timeout(&mut command, binary_path, inherit_stdio);
+	let cleanup_result = remove_dir_all_if_exists(&replay_dir);
+	match (run_result, cleanup_result) {
+		(Ok(result), Ok(())) => Ok(result),
+		(Err(err), _) => Err(err),
+		(Ok(_), Err(err)) => Err(err),
+	}
+}
+
+fn run_replay_command_with_timeout(
+	command: &mut Command, binary_path: &Path, inherit_stdio: bool,
+) -> Result<ReplayRunResult, String> {
+	let mut child = command
+		.spawn()
 		.map_err(|err| format!("failed to run cached binary {}: {err}", binary_path.display()))?;
-	remove_dir_all_if_exists(&replay_dir)?;
-	Ok(status)
+	let timeout = Duration::from_secs(REPLAY_TIMEOUT_SECS);
+	let poll_interval = Duration::from_millis(REPLAY_TIMEOUT_POLL_MS);
+	let started_at = Instant::now();
+	loop {
+		if let Some(status) = child.try_wait().map_err(|err| {
+			format!("failed to wait on cached binary {}: {err}", binary_path.display())
+		})? {
+			return Ok(ReplayRunResult::Exited(status));
+		}
+		if started_at.elapsed() >= timeout {
+			if inherit_stdio {
+				eprintln!("replay timed out after {REPLAY_TIMEOUT_SECS}s");
+			}
+			if let Err(err) = child.kill() {
+				if child
+					.try_wait()
+					.map_err(|err| {
+						format!(
+							"failed to wait on timed out replay {}: {err}",
+							binary_path.display()
+						)
+					})?
+					.is_none()
+				{
+					return Err(format!(
+						"failed to kill timed out replay {}: {err}",
+						binary_path.display()
+					));
+				}
+			}
+			child.wait().map_err(|err| {
+				format!("failed to reap timed out replay {}: {err}", binary_path.display())
+			})?;
+			return Ok(ReplayRunResult::TimedOut);
+		}
+		thread::sleep(poll_interval);
+	}
 }
 
 fn read_replay_result(cache_key: &str, case_hex: &str) -> Result<Option<ReplayOutcome>, String> {
