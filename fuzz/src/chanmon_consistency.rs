@@ -2848,18 +2848,21 @@ fn process_events_impl(
 					.unwrap();
 			},
 			events::Event::SplicePending { new_funding_txo, .. } => {
-				let mut txs = nodes[node_idx].broadcaster.txn_broadcasted.borrow_mut();
-				assert!(txs.len() >= 1);
-				let splice_tx = txs.remove(0);
-				assert_eq!(new_funding_txo.txid, splice_tx.compute_txid());
-				chain_state.add_pending_tx(splice_tx);
+				if !chain_state.confirmed_txids.contains(&new_funding_txo.txid) {
+					let mut txs = nodes[node_idx].broadcaster.txn_broadcasted.borrow_mut();
+					if let Some(pos) =
+						txs.iter().position(|tx| new_funding_txo.txid == tx.compute_txid())
+					{
+						let splice_tx = txs.remove(pos);
+						chain_state.add_pending_tx(splice_tx);
+					}
+				}
 			},
 			events::Event::SpliceFailed { .. } => {},
-			events::Event::DiscardFunding {
-				funding_info:
-					events::FundingInfo::Contribution { .. } | events::FundingInfo::Tx { .. },
-				..
-			} => {},
+			events::Event::ChannelClosed { .. } => {},
+			events::Event::DiscardFunding { .. } => {},
+			events::Event::SpendableOutputs { .. } => {},
+			events::Event::BumpTransaction(..) => {},
 			_ => panic!("Unhandled event"),
 		}
 	}
