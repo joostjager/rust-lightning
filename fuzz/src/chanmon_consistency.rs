@@ -996,17 +996,16 @@ fn send_mpp_hop_payment(
 
 #[inline]
 fn assert_action_timeout_awaiting_response(action: &msgs::ErrorAction) {
-	// Since sending/receiving messages may be delayed, `timer_tick_occurred` may cause a node to
-	// disconnect their counterparty if they're expecting a timely response.
-	assert!(
-		matches!(
-			action,
-			msgs::ErrorAction::DisconnectPeerWithWarning { msg }
-			if msg.data.contains("Disconnecting due to timeout awaiting response")
-		),
-		"Expected timeout disconnect, got: {:?}",
-		action,
-	);
+	// Since sending or receiving messages may be delayed, `timer_tick_occurred` may cause a node
+	// to disconnect their counterparty if they're expecting a timely response. We may also deliver
+	// the paired `error` message when one was generated alongside the disconnect.
+	match action {
+		msgs::ErrorAction::DisconnectPeerWithWarning { msg }
+			if msg.data.contains("Disconnecting due to timeout awaiting response") => {},
+		msgs::ErrorAction::DisconnectPeer { .. } => {},
+		msgs::ErrorAction::SendErrorMessage { .. } => {},
+		_ => panic!("Unexpected HandleError action {:?}", action),
+	}
 }
 
 #[derive(Copy, Clone)]
@@ -1521,7 +1520,9 @@ impl EventQueues {
 				},
 				MessageSendEvent::SendChannelReady { .. }
 				| MessageSendEvent::SendAnnouncementSignatures { .. }
-				| MessageSendEvent::BroadcastChannelUpdate { .. } => continue,
+				| MessageSendEvent::BroadcastChannelUpdate { .. }
+				| MessageSendEvent::BroadcastChannelAnnouncement { .. }
+				| MessageSendEvent::BroadcastNodeAnnouncement { .. } => continue,
 				_ => panic!("Unhandled message event {:?}", event),
 			};
 			if push_a {
@@ -1558,6 +1559,8 @@ impl EventQueues {
 						MessageSendEvent::SendChannelReady { .. } => {},
 						MessageSendEvent::SendAnnouncementSignatures { .. } => {},
 						MessageSendEvent::BroadcastChannelUpdate { .. } => {},
+						MessageSendEvent::BroadcastChannelAnnouncement { .. } => {},
+						MessageSendEvent::BroadcastNodeAnnouncement { .. } => {},
 						MessageSendEvent::SendChannelUpdate { .. } => {},
 						MessageSendEvent::HandleError { ref action, .. } => {
 							assert_action_timeout_awaiting_response(action);
@@ -1581,6 +1584,8 @@ impl EventQueues {
 						MessageSendEvent::SendChannelReady { .. } => {},
 						MessageSendEvent::SendAnnouncementSignatures { .. } => {},
 						MessageSendEvent::BroadcastChannelUpdate { .. } => {},
+						MessageSendEvent::BroadcastChannelAnnouncement { .. } => {},
+						MessageSendEvent::BroadcastNodeAnnouncement { .. } => {},
 						MessageSendEvent::SendChannelUpdate { .. } => {},
 						MessageSendEvent::HandleError { ref action, .. } => {
 							assert_action_timeout_awaiting_response(action);
@@ -1900,6 +1905,7 @@ fn build_node_config(chan_type: ChanType) -> UserConfig {
 	let mut config = UserConfig::default();
 	config.channel_config.forwarding_fee_proportional_millionths = 0;
 	config.channel_handshake_config.announce_for_forwarding = true;
+	config.channel_handshake_limits.force_announced_channel_preference = false;
 	config.reject_inbound_splices = false;
 	match chan_type {
 		ChanType::Legacy => {
@@ -2097,7 +2103,7 @@ fn lock_fundings(nodes: &[HarnessNode<'_>; 3]) {
 					}
 				}
 			} else {
-				panic!("Wrong event type");
+				panic!("Wrong event type in first lock_fundings pass: {:?}", event);
 			}
 		}
 	}
@@ -2105,9 +2111,18 @@ fn lock_fundings(nodes: &[HarnessNode<'_>; 3]) {
 	for node in nodes.iter() {
 		let events = node.node.get_and_clear_pending_msg_events();
 		for event in events {
-			if let MessageSendEvent::SendAnnouncementSignatures { .. } = event {
-			} else {
-				panic!("Wrong event type");
+			match event {
+				MessageSendEvent::SendAnnouncementSignatures { .. } => {},
+				MessageSendEvent::SendChannelUpdate { ref node_id, ref msg } => {
+					for dest_node in nodes.iter() {
+						if dest_node.our_node_id() == *node_id {
+							dest_node.node.handle_channel_update(node.our_node_id(), msg);
+						}
+					}
+				},
+				_ => {
+					panic!("Wrong event type in second lock_fundings pass: {:?}", event);
+				},
 			}
 		}
 	}
@@ -2617,6 +2632,9 @@ fn process_msg_events_impl<Out: Output + MaybeSend + MaybeSync>(
 				None
 			},
 			MessageSendEvent::SendChannelReestablish { ref node_id, ref msg } => {
+				if msg.next_local_commitment_number == 0 && msg.next_remote_commitment_number == 0 {
+					return None;
+				}
 				let dest_idx =
 					log_peer_message(node_idx, node_id, nodes, out, "channel_reestablish");
 				nodes[dest_idx].node.handle_channel_reestablish(source_node_id, msg);
@@ -2687,21 +2705,33 @@ fn process_msg_events_impl<Out: Output + MaybeSend + MaybeSync>(
 				nodes[dest_idx].node.handle_splice_locked(source_node_id, msg);
 				None
 			},
-			MessageSendEvent::HandleError { ref action, .. } => {
+			MessageSendEvent::HandleError { ref action, ref node_id } => {
 				assert_action_timeout_awaiting_response(action);
+				if let msgs::ErrorAction::SendErrorMessage { ref msg } = action {
+					let dest_idx = find_destination_node(nodes, node_id);
+					nodes[dest_idx].node.handle_error(source_node_id, msg);
+				}
 				None
 			},
-			MessageSendEvent::SendChannelReady { .. }
-			| MessageSendEvent::SendAnnouncementSignatures { .. }
-			| MessageSendEvent::SendChannelUpdate { .. } => {
-				// Can be generated as a reestablish response.
+			MessageSendEvent::SendChannelReady { ref node_id, ref msg } => {
+				let dest_idx = log_peer_message(node_idx, node_id, nodes, out, "channel_ready");
+				nodes[dest_idx].node.handle_channel_ready(source_node_id, msg);
 				None
 			},
-			MessageSendEvent::BroadcastChannelUpdate { .. } => {
-				// Can be generated as a result of calling `timer_tick_occurred` enough
-				// times while peers are disconnected.
+			MessageSendEvent::SendAnnouncementSignatures { ref node_id, ref msg } => {
+				let dest_idx =
+					log_peer_message(node_idx, node_id, nodes, out, "announcement_signatures");
+				nodes[dest_idx].node.handle_announcement_signatures(source_node_id, msg);
 				None
 			},
+			MessageSendEvent::SendChannelUpdate { ref node_id, ref msg } => {
+				let dest_idx = log_peer_message(node_idx, node_id, nodes, out, "channel_update");
+				nodes[dest_idx].node.handle_channel_update(source_node_id, msg);
+				None
+			},
+			MessageSendEvent::BroadcastChannelUpdate { .. } => None,
+			MessageSendEvent::BroadcastChannelAnnouncement { .. } => None,
+			MessageSendEvent::BroadcastNodeAnnouncement { .. } => None,
 			_ => panic!("Unhandled message event {:?}", event),
 		}
 	}
