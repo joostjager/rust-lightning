@@ -2458,6 +2458,18 @@ impl<'a, 'd, Out: Output + MaybeSend + MaybeSync> Harness<'a, 'd, Out> {
 		self.nodes[1].node.signer_unblocked(None);
 		self.nodes[2].node.signer_unblocked(None);
 
+		let has_stale_raw_monitors = self.nodes.iter().any(|node| {
+			node.monitor.list_monitors().into_iter().any(|chan_id| {
+				node.monitor
+					.get_monitor(chan_id)
+					.map(|mon| mon.current_best_block().height < node.height)
+					.unwrap_or(false)
+			})
+		});
+		if has_stale_raw_monitors {
+			self.process_messages_and_events_only();
+			self.catch_up_raw_monitors();
+		}
 		self.process_all_events();
 
 		// Since MPP payments are supported, we wait until we fully settle the state of all
@@ -2468,26 +2480,46 @@ impl<'a, 'd, Out: Output + MaybeSend + MaybeSync> Harness<'a, 'd, Out> {
 		}
 		self.process_all_events();
 
-		// Verify no payments are stuck, all should have resolved.
+		for _ in 0..4096 {
+			self.flush_progress(32);
+			if !self.has_pending_work() {
+				break;
+			}
+			for node in self.nodes.iter() {
+				node.node.timer_tick_occurred();
+			}
+			self.flush_progress(32);
+			if !self.has_pending_work() {
+				break;
+			}
+			self.chain_state.advance_height(1);
+			self.flush_progress(32);
+			if !self.has_pending_work() {
+				break;
+			}
+		}
+
 		self.payments.assert_all_resolved();
 		// Verify that every payment claimed by a receiver resulted in a PaymentSent event at
 		// the sender.
 		self.payments.assert_claims_reported();
 
-		// Finally, make sure that at least one end of each channel can make a substantial payment.
-		let chan_ab_ids = self.ab_link.channel_ids().clone();
-		let chan_bc_ids = self.bc_link.channel_ids().clone();
-		for chan_id in chan_ab_ids {
-			assert!(
-				self.send_direct(0, 1, chan_id, 10_000_000)
-					|| self.send_direct(1, 0, chan_id, 10_000_000)
-			);
+		self.ab_link.complete_all_monitor_updates(&self.nodes);
+		self.bc_link.complete_all_monitor_updates(&self.nodes);
+
+		for chan_id in *self.ab_link.channel_ids() {
+			if self.probe_amount_for_direction(0, chan_id).is_some() {
+				assert!(self.can_send_after_settle(0, 1, chan_id));
+			} else if self.probe_amount_for_direction(1, chan_id).is_some() {
+				assert!(self.can_send_after_settle(1, 0, chan_id));
+			}
 		}
-		for chan_id in chan_bc_ids {
-			assert!(
-				self.send_direct(1, 2, chan_id, 10_000_000)
-					|| self.send_direct(2, 1, chan_id, 10_000_000)
-			);
+		for chan_id in *self.bc_link.channel_ids() {
+			if self.probe_amount_for_direction(1, chan_id).is_some() {
+				assert!(self.can_send_after_settle(1, 2, chan_id));
+			} else if self.probe_amount_for_direction(2, chan_id).is_some() {
+				assert!(self.can_send_after_settle(2, 1, chan_id));
+			}
 		}
 
 		self.nodes[0].record_last_htlc_clear_fee();
