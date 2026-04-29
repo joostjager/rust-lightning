@@ -3314,53 +3314,49 @@ pub fn do_test<Out: Output + MaybeSend + MaybeSync>(data: &[u8], out: Out) {
 				harness.nodes[1]
 					.keys_manager
 					.enable_op_for_all_signers(SignerOp::SignCounterpartyCommitment);
-				let filter = Some((harness.nodes[0].our_node_id(), harness.chan_a_id()));
-				harness.nodes[1].node.signer_unblocked(filter);
+				harness.nodes[1].node.signer_unblocked(None);
 			},
 			0xc5 => {
-				harness.nodes[1]
-					.keys_manager
-					.enable_op_for_all_signers(SignerOp::SignCounterpartyCommitment);
-				let filter = Some((harness.nodes[2].our_node_id(), harness.chan_b_id()));
-				harness.nodes[1].node.signer_unblocked(filter);
-			},
-			0xc6 => {
 				harness.nodes[2]
 					.keys_manager
 					.enable_op_for_all_signers(SignerOp::SignCounterpartyCommitment);
 				harness.nodes[2].node.signer_unblocked(None);
 			},
-			0xc7 => {
+			0xc6 => {
 				harness.nodes[0]
 					.keys_manager
 					.enable_op_for_all_signers(SignerOp::GetPerCommitmentPoint);
 				harness.nodes[0].node.signer_unblocked(None);
 			},
+			0xc7 => {
+				harness.nodes[1]
+					.keys_manager
+					.enable_op_for_all_signers(SignerOp::GetPerCommitmentPoint);
+				harness.nodes[1].node.signer_unblocked(None);
+			},
 			0xc8 => {
-				harness.nodes[1]
-					.keys_manager
-					.enable_op_for_all_signers(SignerOp::GetPerCommitmentPoint);
-				let filter = Some((harness.nodes[0].our_node_id(), harness.chan_a_id()));
-				harness.nodes[1].node.signer_unblocked(filter);
-			},
-			0xc9 => {
-				harness.nodes[1]
-					.keys_manager
-					.enable_op_for_all_signers(SignerOp::GetPerCommitmentPoint);
-				let filter = Some((harness.nodes[2].our_node_id(), harness.chan_b_id()));
-				harness.nodes[1].node.signer_unblocked(filter);
-			},
-			0xca => {
 				harness.nodes[2]
 					.keys_manager
 					.enable_op_for_all_signers(SignerOp::GetPerCommitmentPoint);
 				harness.nodes[2].node.signer_unblocked(None);
 			},
-			0xcb => {
+			0xc9 => {
 				harness.nodes[0]
 					.keys_manager
 					.enable_op_for_all_signers(SignerOp::ReleaseCommitmentSecret);
 				harness.nodes[0].node.signer_unblocked(None);
+			},
+			0xca => {
+				harness.nodes[1]
+					.keys_manager
+					.enable_op_for_all_signers(SignerOp::ReleaseCommitmentSecret);
+				harness.nodes[1].node.signer_unblocked(None);
+			},
+			0xcb => {
+				harness.nodes[2]
+					.keys_manager
+					.enable_op_for_all_signers(SignerOp::ReleaseCommitmentSecret);
+				harness.nodes[2].node.signer_unblocked(None);
 			},
 			0xcc => {
 				harness.nodes[1]
