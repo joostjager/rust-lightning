@@ -44,17 +44,19 @@ fn real_main() -> Result<(), String> {
 
 	match cmd.to_string_lossy().as_ref() {
 		"cache-commit" => {
-			let revs: Vec<OsString> = args.collect();
+			let (options, revs) = parse_build_options(args.collect(), "cache-commit")?;
 			if revs.is_empty() {
 				return Err("cache-commit needs at least one revision".to_string());
 			}
 			let total = revs.len();
 			for (idx, rev) in revs.iter().enumerate() {
-				cache_commit(rev.as_os_str(), Some((idx + 1, total)))?;
+				cache_commit(rev.as_os_str(), Some((idx + 1, total)), &options)?;
 			}
 			Ok(())
 		},
 		"replay" => {
+			let (options, args) = parse_build_options(args.collect(), "replay")?;
+			let mut args = args.into_iter();
 			let Some(rev) = args.next() else {
 				return Err("replay needs <rev> <case-name>".to_string());
 			};
@@ -65,17 +67,18 @@ fn real_main() -> Result<(), String> {
 				return Err("replay needs exactly <rev> <case-name>".to_string());
 			}
 			let case_path = case_path_from_name(Path::new(&case_name))?;
-			let outcome = replay_commit(&rev, &case_path, true)?;
+			let outcome = replay_commit(&rev, &case_path, true, &options)?;
 			std::process::exit(outcome.exit_code);
 		},
 		"bisect" => {
-			let (branch, since) = parse_branch_and_optional_since(args.collect(), "bisect", true)?;
+			let (options, args) = parse_build_options(args.collect(), "bisect")?;
+			let (branch, since) = parse_branch_and_optional_since(args, "bisect", true)?;
 			let since = since.unwrap_or_else(|| OsString::from(DEFAULT_SINCE));
-			bisect_cached(&branch, &since)
+			bisect_cached(&branch, &since, &options)
 		},
 		"list-merges" => {
-			let (branch, since) =
-				parse_branch_and_optional_since(args.collect(), "list-merges", true)?;
+			let args: Vec<OsString> = args.collect();
+			let (branch, since) = parse_branch_and_optional_since(args, "list-merges", true)?;
 			let since = since.unwrap_or_else(|| OsString::from(DEFAULT_SINCE));
 			for commit in merge_commits_since(&since, &branch)? {
 				println!("{commit}");
@@ -83,8 +86,12 @@ fn real_main() -> Result<(), String> {
 			Ok(())
 		},
 		"list-cache" => {
-			for entry in cached_commits_sorted(OsStr::new(DEFAULT_BRANCH))? {
-				println!("{}", entry.commit);
+			let (options, args) = parse_build_options(args.collect(), "list-cache")?;
+			if !args.is_empty() {
+				return Err("list-cache accepts only optional --cfg <name> arguments".to_string());
+			}
+			for entry in cached_commits_sorted(OsStr::new(DEFAULT_BRANCH), &options)? {
+				println!("{} {}", entry.commit, entry.variant.summary());
 			}
 			Ok(())
 		},
@@ -102,15 +109,17 @@ fn real_main() -> Result<(), String> {
 fn print_usage() {
 	eprintln!(
 		"Usage:
-  cargo run --bin chanmon_consistency_bisect -- cache-commit <rev> [<rev>...]
-  cargo run --bin chanmon_consistency_bisect -- replay <rev> <case-name>
-  cargo run --bin chanmon_consistency_bisect -- bisect [<branch>] [<since>]
+  cargo run --bin chanmon_consistency_bisect -- cache-commit [--cfg <name>] <rev> [<rev>...]
+  cargo run --bin chanmon_consistency_bisect -- replay [--cfg <name>] <rev> <case-name>
+  cargo run --bin chanmon_consistency_bisect -- bisect [--cfg <name>] [<branch>] [<since>]
   cargo run --bin chanmon_consistency_bisect -- list-merges [<branch>] [<since>]
-  cargo run --bin chanmon_consistency_bisect -- list-cache
+  cargo run --bin chanmon_consistency_bisect -- list-cache [--cfg <name>]
 
 Run this from the fuzz directory.
 If <branch> is omitted, {DEFAULT_BRANCH} is used. If <since> is omitted, {DEFAULT_SINCE} is used.
 <branch> may also be provided as --branch <rev>.
+--cfg <name> may be repeated. Requested cfgs are only enabled for commits whose Cargo manifests
+declare the cfg in check-cfg.
 `bisect` automatically caches any missing first-parent merge revisions in the selected window, plus the selected tip.
 
 Environment:
@@ -128,6 +137,60 @@ fn require_fuzz_dir() -> Result<(), String> {
 		return Err("run this tool from the fuzz directory".to_string());
 	}
 	Ok(())
+}
+
+#[derive(Clone)]
+struct BuildOptions {
+	requested_cfgs: Vec<String>,
+}
+
+fn parse_build_options(
+	args: Vec<OsString>, command_name: &str,
+) -> Result<(BuildOptions, Vec<OsString>), String> {
+	let mut requested_cfgs = Vec::new();
+	let mut remaining = Vec::new();
+	let mut idx = 0usize;
+
+	while idx < args.len() {
+		let arg = &args[idx];
+		if arg == "--cfg" {
+			idx += 1;
+			let Some(value) = args.get(idx) else {
+				return Err(format!("{command_name} requires a cfg name after --cfg"));
+			};
+			requested_cfgs.push(parse_cfg_name(value, command_name)?);
+		} else if let Some(value) = arg.to_string_lossy().strip_prefix("--cfg=") {
+			requested_cfgs.push(validate_cfg_name(value, command_name)?);
+		} else {
+			remaining.push(arg.clone());
+		}
+		idx += 1;
+	}
+
+	requested_cfgs.sort();
+	requested_cfgs.dedup();
+	Ok((BuildOptions { requested_cfgs }, remaining))
+}
+
+fn parse_cfg_name(value: &OsStr, command_name: &str) -> Result<String, String> {
+	let Some(value) = value.to_str() else {
+		return Err(format!("{command_name} cfg names must be valid utf-8"));
+	};
+	validate_cfg_name(value, command_name)
+}
+
+fn validate_cfg_name(value: &str, command_name: &str) -> Result<String, String> {
+	let mut chars = value.chars();
+	let Some(first) = chars.next() else {
+		return Err(format!("{command_name} cfg names must not be empty"));
+	};
+	if !(first == '_' || first.is_ascii_alphabetic()) {
+		return Err(format!("{command_name} invalid cfg name: {value}"));
+	}
+	if !chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric()) {
+		return Err(format!("{command_name} invalid cfg name: {value}"));
+	}
+	Ok(value.to_string())
 }
 
 fn parse_branch_and_optional_since(
@@ -190,6 +253,17 @@ fn commits_root() -> Result<PathBuf, String> {
 
 fn shared_target_dir() -> Result<PathBuf, String> {
 	Ok(cache_root()?.join("cargo-target").join(toolchain_dir_name()))
+}
+
+fn target_dir_for_variant(variant: &BuildVariant) -> Result<PathBuf, String> {
+	if variant.enabled_cfgs.is_empty() {
+		return shared_target_dir();
+	}
+	Ok(cache_root()?.join("cargo-target").join(format!(
+		"{}-cfg-{}",
+		toolchain_dir_name(),
+		variant.enabled_cfgs.join("-")
+	)))
 }
 
 fn builder_repo_dir() -> Result<PathBuf, String> {
@@ -325,8 +399,31 @@ impl TargetLayout {
 	}
 }
 
-fn rustflags_for_layout(layout: TargetLayout) -> OsString {
-	env::var_os("CHANMON_RUSTFLAGS").unwrap_or_else(|| OsString::from(layout.default_rustflags()))
+#[derive(Clone)]
+struct BuildVariant {
+	layout: TargetLayout,
+	enabled_cfgs: Vec<String>,
+	cache_key: String,
+}
+
+impl BuildVariant {
+	fn summary(&self) -> String {
+		if self.enabled_cfgs.is_empty() {
+			format!("({})", self.layout.as_str())
+		} else {
+			format!("({}, cfg {})", self.layout.as_str(), self.enabled_cfgs.join(","))
+		}
+	}
+}
+
+fn rustflags_for_variant(variant: &BuildVariant) -> OsString {
+	let mut rustflags = env::var_os("CHANMON_RUSTFLAGS")
+		.unwrap_or_else(|| OsString::from(variant.layout.default_rustflags()));
+	for cfg in &variant.enabled_cfgs {
+		rustflags.push(" --cfg=");
+		rustflags.push(cfg);
+	}
+	rustflags
 }
 
 fn target_layout_for_commit(commit: &str) -> Result<TargetLayout, String> {
@@ -334,6 +431,56 @@ fn target_layout_for_commit(commit: &str) -> Result<TargetLayout, String> {
 		Ok(TargetLayout::SplitRealHashes)
 	} else {
 		Ok(TargetLayout::LegacyFakeHashes)
+	}
+}
+
+fn build_variant_for_commit(commit: &str, options: &BuildOptions) -> Result<BuildVariant, String> {
+	let layout = target_layout_for_commit(commit)?;
+	let mut enabled_cfgs = Vec::new();
+	for cfg in &options.requested_cfgs {
+		if commit_supports_cfg(commit, cfg)? {
+			enabled_cfgs.push(cfg.clone());
+		}
+	}
+	let cache_key = cache_key_for_commit(commit, &enabled_cfgs);
+	Ok(BuildVariant { layout, enabled_cfgs, cache_key })
+}
+
+fn cache_key_for_commit(commit: &str, enabled_cfgs: &[String]) -> String {
+	if enabled_cfgs.is_empty() {
+		commit.to_string()
+	} else {
+		format!("{commit}-{}", enabled_cfgs.join("-"))
+	}
+}
+
+fn commit_supports_cfg(commit: &str, cfg: &str) -> Result<bool, String> {
+	let root = repo_root()?;
+	let pattern = format!("\"cfg({cfg})\"");
+	let status = Command::new("git")
+		.current_dir(root)
+		.arg("grep")
+		.arg("--fixed-strings")
+		.arg("--quiet")
+		.arg(&pattern)
+		.arg(commit)
+		.arg("--")
+		.arg("Cargo.toml")
+		.arg("fuzz/Cargo.toml")
+		.arg("fuzz/fuzz-real-hashes/Cargo.toml")
+		.arg("fuzz/fuzz-fake-hashes/Cargo.toml")
+		.stdin(Stdio::null())
+		.stdout(Stdio::null())
+		.stderr(Stdio::null())
+		.status()
+		.map_err(|err| format!("failed to run git grep for cfg({cfg}) in {commit}: {err}"))?;
+	match status.code() {
+		Some(0) => Ok(true),
+		Some(1) => Ok(false),
+		_ => Err(format!(
+			"git grep for cfg({cfg}) in {commit} failed with status {}",
+			exit_code(status)
+		)),
 	}
 }
 
@@ -365,35 +512,37 @@ fn resolve_commit(rev: &OsStr) -> Result<String, String> {
 	.map(|value| value.trim().to_string())
 }
 
-fn commit_cache_dir(commit: &str) -> Result<PathBuf, String> {
-	Ok(commits_root()?.join(commit))
+fn commit_cache_dir(cache_key: &str) -> Result<PathBuf, String> {
+	Ok(commits_root()?.join(cache_key))
 }
 
-fn commit_binary_path(commit: &str) -> Result<PathBuf, String> {
-	Ok(commit_cache_dir(commit)?.join(TARGET_NAME))
+fn commit_binary_path(cache_key: &str) -> Result<PathBuf, String> {
+	Ok(commit_cache_dir(cache_key)?.join(TARGET_NAME))
 }
 
-fn commit_log_path(commit: &str) -> Result<PathBuf, String> {
-	Ok(commit_cache_dir(commit)?.join("build.log"))
+fn commit_log_path(cache_key: &str) -> Result<PathBuf, String> {
+	Ok(commit_cache_dir(cache_key)?.join("build.log"))
 }
 
-fn commit_build_summary_path(commit: &str) -> Result<PathBuf, String> {
-	Ok(commit_cache_dir(commit)?.join("build-summary.txt"))
+fn commit_build_summary_path(cache_key: &str) -> Result<PathBuf, String> {
+	Ok(commit_cache_dir(cache_key)?.join("build-summary.txt"))
 }
 
-fn commit_info_path(commit: &str) -> Result<PathBuf, String> {
-	Ok(commit_cache_dir(commit)?.join("build-info.txt"))
+fn commit_info_path(cache_key: &str) -> Result<PathBuf, String> {
+	Ok(commit_cache_dir(cache_key)?.join("build-info.txt"))
 }
 
-fn commit_results_dir(commit: &str) -> Result<PathBuf, String> {
-	Ok(commit_cache_dir(commit)?.join("results"))
+fn commit_results_dir(cache_key: &str) -> Result<PathBuf, String> {
+	Ok(commit_cache_dir(cache_key)?.join("results"))
 }
 
-fn replay_result_path(commit: &str, case_hex: &str) -> Result<PathBuf, String> {
-	Ok(commit_results_dir(commit)?.join(case_hex))
+fn replay_result_path(cache_key: &str, case_hex: &str) -> Result<PathBuf, String> {
+	Ok(commit_results_dir(cache_key)?.join(case_hex))
 }
 
-fn write_build_info(commit: &str, layout: TargetLayout) -> Result<(), String> {
+fn write_build_info(
+	commit: &str, variant: &BuildVariant, options: &BuildOptions,
+) -> Result<(), String> {
 	let root = repo_root()?;
 	let short = run_capture(
 		Command::new("git").current_dir(&root).arg("rev-parse").arg("--short").arg(commit),
@@ -409,40 +558,59 @@ fn write_build_info(commit: &str, layout: TargetLayout) -> Result<(), String> {
 		run_capture(rustup_tool_command("cargo").arg("--version"), "rustup run cargo --version")?;
 	let built_at =
 		run_capture(Command::new("date").arg("-u").arg("+%Y-%m-%dT%H:%M:%SZ"), "date -u")?;
+	let target_dir = target_dir_for_variant(variant)?;
 	let contents = format!(
-			"commit={commit}\nshort={}\nsubject={}\nbuilt_at={}\nrustc={}\ncargo={}\nlayout={}\nmanifest={}\nrustflags={}\ntoolchain={}\n",
-			short.trim(),
-			subject.trim(),
-			built_at.trim(),
-			rustc.trim(),
-			cargo.trim(),
-			layout.as_str(),
-			layout.manifest_path(),
-			rustflags_for_layout(layout).to_string_lossy(),
-			toolchain().to_string_lossy(),
-		);
-	fs::write(commit_info_path(commit)?, contents)
+		"commit={commit}\ncache_key={}\nshort={}\nsubject={}\nbuilt_at={}\nrustc={}\ncargo={}\nlayout={}\nmanifest={}\nrequested_cfgs={}\nenabled_cfgs={}\nrustflags={}\ntoolchain={}\ntarget_dir={}\n",
+		variant.cache_key,
+		short.trim(),
+		subject.trim(),
+		built_at.trim(),
+		rustc.trim(),
+		cargo.trim(),
+		variant.layout.as_str(),
+		variant.layout.manifest_path(),
+		cfgs_to_string(&options.requested_cfgs),
+		cfgs_to_string(&variant.enabled_cfgs),
+		rustflags_for_variant(variant).to_string_lossy(),
+		toolchain().to_string_lossy(),
+		target_dir.display(),
+	);
+	fs::write(commit_info_path(&variant.cache_key)?, contents)
 		.map_err(|err| format!("failed to write build info for {commit}: {err}"))
 }
 
-fn cache_commit(rev: &OsStr, progress: Option<(usize, usize)>) -> Result<String, String> {
+fn cfgs_to_string(cfgs: &[String]) -> String {
+	if cfgs.is_empty() {
+		"(none)".to_string()
+	} else {
+		cfgs.join(",")
+	}
+}
+
+fn cache_commit(
+	rev: &OsStr, progress: Option<(usize, usize)>, options: &BuildOptions,
+) -> Result<CachedCommit, String> {
 	let commit = resolve_commit(rev)?;
-	let layout = target_layout_for_commit(&commit)?;
-	let binary_path = commit_binary_path(&commit)?;
+	let variant = build_variant_for_commit(&commit, options)?;
+	let binary_path = commit_binary_path(&variant.cache_key)?;
+	let target_dir = target_dir_for_variant(&variant)?;
 	let progress_prefix =
 		progress.map(|(current, total)| format!("[{current}/{total}] ")).unwrap_or_default();
 	if binary_path.is_file() {
-		println!("{progress_prefix}cached {commit} ({})", layout.as_str());
-		return Ok(commit);
+		println!("{progress_prefix}cached {commit} {}", variant.summary());
+		return Ok(CachedCommit { commit, variant });
 	}
 
 	ensure_cache_dirs()?;
 	let builder_repo = ensure_builder_repo()?;
-	let commit_dir = commit_cache_dir(&commit)?;
+	let commit_dir = commit_cache_dir(&variant.cache_key)?;
 	fs::create_dir_all(&commit_dir)
 		.map_err(|err| format!("failed to create cache entry for {commit}: {err}"))?;
+	fs::create_dir_all(&target_dir).map_err(|err| {
+		format!("failed to create cargo target dir {}: {err}", target_dir.display())
+	})?;
 
-	println!("{progress_prefix}building {commit} ({})", layout.as_str());
+	println!("{progress_prefix}building {commit} {}", variant.summary());
 	run_status(
 		Command::new("git")
 			.current_dir(&builder_repo)
@@ -456,26 +624,29 @@ fn cache_commit(rev: &OsStr, progress: Option<(usize, usize)>) -> Result<String,
 	let output = run_output(
 		rustup_tool_command("cargo")
 			.current_dir(&builder_repo)
-			.env("CARGO_TARGET_DIR", shared_target_dir()?)
-			.env("RUSTFLAGS", rustflags_for_layout(layout))
+			.env("CARGO_TARGET_DIR", &target_dir)
+			.env("RUSTFLAGS", rustflags_for_variant(&variant))
 			.arg("test")
 			.arg("--manifest-path")
-			.arg(layout.manifest_path())
+			.arg(variant.layout.manifest_path())
 			.arg("--bin")
 			.arg(TARGET_NAME)
 			.arg("--no-run")
 			.arg("--message-format=json"),
 		"rustup run cargo test --no-run",
 	)?;
-	fs::write(commit_log_path(&commit)?, [&output.stdout[..], &output.stderr[..]].concat())
-		.map_err(|err| format!("failed to write build log for {commit}: {err}"))?;
+	fs::write(
+		commit_log_path(&variant.cache_key)?,
+		[&output.stdout[..], &output.stderr[..]].concat(),
+	)
+	.map_err(|err| format!("failed to write build log for {commit}: {err}"))?;
 	if !output.status.success() {
 		let summary = cargo_failure_summary(&output.stdout, &output.stderr);
-		fs::write(commit_build_summary_path(&commit)?, format!("{summary}\n"))
+		fs::write(commit_build_summary_path(&variant.cache_key)?, format!("{summary}\n"))
 			.map_err(|err| format!("failed to write build summary for {commit}: {err}"))?;
 		return Err(format!(
 			"build failed for {commit}: {summary}\nsee {}",
-			commit_log_path(&commit)?.display(),
+			commit_log_path(&variant.cache_key)?.display(),
 		));
 	}
 
@@ -487,9 +658,9 @@ fn cache_commit(rev: &OsStr, progress: Option<(usize, usize)>) -> Result<String,
 			binary_path.display()
 		)
 	})?;
-	write_build_info(&commit, layout)?;
+	write_build_info(&commit, &variant, options)?;
 	println!("{progress_prefix}stored {}", binary_path.display());
-	Ok(commit)
+	Ok(CachedCommit { commit, variant })
 }
 
 fn cargo_executable_from_stdout(stdout: &[u8]) -> Result<PathBuf, String> {
@@ -572,17 +743,18 @@ impl ReplayVerdict {
 }
 
 fn replay_commit(
-	rev: &OsStr, input_file: &Path, inherit_stdio: bool,
+	rev: &OsStr, input_file: &Path, inherit_stdio: bool, options: &BuildOptions,
 ) -> Result<ReplayOutcome, String> {
-	let commit = cache_commit(rev, None)?;
-	let layout = target_layout_for_commit(&commit)?;
-	replay_cached_commit(&commit, layout, input_file, inherit_stdio, REPLAY_RUNS)
+	let cached = cache_commit(rev, None, options)?;
+	replay_cached_commit(&cached, input_file, inherit_stdio, REPLAY_RUNS)
 }
 
 fn replay_cached_commit(
-	commit: &str, layout: TargetLayout, input_file: &Path, inherit_stdio: bool, runs: usize,
+	cached: &CachedCommit, input_file: &Path, inherit_stdio: bool, runs: usize,
 ) -> Result<ReplayOutcome, String> {
-	let binary_path = commit_binary_path(&commit)?;
+	let commit = cached.commit.as_str();
+	let variant = &cached.variant;
+	let binary_path = commit_binary_path(&variant.cache_key)?;
 	let input_abs = absolute_path(input_file)?;
 	if !input_abs.is_file() {
 		return Err(format!("input file not found: {}", input_abs.display()));
@@ -590,13 +762,13 @@ fn replay_cached_commit(
 	let input_hex = case_hex(&input_abs)?;
 
 	if !inherit_stdio {
-		if let Some(outcome) = read_replay_result(commit, &input_hex)? {
+		if let Some(outcome) = read_replay_result(&variant.cache_key, &input_hex)? {
 			return Ok(outcome);
 		}
 	}
 
 	if inherit_stdio {
-		let status = run_replay_once(layout, &binary_path, &input_abs, true)?;
+		let status = run_replay_once(variant.layout, &binary_path, &input_abs, true)?;
 		let verdict = if status.success() { ReplayVerdict::Pass } else { ReplayVerdict::Fail };
 		return Ok(ReplayOutcome { verdict, exit_code: exit_code(status), cached: false });
 	}
@@ -605,6 +777,7 @@ fn replay_cached_commit(
 	for _ in 0..runs {
 		let binary_path = binary_path.clone();
 		let input_abs = input_abs.clone();
+		let layout = variant.layout;
 		handles
 			.push(thread::spawn(move || run_replay_once(layout, &binary_path, &input_abs, false)));
 	}
@@ -631,7 +804,7 @@ fn replay_cached_commit(
 			))
 		},
 	};
-	write_replay_result(commit, &input_hex, verdict)?;
+	write_replay_result(&variant.cache_key, &input_hex, verdict)?;
 	Ok(ReplayOutcome { verdict, exit_code: verdict.exit_code(), cached: false })
 }
 
@@ -673,8 +846,8 @@ fn run_replay_once(
 	Ok(status)
 }
 
-fn read_replay_result(commit: &str, case_hex: &str) -> Result<Option<ReplayOutcome>, String> {
-	let path = replay_result_path(commit, case_hex)?;
+fn read_replay_result(cache_key: &str, case_hex: &str) -> Result<Option<ReplayOutcome>, String> {
+	let path = replay_result_path(cache_key, case_hex)?;
 	if !path.is_file() {
 		return Ok(None);
 	}
@@ -695,11 +868,13 @@ fn read_replay_result(commit: &str, case_hex: &str) -> Result<Option<ReplayOutco
 	Ok(Some(ReplayOutcome { verdict, exit_code: verdict.exit_code(), cached: true }))
 }
 
-fn write_replay_result(commit: &str, case_hex: &str, verdict: ReplayVerdict) -> Result<(), String> {
-	let dir = commit_results_dir(commit)?;
+fn write_replay_result(
+	cache_key: &str, case_hex: &str, verdict: ReplayVerdict,
+) -> Result<(), String> {
+	let dir = commit_results_dir(cache_key)?;
 	fs::create_dir_all(&dir)
 		.map_err(|err| format!("failed to create replay result dir {}: {err}", dir.display()))?;
-	let path = replay_result_path(commit, case_hex)?;
+	let path = replay_result_path(cache_key, case_hex)?;
 	let contents = format!("{}\n", verdict.as_str());
 	fs::write(&path, contents)
 		.map_err(|err| format!("failed to write replay result {}: {err}", path.display()))
@@ -707,7 +882,7 @@ fn write_replay_result(commit: &str, case_hex: &str, verdict: ReplayVerdict) -> 
 
 struct CachedCommit {
 	commit: String,
-	layout: TargetLayout,
+	variant: BuildVariant,
 }
 
 struct CaseResult {
@@ -723,11 +898,11 @@ struct CaseSummary {
 	result: CaseResult,
 }
 
-fn bisect_cached(branch: &OsStr, since: &OsStr) -> Result<(), String> {
+fn bisect_cached(branch: &OsStr, since: &OsStr, options: &BuildOptions) -> Result<(), String> {
 	let expected_commits = merge_commits_since(since, branch)?;
-	cache_missing_binaries(&expected_commits)?;
+	cache_missing_binaries(&expected_commits, options)?;
 
-	let cached = cached_commits_for_expected(&expected_commits)?;
+	let cached = cached_commits_for_expected(&expected_commits, options)?;
 	if cached.is_empty() {
 		return Err("no cached commits found for the selected bisect window".to_string());
 	}
@@ -833,8 +1008,7 @@ fn first_breaking_commit_for_case(
 		if let Some(result) = outcomes.get(&(idx, runs)) {
 			return Ok(*result);
 		}
-		let outcome =
-			replay_cached_commit(&cached[idx].commit, cached[idx].layout, case_path, false, runs)?;
+		let outcome = replay_cached_commit(&cached[idx], case_path, false, runs)?;
 		commits_tested += 1;
 		if outcome.cached {
 			cached_commits_tested += 1;
@@ -930,90 +1104,48 @@ fn format_duration(duration: Duration) -> String {
 	}
 }
 
-fn cached_commits_sorted(branch: &OsStr) -> Result<Vec<CachedCommit>, String> {
-	let root = commits_root()?;
-	if !root.is_dir() {
-		return Ok(Vec::new());
-	}
-
-	let mut cached_by_commit = HashMap::new();
-	for entry in fs::read_dir(&root)
-		.map_err(|err| format!("failed to read cache dir {}: {err}", root.display()))?
-	{
-		let entry = entry
-			.map_err(|err| format!("failed to read cache entry in {}: {err}", root.display()))?;
-		let path = entry.path();
-		if !path.is_dir() {
-			continue;
-		}
-		let Some(name) = path.file_name() else {
-			continue;
-		};
-		let commit = name.to_string_lossy().to_string();
-		if !path.join(TARGET_NAME).is_file() {
-			continue;
-		}
-		let layout = target_layout_for_commit(&commit)?;
-		cached_by_commit.insert(commit.clone(), CachedCommit { commit, layout });
-	}
-
-	let mut commits = Vec::with_capacity(cached_by_commit.len());
-	for commit in all_first_parent_commits_with_tip(branch)? {
-		if let Some(entry) = cached_by_commit.remove(&commit) {
-			commits.push(entry);
-		}
-	}
-	Ok(commits)
+fn cached_commits_sorted(
+	branch: &OsStr, options: &BuildOptions,
+) -> Result<Vec<CachedCommit>, String> {
+	let commits = all_first_parent_commits_with_tip(branch)?;
+	cached_commits_for_expected(&commits, options)
 }
 
-fn cached_commits_for_expected(expected_commits: &[String]) -> Result<Vec<CachedCommit>, String> {
+fn cached_commits_for_expected(
+	expected_commits: &[String], options: &BuildOptions,
+) -> Result<Vec<CachedCommit>, String> {
 	let root = commits_root()?;
 	if !root.is_dir() {
 		return Ok(Vec::new());
-	}
-
-	let mut cached_by_commit = HashMap::new();
-	for entry in fs::read_dir(&root)
-		.map_err(|err| format!("failed to read cache dir {}: {err}", root.display()))?
-	{
-		let entry = entry
-			.map_err(|err| format!("failed to read cache entry in {}: {err}", root.display()))?;
-		let path = entry.path();
-		if !path.is_dir() {
-			continue;
-		}
-		let Some(name) = path.file_name() else {
-			continue;
-		};
-		let commit = name.to_string_lossy().to_string();
-		if !path.join(TARGET_NAME).is_file() {
-			continue;
-		}
-		let layout = target_layout_for_commit(&commit)?;
-		cached_by_commit.insert(commit.clone(), CachedCommit { commit, layout });
 	}
 
 	let mut commits = Vec::with_capacity(expected_commits.len());
 	for commit in expected_commits {
-		if let Some(entry) = cached_by_commit.remove(commit) {
-			commits.push(entry);
+		let variant = build_variant_for_commit(commit, options)?;
+		if commit_binary_path(&variant.cache_key)?.is_file() {
+			commits.push(CachedCommit { commit: commit.clone(), variant });
 		}
 	}
 	Ok(commits)
 }
 
-fn missing_cached_binaries(expected_commits: &[String]) -> Result<Vec<String>, String> {
+fn missing_cached_binaries(
+	expected_commits: &[String], options: &BuildOptions,
+) -> Result<Vec<String>, String> {
 	let mut missing = Vec::new();
 	for commit in expected_commits {
-		if !commit_binary_path(commit)?.is_file() {
+		let variant = build_variant_for_commit(commit, options)?;
+		if !commit_binary_path(&variant.cache_key)?.is_file() {
 			missing.push(commit.clone());
 		}
 	}
 	Ok(missing)
 }
 
-fn cache_missing_binaries(expected_commits: &[String]) -> Result<(), String> {
-	let missing_commits = missing_cached_binaries(expected_commits)?;
+fn cache_missing_binaries(
+	expected_commits: &[String], options: &BuildOptions,
+) -> Result<(), String> {
+	let missing_commits = missing_cached_binaries(expected_commits, options)?;
 	if missing_commits.is_empty() {
 		return Ok(());
 	}
@@ -1021,7 +1153,7 @@ fn cache_missing_binaries(expected_commits: &[String]) -> Result<(), String> {
 	println!("caching {} missing commit(s) required for bisect", missing_commits.len());
 	let total = missing_commits.len();
 	for (idx, commit) in missing_commits.iter().enumerate() {
-		cache_commit(OsStr::new(commit), Some((idx + 1, total)))?;
+		cache_commit(OsStr::new(commit), Some((idx + 1, total)), options)?;
 	}
 	Ok(())
 }
