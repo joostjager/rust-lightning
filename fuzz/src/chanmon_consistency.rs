@@ -283,7 +283,7 @@ impl ChainState {
 	/// Confirm pending transactions in a single block, selecting deterministically among
 	/// conflicting RBF candidates. Sorting by txid ensures the winner is determined by fuzz input
 	/// content. Transactions that double-spend an already-confirmed outpoint are skipped.
-	fn confirm_pending_txs(&mut self) {
+	fn confirm_pending_txs(&mut self) -> Vec<Transaction> {
 		let mut txs = std::mem::take(&mut self.pending_txs);
 		txs.sort_by_key(|(txid, _)| *txid);
 
@@ -299,11 +299,12 @@ impl ChainState {
 		}
 
 		if confirmed.is_empty() {
-			return;
+			return Vec::new();
 		}
 
 		let prev_hash = self.blocks.last().unwrap().0.block_hash();
 		let header = create_dummy_header(prev_hash, 42);
+		let confirmed_txs = confirmed.clone();
 		self.blocks.push((header, confirmed));
 		self.utxos = next_utxos;
 
@@ -312,6 +313,7 @@ impl ChainState {
 			let header = create_dummy_header(prev_hash, 42);
 			self.blocks.push((header, Vec::new()));
 		}
+		confirmed_txs
 	}
 
 	fn block_at(&self, height: u32) -> &(Header, Vec<Transaction>) {
@@ -2496,6 +2498,31 @@ impl<'a, 'd, Out: Output + MaybeSend + MaybeSync> Harness<'a, 'd, Out> {
 			node.refresh_serialized_manager();
 		}
 	}
+
+	fn confirm_pending_txs_and_sync_wallets(&mut self) -> bool {
+		let confirmed_txs = self.chain_state.confirm_pending_txs();
+		for tx in &confirmed_txs {
+			sync_wallets_with_confirmed_tx(
+				[&self.nodes[0].wallet, &self.nodes[1].wallet, &self.nodes[2].wallet].as_slice(),
+				tx,
+			);
+		}
+		!confirmed_txs.is_empty()
+	}
+}
+
+fn sync_wallets_with_confirmed_tx(wallets: &[&TestWalletSource], tx: &Transaction) {
+	for wallet in wallets {
+		let change_script = wallet.get_change_script().unwrap();
+		for input in &tx.input {
+			wallet.remove_utxo(input.previous_output);
+		}
+		for (vout, output) in tx.output.iter().enumerate() {
+			if output.script_pubkey == change_script {
+				wallet.add_utxo(tx.clone(), vout as u32);
+			}
+		}
+	}
 }
 
 fn process_msg_events_impl<Out: Output + MaybeSend + MaybeSync>(
@@ -3233,28 +3260,28 @@ pub fn do_test<Out: Output + MaybeSend + MaybeSync>(data: &[u8], out: Out) {
 			},
 			// Sync node by 1 block to cover confirmation of a transaction.
 			0xa8 => {
-				harness.chain_state.confirm_pending_txs();
+				harness.confirm_pending_txs_and_sync_wallets();
 				harness.nodes[0].sync_with_chain_state(&harness.chain_state, Some(1));
 			},
 			0xa9 => {
-				harness.chain_state.confirm_pending_txs();
+				harness.confirm_pending_txs_and_sync_wallets();
 				harness.nodes[1].sync_with_chain_state(&harness.chain_state, Some(1));
 			},
 			0xaa => {
-				harness.chain_state.confirm_pending_txs();
+				harness.confirm_pending_txs_and_sync_wallets();
 				harness.nodes[2].sync_with_chain_state(&harness.chain_state, Some(1));
 			},
 			// Sync node to chain tip to cover confirmation of a transaction post-reorg-risk.
 			0xab => {
-				harness.chain_state.confirm_pending_txs();
+				harness.confirm_pending_txs_and_sync_wallets();
 				harness.nodes[0].sync_with_chain_state(&harness.chain_state, None);
 			},
 			0xac => {
-				harness.chain_state.confirm_pending_txs();
+				harness.confirm_pending_txs_and_sync_wallets();
 				harness.nodes[1].sync_with_chain_state(&harness.chain_state, None);
 			},
 			0xad => {
-				harness.chain_state.confirm_pending_txs();
+				harness.confirm_pending_txs_and_sync_wallets();
 				harness.nodes[2].sync_with_chain_state(&harness.chain_state, None);
 			},
 
