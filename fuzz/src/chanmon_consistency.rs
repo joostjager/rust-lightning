@@ -41,11 +41,11 @@ use lightning::chain;
 use lightning::chain::chaininterface::{
 	BroadcasterInterface, ConfirmationTarget, FeeEstimator, TransactionType,
 };
-use lightning::chain::channelmonitor::ChannelMonitor;
+use lightning::chain::channelmonitor::{Balance, ChannelMonitor};
 use lightning::chain::{
 	chainmonitor, channelmonitor, BlockLocator, ChannelMonitorUpdateStatus, Confirm, Watch,
 };
-use lightning::events;
+use lightning::events::{self, EventsProvider};
 use lightning::ln::channel::{
 	FEE_SPIKE_BUFFER_FEE_INCREASE_MULTIPLE, MAX_STD_OUTPUT_DUST_LIMIT_SATOSHIS,
 };
@@ -82,6 +82,8 @@ use lightning::util::ser::{LengthReadable, ReadableArgs, Writeable, Writer};
 use lightning::util::test_channel_signer::{EnforcementState, SignerOp, TestChannelSigner};
 use lightning::util::test_utils::TestWalletSource;
 use lightning::util::wallet_utils::{WalletSourceSync, WalletSync};
+
+use lightning::events::bump_transaction::sync::BumpTransactionEventHandlerSync;
 
 use lightning_invoice::RawBolt11Invoice;
 
@@ -314,6 +316,14 @@ impl ChainState {
 			self.blocks.push((header, Vec::new()));
 		}
 		confirmed_txs
+	}
+
+	fn advance_height(&mut self, num_blocks: u32) {
+		for _ in 0..num_blocks {
+			let prev_hash = self.blocks.last().unwrap().0.block_hash();
+			let header = create_dummy_header(prev_hash, 42);
+			self.blocks.push((header, Vec::new()));
+		}
 	}
 
 	fn block_at(&self, height: u32) -> &(Header, Vec<Transaction>) {
@@ -924,8 +934,8 @@ fn send_mpp_hop_payment(
 				.iter()
 				.find(|chan| chan.channel_id == *chan_id)
 				.and_then(|chan| chan.short_channel_id)
-				.unwrap()
 		})
+		.map(Option::unwrap)
 		.collect();
 
 	let dest_chans = dest.list_channels();
@@ -936,8 +946,8 @@ fn send_mpp_hop_payment(
 				.iter()
 				.find(|chan| chan.channel_id == *chan_id)
 				.and_then(|chan| chan.short_channel_id)
-				.unwrap()
 		})
+		.map(Option::unwrap)
 		.collect();
 
 	for i in 0..num_paths {
@@ -1732,7 +1742,9 @@ impl PaymentTracker {
 			payment_preimages: new_hash_map(),
 		}
 	}
+}
 
+impl PaymentTracker {
 	fn next_payment(&mut self, dest: &ChanMan) -> (PaymentSecret, PaymentHash, PaymentId) {
 		let (secret, hash) =
 			get_payment_secret_hash(dest, &mut self.payment_ctr, &mut self.payment_preimages);
@@ -2362,51 +2374,41 @@ impl<'a, 'd, Out: Output + MaybeSend + MaybeSync> Harness<'a, 'd, Out> {
 	}
 
 	fn process_all_events(&mut self) {
+		let mut settled = false;
 		let mut last_pass_no_updates = false;
-		for i in 0..std::usize::MAX {
-			if i == 100 {
-				panic!(
-					"It may take may iterations to settle the state, but it should not take forever"
-				);
+		for settle_iter in 0..100 {
+			let completed_monitor_update = self.complete_pending_monitor_updates();
+			let mut had_msg_or_ev = false;
+			for node_idx in 0..3 {
+				if self.process_msg_events(node_idx, false, ProcessMessages::AllMessages) {
+					had_msg_or_ev = true;
+				}
 			}
-			// First, make sure no monitor updates are pending.
-			self.ab_link.complete_all_monitor_updates(&self.nodes);
-			self.bc_link.complete_all_monitor_updates(&self.nodes);
-			// Then, make sure any current forwards make their way to their destination.
-			if self.process_msg_events(0, false, ProcessMessages::AllMessages) {
-				last_pass_no_updates = false;
-				continue;
+			for node_idx in 0..3 {
+				if self.process_events(node_idx, false) {
+					had_msg_or_ev = true;
+				}
 			}
-			if self.process_msg_events(1, false, ProcessMessages::AllMessages) {
-				last_pass_no_updates = false;
-				continue;
-			}
-			if self.process_msg_events(2, false, ProcessMessages::AllMessages) {
-				last_pass_no_updates = false;
-				continue;
-			}
-			// Finally, make sure any payments are claimed.
-			if self.process_events(0, false) {
-				last_pass_no_updates = false;
-				continue;
-			}
-			if self.process_events(1, false) {
-				last_pass_no_updates = false;
-				continue;
-			}
-			if self.process_events(2, false) {
+			let had_pending_txs = self.confirm_pending_txs_and_sync_wallets();
+			self.sync_all_nodes_with_chain_state();
+			self.process_monitor_pending_events();
+			let had_new_txs = self
+				.drain_and_confirm_broadcast_transactions("process_all_events", Some(settle_iter));
+			if completed_monitor_update || had_new_txs || had_msg_or_ev || had_pending_txs {
 				last_pass_no_updates = false;
 				continue;
 			}
 			if last_pass_no_updates {
-				// In some cases, `process_msg_events` may generate a message to send, but block
-				// sending until `complete_all_monitor_updates` gets called on the next iteration.
-				// Thus, we only exit if we manage two iterations with no messages or events to
-				// process.
+				settled = true;
 				break;
 			}
 			last_pass_no_updates = true;
 		}
+		assert!(
+			settled,
+			"process_all_events exceeded settle budget: {}",
+			self.pending_work_summary(),
+		);
 	}
 
 	fn disconnect_ab(&mut self) {
@@ -2499,6 +2501,26 @@ impl<'a, 'd, Out: Output + MaybeSend + MaybeSync> Harness<'a, 'd, Out> {
 		}
 	}
 
+	fn confirm_broadcasts_for_node(&mut self, node_idx: usize) {
+		let txs = self.nodes[node_idx]
+			.broadcaster
+			.txn_broadcasted
+			.borrow_mut()
+			.drain(..)
+			.collect::<Vec<_>>();
+		for tx in txs {
+			self.confirm_tx_and_sync_wallets(tx);
+		}
+	}
+
+	fn confirm_tx_and_sync_wallets(&mut self, tx: Transaction) -> bool {
+		confirm_tx_and_sync_wallets(
+			&mut self.chain_state,
+			[&self.nodes[0].wallet, &self.nodes[1].wallet, &self.nodes[2].wallet].as_slice(),
+			tx,
+		)
+	}
+
 	fn confirm_pending_txs_and_sync_wallets(&mut self) -> bool {
 		let confirmed_txs = self.chain_state.confirm_pending_txs();
 		for tx in &confirmed_txs {
@@ -2508,6 +2530,362 @@ impl<'a, 'd, Out: Output + MaybeSend + MaybeSync> Harness<'a, 'd, Out> {
 			);
 		}
 		!confirmed_txs.is_empty()
+	}
+
+	fn open_channels(&self) -> Vec<ChannelDetails> {
+		self.nodes[0]
+			.node
+			.list_channels()
+			.iter()
+			.chain(self.nodes[1].node.list_channels().iter())
+			.chain(self.nodes[2].node.list_channels().iter())
+			.cloned()
+			.collect::<Vec<_>>()
+	}
+
+	fn has_pending_monitor_updates(&self) -> bool {
+		self.nodes.iter().any(|node| {
+			node.monitor
+				.latest_monitors
+				.lock()
+				.unwrap()
+				.values()
+				.any(|state| !state.pending_monitors.is_empty())
+		})
+	}
+
+	fn has_time_dependent_work(&self) -> bool {
+		let open_channels = self.open_channels();
+		let open_refs: Vec<_> = open_channels.iter().collect();
+		self.nodes.iter().any(|node| {
+			node.monitor.get_claimable_balances(&open_refs).iter().any(|balance| {
+				matches!(
+					balance,
+					Balance::ClaimableOnChannelClose { .. }
+						| Balance::ClaimableAwaitingConfirmations { .. }
+						| Balance::ContentiousClaimable { .. }
+						| Balance::MaybeTimeoutClaimableHTLC { .. }
+						| Balance::MaybePreimageClaimableHTLC { .. }
+						| Balance::CounterpartyRevokedOutputClaimable { .. }
+				)
+			})
+		})
+	}
+
+	fn has_pending_work(&self) -> bool {
+		!self.queues.ab.is_empty()
+			|| !self.queues.ba.is_empty()
+			|| !self.queues.bc.is_empty()
+			|| !self.queues.cb.is_empty()
+			|| !self.chain_state.pending_txs.is_empty()
+			|| self.nodes.iter().any(|node| !node.broadcaster.txn_broadcasted.borrow().is_empty())
+			|| self.has_pending_monitor_updates()
+			|| self.has_time_dependent_work()
+	}
+
+	fn pending_work_summary(&self) -> String {
+		let open_channels = self.open_channels();
+		let open_refs: Vec<_> = open_channels.iter().collect();
+		let balances_a = self.nodes[0].monitor.get_claimable_balances(&open_refs);
+		let balances_b = self.nodes[1].monitor.get_claimable_balances(&open_refs);
+		let balances_c = self.nodes[2].monitor.get_claimable_balances(&open_refs);
+		let pending_payments = &self.payments.pending_payments;
+		format!(
+			"queues ab={} ba={} bc={} cb={} pending_txs={} bcast=({},{},{}) pending=({},{},{}) monitor_updates={} timed_work={} heights=({},{},{}) tip={} balances_a=[{}] balances_b=[{}] balances_c=[{}]",
+			self.queues.ab.len(),
+			self.queues.ba.len(),
+			self.queues.bc.len(),
+			self.queues.cb.len(),
+			self.chain_state.pending_txs.len(),
+			self.nodes[0].broadcaster.txn_broadcasted.borrow().len(),
+			self.nodes[1].broadcaster.txn_broadcasted.borrow().len(),
+			self.nodes[2].broadcaster.txn_broadcasted.borrow().len(),
+			pending_payments[0].len(),
+			pending_payments[1].len(),
+			pending_payments[2].len(),
+			self.has_pending_monitor_updates(),
+			self.has_time_dependent_work(),
+			self.nodes[0].height,
+			self.nodes[1].height,
+			self.nodes[2].height,
+			self.chain_state.tip_height(),
+			summarize_balances(&balances_a),
+			summarize_balances(&balances_b),
+			summarize_balances(&balances_c),
+		)
+	}
+
+	fn complete_pending_monitor_updates(&self) -> bool {
+		let mut completed_monitor_update = false;
+		for id in self.ab_link.channel_ids() {
+			completed_monitor_update |= self.nodes[0].complete_all_monitor_updates(id);
+			completed_monitor_update |= self.nodes[1].complete_all_monitor_updates(id);
+		}
+		for id in self.bc_link.channel_ids() {
+			completed_monitor_update |= self.nodes[1].complete_all_monitor_updates(id);
+			completed_monitor_update |= self.nodes[2].complete_all_monitor_updates(id);
+		}
+		completed_monitor_update
+	}
+
+	fn sync_all_nodes_with_chain_state(&mut self) {
+		let chain_state = &self.chain_state;
+		for node in &mut self.nodes {
+			node.sync_with_chain_state(chain_state, None);
+		}
+	}
+
+	fn process_monitor_pending_events(&self) {
+		for node in &self.nodes {
+			let logger = Arc::clone(&node.logger);
+			let wallet = WalletSync::new(&node.wallet, Arc::clone(&logger));
+			let handler = BumpTransactionEventHandlerSync::new(
+				node.broadcaster.as_ref(),
+				&wallet,
+				node.keys_manager.as_ref(),
+				Arc::clone(&logger),
+			);
+			let broadcaster = &node.broadcaster;
+			node.monitor.process_pending_events(&|event: events::Event| {
+				if let events::Event::BumpTransaction(ref bump) = event {
+					match bump {
+						events::bump_transaction::BumpTransactionEvent::ChannelClose {
+							commitment_tx,
+							channel_id,
+							counterparty_node_id,
+							..
+						} => {
+							broadcaster.broadcast_transactions(&[(
+								commitment_tx,
+								lightning::chain::chaininterface::TransactionType::UnilateralClose {
+									counterparty_node_id: *counterparty_node_id,
+									channel_id: *channel_id,
+								},
+							)]);
+						},
+						events::bump_transaction::BumpTransactionEvent::HTLCResolution {
+							..
+						} => {
+							handler.handle_event(bump);
+						},
+					}
+				}
+				Ok(())
+			});
+		}
+	}
+
+	fn drain_and_confirm_broadcast_transactions(
+		&mut self, context: &str, settle_iter: Option<usize>,
+	) -> bool {
+		let mut had_new_txs = false;
+		for confirm_iter in 0..32 {
+			let mut found = false;
+			let mut pending_txs = Vec::new();
+			for node in &self.nodes {
+				for tx in node.broadcaster.txn_broadcasted.borrow_mut().drain(..) {
+					pending_txs.push(tx);
+				}
+			}
+			pending_txs.sort_by_key(|tx| tx.lock_time.to_consensus_u32());
+			let mut deferred_txs = pending_txs;
+			loop {
+				let mut next_deferred_txs = Vec::new();
+				let mut progressed = false;
+				for tx in deferred_txs {
+					if self.confirm_tx_and_sync_wallets(tx.clone()) {
+						found = true;
+						progressed = true;
+					} else {
+						next_deferred_txs.push(tx);
+					}
+				}
+				if !progressed {
+					deferred_txs = next_deferred_txs
+						.into_iter()
+						.filter(|tx| should_retry_confirm_later(&self.chain_state, tx))
+						.collect();
+					break;
+				}
+				deferred_txs = next_deferred_txs;
+			}
+			if !deferred_txs.is_empty() {
+				self.nodes[0].broadcaster.txn_broadcasted.borrow_mut().extend(deferred_txs);
+			}
+			if !found {
+				break;
+			}
+			let quiesce_context = match settle_iter {
+				Some(iter) => format!(
+					"{context} tx confirmation loop failed to quiesce at settle iter {iter}: {}",
+					self.pending_work_summary(),
+				),
+				None => format!(
+					"{context} tx confirmation loop failed to quiesce: {}",
+					self.pending_work_summary(),
+				),
+			};
+			assert!(confirm_iter < 31, "{quiesce_context}");
+			had_new_txs = true;
+			self.sync_all_nodes_with_chain_state();
+		}
+		had_new_txs
+	}
+
+	fn progress_round(&mut self) -> bool {
+		let completed_monitor_update = self.complete_pending_monitor_updates();
+		let mut had_msg_or_ev = false;
+		for node_idx in 0..3 {
+			if self.process_msg_events(node_idx, false, ProcessMessages::AllMessages) {
+				had_msg_or_ev = true;
+			}
+		}
+		for node_idx in 0..3 {
+			if self.process_events(node_idx, false) {
+				had_msg_or_ev = true;
+			}
+		}
+		let had_pending_txs = self.confirm_pending_txs_and_sync_wallets();
+		self.sync_all_nodes_with_chain_state();
+		self.process_monitor_pending_events();
+		let had_new_txs = self.drain_and_confirm_broadcast_transactions("flush_progress", None);
+		completed_monitor_update || had_new_txs || had_msg_or_ev || had_pending_txs
+	}
+
+	fn flush_progress(&mut self, max_iters: usize) {
+		let mut last_pass_no_updates = false;
+		for _ in 0..max_iters {
+			if self.progress_round() {
+				last_pass_no_updates = false;
+				continue;
+			}
+			if last_pass_no_updates {
+				break;
+			}
+			last_pass_no_updates = true;
+		}
+		let pending_work = self.has_pending_work();
+		let summary = self.pending_work_summary();
+		assert!(
+			!pending_work || last_pass_no_updates,
+			"flush_progress exhausted {max_iters} iterations without quiescing: {summary}",
+		);
+		assert!(
+			!pending_work || !last_pass_no_updates || max_iters > 0,
+			"flush_progress made no progress: {summary}",
+		);
+	}
+
+	fn advance_chain_carefully(&mut self, num_blocks: u32) {
+		for _ in 0..num_blocks {
+			self.flush_progress(32);
+			if !self.has_pending_work() {
+				break;
+			}
+			self.chain_state.advance_height(1);
+			self.flush_progress(32);
+			if !self.has_pending_work() {
+				break;
+			}
+		}
+	}
+
+	fn catch_up_raw_monitors(&self) {
+		for node in &self.nodes {
+			let mut min_monitor_height = node.height;
+			for chan_id in node.monitor.list_monitors() {
+				if let Ok(mon) = node.monitor.get_monitor(chan_id) {
+					min_monitor_height =
+						std::cmp::min(min_monitor_height, mon.current_best_block().height);
+				}
+			}
+			let mut h = min_monitor_height;
+			while h < node.height {
+				let mut next_height = h + 1;
+				while next_height <= node.height
+					&& self.chain_state.block_at(next_height).1.is_empty()
+				{
+					next_height += 1;
+				}
+				if next_height > node.height {
+					h = node.height;
+					let (header, _) = self.chain_state.block_at(h);
+					node.monitor.best_block_updated(header, h);
+					break;
+				}
+				if next_height > h + 1 {
+					h = next_height - 1;
+					let (header, _) = self.chain_state.block_at(h);
+					node.monitor.best_block_updated(header, h);
+				}
+				h = next_height;
+				let (header, txn) = self.chain_state.block_at(h);
+				let txdata: Vec<_> = txn.iter().enumerate().map(|(i, tx)| (i + 1, tx)).collect();
+				if !txdata.is_empty() {
+					node.monitor.transactions_confirmed(header, &txdata, h);
+				}
+				node.monitor.best_block_updated(header, h);
+			}
+		}
+	}
+
+	fn process_messages_and_events_only(&mut self) {
+		let mut settled = false;
+		let mut last_pass_no_updates = false;
+		for _ in 0..100 {
+			let completed_monitor_update = self.complete_pending_monitor_updates();
+			let mut had_msg_or_ev = false;
+			for node_idx in 0..3 {
+				if self.process_msg_events(node_idx, false, ProcessMessages::AllMessages) {
+					had_msg_or_ev = true;
+				}
+			}
+			for node_idx in 0..3 {
+				if self.process_events(node_idx, false) {
+					had_msg_or_ev = true;
+				}
+			}
+			if completed_monitor_update || had_msg_or_ev {
+				last_pass_no_updates = false;
+				continue;
+			}
+			if last_pass_no_updates {
+				settled = true;
+				break;
+			}
+			last_pass_no_updates = true;
+		}
+		assert!(settled, "message-only settle exceeded budget: {}", self.pending_work_summary(),);
+	}
+
+	fn probe_amount_for_direction(
+		&self, source_idx: usize, dest_chan_id: ChannelId,
+	) -> Option<u64> {
+		self.nodes[source_idx]
+			.node
+			.list_usable_channels()
+			.iter()
+			.find(|chan| chan.channel_id == dest_chan_id)
+			.and_then(|chan| {
+				let probe_amt = cmp::max(
+					cmp::min(10_000_000, chan.next_outbound_htlc_limit_msat),
+					chan.next_outbound_htlc_minimum_msat,
+				);
+				if probe_amt == 0 || probe_amt > chan.next_outbound_htlc_limit_msat {
+					None
+				} else {
+					Some(probe_amt)
+				}
+			})
+	}
+
+	fn can_send_after_settle(
+		&mut self, source_idx: usize, dest_idx: usize, dest_chan_id: ChannelId,
+	) -> bool {
+		let Some(amt) = self.probe_amount_for_direction(source_idx, dest_chan_id) else {
+			return false;
+		};
+		self.send_direct(source_idx, dest_idx, dest_chan_id, amt)
 	}
 }
 
@@ -2522,6 +2900,17 @@ fn sync_wallets_with_confirmed_tx(wallets: &[&TestWalletSource], tx: &Transactio
 				wallet.add_utxo(tx.clone(), vout as u32);
 			}
 		}
+	}
+}
+
+fn confirm_tx_and_sync_wallets(
+	chain_state: &mut ChainState, wallets: &[&TestWalletSource], tx: Transaction,
+) -> bool {
+	if chain_state.confirm_tx(tx.clone()) {
+		sync_wallets_with_confirmed_tx(wallets, &tx);
+		true
+	} else {
+		false
 	}
 }
 
@@ -2870,6 +3259,36 @@ fn process_events_impl(
 		nodes[node_idx].node.process_pending_htlc_forwards();
 	}
 	had_events
+}
+
+fn summarize_balances(balances: &[Balance]) -> String {
+	let mut on_close = 0;
+	let mut awaiting = 0;
+	let mut contentious = 0;
+	let mut maybe_timeout = 0;
+	let mut maybe_preimage = 0;
+	let mut revoked = 0;
+	for balance in balances {
+		match balance {
+			Balance::ClaimableOnChannelClose { .. } => on_close += 1,
+			Balance::ClaimableAwaitingConfirmations { .. } => awaiting += 1,
+			Balance::ContentiousClaimable { .. } => contentious += 1,
+			Balance::MaybeTimeoutClaimableHTLC { .. } => maybe_timeout += 1,
+			Balance::MaybePreimageClaimableHTLC { .. } => maybe_preimage += 1,
+			Balance::CounterpartyRevokedOutputClaimable { .. } => revoked += 1,
+		}
+	}
+	format!(
+		"on_close={on_close} awaiting={awaiting} contentious={contentious} maybe_timeout={maybe_timeout} maybe_preimage={maybe_preimage} revoked={revoked}"
+	)
+}
+
+fn should_retry_confirm_later(chain_state: &ChainState, tx: &Transaction) -> bool {
+	let lock_time = tx.lock_time.to_consensus_u32();
+	lock_time > 0
+		&& lock_time < 500_000_000
+		&& lock_time & (1 << 29) == 0
+		&& chain_state.tip_height() < lock_time
 }
 
 #[inline]
@@ -3381,6 +3800,14 @@ pub fn do_test<Out: Output + MaybeSend + MaybeSync>(data: &[u8], out: Out) {
 					.enable_op_for_all_signers(SignerOp::ReleaseCommitmentSecret);
 				harness.nodes[2].node.signer_unblocked(None);
 			},
+
+			0xd8 => harness.confirm_broadcasts_for_node(0),
+			0xd9 => harness.confirm_broadcasts_for_node(1),
+			0xda => harness.confirm_broadcasts_for_node(2),
+
+			0xdc => harness.advance_chain_carefully(50),
+			0xdd => harness.advance_chain_carefully(100),
+			0xde => harness.advance_chain_carefully(200),
 
 			0xf0 => {
 				harness.ab_link.complete_monitor_updates_for_node(
