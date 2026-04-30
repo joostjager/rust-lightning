@@ -305,6 +305,8 @@ jobs:
         run: cargo fmt --check
       - name: Run rustfmt checks on lightning-tests
         run: cd lightning-tests && cargo fmt --check
+      - name: Run rustfmt checks on fuzz
+        run: cd fuzz && cargo fmt --check
   tor-connect:
     runs-on: ubuntu-latest
     env:
