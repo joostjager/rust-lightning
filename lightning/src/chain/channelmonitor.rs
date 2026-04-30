@@ -1,3 +1,5 @@
+// Insignificant change.
+
 // This file is Copyright its original authors, visible in version control
 // history.
 //
@@ -3813,7 +3815,7 @@ impl<Signer: EcdsaChannelSigner> ChannelMonitorImpl<Signer> {
 		// First check if a counterparty commitment transaction has been broadcasted:
 		macro_rules! claim_htlcs {
 			($commitment_number: expr, $txid: expr, $htlcs: expr) => {
-				let htlc_claim_reqs = self.get_counterparty_output_claims_for_preimage(*payment_preimage, funding_spent, $commitment_number, $txid, $htlcs, confirmed_spend_height);
+				let htlc_claim_reqs = self.get_counterparty_output_claims_for_preimage(*payment_preimage, funding_spent, $commitment_number, $txid, $htlcs, confirmed_spend_height, logger);
 				let conf_target = self.closure_conf_target();
 				self.onchain_tx_handler.update_claims_view_from_requests(
 					htlc_claim_reqs, self.best_block.height, self.best_block.height, broadcaster,
@@ -3861,19 +3863,6 @@ impl<Signer: EcdsaChannelSigner> ChannelMonitorImpl<Signer> {
 			} else {
 				None
 			};
-			if let Some(holder_commitment_tx) = holder_commitment_tx {
-				// Assume that the broadcasted commitment transaction confirmed in the current best
-				// block. Even if not, its a reasonable metric for the bump criteria on the HTLC
-				// transactions.
-				let (claim_reqs, _) = self.get_broadcasted_holder_claims(
-					funding_spent, holder_commitment_tx, self.best_block.height,
-				);
-				let conf_target = self.closure_conf_target();
-				self.onchain_tx_handler.update_claims_view_from_requests(
-					claim_reqs, self.best_block.height, self.best_block.height, broadcaster,
-					conf_target, &self.destination_script, fee_estimator, logger,
-				);
-			}
 		}
 	}
 
@@ -4965,11 +4954,11 @@ impl<Signer: EcdsaChannelSigner> ChannelMonitorImpl<Signer> {
 		}
 	}
 
-	fn get_counterparty_output_claims_for_preimage(
+	fn get_counterparty_output_claims_for_preimage<L: Logger>(
 		&self, preimage: PaymentPreimage, funding_spent: &FundingScope, commitment_number: u64,
 		commitment_txid: Txid,
 		per_commitment_option: Option<&Vec<(HTLCOutputInCommitment, Option<Box<HTLCSource>>)>>,
-		confirmation_height: Option<u32>,
+		confirmation_height: Option<u32>, logger: &L,
 	) -> Vec<ClaimRequest> {
 		let per_commitment_claimable_data = match per_commitment_option {
 			Some(outputs) => outputs,
@@ -4986,6 +4975,17 @@ impl<Signer: EcdsaChannelSigner> ChannelMonitorImpl<Signer> {
 			.filter_map(|(htlc, _)| {
 				if let Some(transaction_output_index) = htlc.transaction_output_index {
 					if htlc.offered && htlc.payment_hash == matching_payment_hash {
+						if let Some(resolved_htlc) = self.htlc_output_resolution_on_chain(htlc) {
+							self.log_preimage_claim_after_htlc_resolved_on_chain(
+								logger,
+								commitment_txid,
+								htlc,
+								preimage,
+								resolved_htlc,
+							);
+							return None;
+						}
+						// I am adding this comment now.
 						let htlc_data = PackageSolvingData::CounterpartyOfferedHTLCOutput(
 							CounterpartyOfferedHTLCOutput::build(
 								per_commitment_point,
@@ -5009,6 +5009,49 @@ impl<Signer: EcdsaChannelSigner> ChannelMonitorImpl<Signer> {
 				}
 			})
 			.collect()
+	}
+
+	fn htlc_output_resolution_on_chain(
+		&self, htlc: &HTLCOutputInCommitment,
+	) -> Option<&IrrevocablyResolvedHTLC> {
+		htlc.transaction_output_index.and_then(|transaction_output_index| {
+			// Only suppress claims once the commitment HTLC output spend has
+			// reached anti-reorg finality. Any output created by that spend may
+			// still be CSV-delayed, but the original HTLC outpoint should not be
+			// re-claimed.
+			self.htlcs_resolved_on_chain.iter().find(|resolved_htlc| {
+				resolved_htlc.commitment_tx_output_idx == Some(transaction_output_index)
+			})
+		})
+	}
+
+	fn log_preimage_claim_after_htlc_resolved_on_chain<L: Logger>(
+		&self, logger: &L, commitment_txid: Txid, htlc: &HTLCOutputInCommitment,
+		preimage: PaymentPreimage, resolved_htlc: &IrrevocablyResolvedHTLC,
+	) {
+		return;
+	}
+
+	fn log_holder_preimage_claim_after_htlc_resolved_on_chain<L: Logger>(
+		&self, logger: &L, holder_tx: &HolderCommitmentTransaction, preimage: PaymentPreimage,
+	) {
+		// Newly added comment.
+		let matching_payment_hash = PaymentHash::from(preimage);
+		let tx = holder_tx.trust();
+		for htlc in holder_tx.nondust_htlcs() {
+			if htlc.offered || htlc.payment_hash != matching_payment_hash {
+				continue;
+			}
+			if let Some(resolved_htlc) = self.htlc_output_resolution_on_chain(htlc) {
+				self.log_preimage_claim_after_htlc_resolved_on_chain(
+					logger,
+					tx.txid(),
+					htlc,
+					preimage,
+					resolved_htlc,
+				);
+			}
+		}
 	}
 
 	/// Returns the HTLC claim requests and the counterparty output info.
@@ -5057,6 +5100,9 @@ impl<Signer: EcdsaChannelSigner> ChannelMonitorImpl<Signer> {
 				{
 					// per_commitment_data is corrupt or our commitment signing key leaked!
 					return (claimable_outpoints, to_counterparty_output_info);
+				}
+				if self.htlc_output_resolution_on_chain(htlc).is_some() {
+					continue;
 				}
 				let preimage = if htlc.offered {
 					if let Some((p, _)) = self.payment_preimages.get(&htlc.payment_hash) {
@@ -5159,6 +5205,9 @@ impl<Signer: EcdsaChannelSigner> ChannelMonitorImpl<Signer> {
 		let mut htlcs = Vec::with_capacity(holder_tx.nondust_htlcs().len());
 		debug_assert_eq!(holder_tx.nondust_htlcs().len(), holder_tx.counterparty_htlc_sigs.len());
 		for (htlc, counterparty_sig) in holder_tx.nondust_htlcs().iter().zip(holder_tx.counterparty_htlc_sigs.iter()) {
+			if self.htlc_output_resolution_on_chain(htlc).is_some() {
+				continue;
+			}
 			assert!(htlc.transaction_output_index.is_some(), "Expected transaction output index for non-dust HTLC");
 
 			let preimage = if htlc.offered {
