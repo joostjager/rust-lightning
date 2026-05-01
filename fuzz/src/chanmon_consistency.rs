@@ -208,9 +208,7 @@ impl ChainState {
 
 	fn is_outpoint_spent(&self, outpoint: &bitcoin::OutPoint) -> bool {
 		self.blocks.iter().any(|(_, txs)| {
-			txs.iter().any(|tx| {
-				tx.input.iter().any(|input| input.previous_output == *outpoint)
-			})
+			txs.iter().any(|tx| tx.input.iter().any(|input| input.previous_output == *outpoint))
 		})
 	}
 
@@ -1027,7 +1025,8 @@ pub fn do_test<Out: Output + MaybeSend + MaybeSync>(data: &[u8], out: Out) {
 			}
 			let network = Network::Bitcoin;
 			let best_block_timestamp = genesis_block(network).header.time;
-			let params = ChainParameters { network, best_block: BlockLocator::from_network(network) };
+			let params =
+				ChainParameters { network, best_block: BlockLocator::from_network(network) };
 			(
 				ChannelManager::new(
 					$fee_estimator.clone(),
@@ -1142,8 +1141,8 @@ pub fn do_test<Out: Output + MaybeSend + MaybeSync>(data: &[u8], out: Out) {
 			channel_monitors: monitor_refs,
 		};
 
-		let manager =
-			<(BlockLocator, ChanMan)>::read(&mut &ser[..], read_args).expect("Failed to read manager");
+		let manager = <(BlockLocator, ChanMan)>::read(&mut &ser[..], read_args)
+			.expect("Failed to read manager");
 		let res = (manager.1, chain_monitor.clone());
 		for (channel_id, mon) in monitors.drain() {
 			assert_eq!(
@@ -2106,7 +2105,8 @@ pub fn do_test<Out: Output + MaybeSend + MaybeSync>(data: &[u8], out: Out) {
 						},
 						events::Event::SpliceFailed { .. } => {},
 						events::Event::DiscardFunding {
-							funding_info: events::FundingInfo::Contribution { .. }
+							funding_info:
+								events::FundingInfo::Contribution { .. }
 								| events::FundingInfo::Tx { .. },
 							..
 						} => {},
