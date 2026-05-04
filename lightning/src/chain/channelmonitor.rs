@@ -496,8 +496,7 @@ impl OnchainEventEntry {
 				// means we can hand it upstream when we see the previous block.
 				conf_threshold = cmp::max(conf_threshold, self.height + descriptor.to_self_delay as u32 - 1);
 			},
-			OnchainEvent::FundingSpendConfirmation { on_local_output_csv: Some(csv), .. } |
-			OnchainEvent::HTLCSpendConfirmation { on_to_local_output_csv: Some(csv), .. } => {
+			OnchainEvent::FundingSpendConfirmation { on_local_output_csv: Some(csv), .. } => {
 				// A CSV-delayed output is spendable in block (input height) + CSV delay, which
 				// means we can act on the event when we see the previous block.
 				conf_threshold = cmp::max(conf_threshold, self.height + csv as u32 - 1);
@@ -567,8 +566,9 @@ enum OnchainEvent {
 		/// If the claim was made by either party with a preimage, this is filled in
 		preimage: Option<PaymentPreimage>,
 		/// If the claim was made by us on an inbound HTLC against a local commitment transaction,
-		/// this records the CSV delay for the delayed output. While present, the event reaches
-		/// its threshold once the output is spendable.
+		/// this records the CSV delay for the delayed output. The CSV-mature output remains
+		/// tracked via the corresponding [`OnchainEvent::MaturingOutput`]; the HTLC spend itself
+		/// reaches anti-reorg finality.
 		on_to_local_output_csv: Option<u16>,
 	},
 	/// An alternative funding transaction (due to a splice/RBF) has confirmed but can no longer be
@@ -1346,9 +1346,10 @@ pub(crate) struct ChannelMonitorImpl<Signer: EcdsaChannelSigner> {
 	funding_spend_confirmed: Option<Txid>,
 
 	confirmed_commitment_tx_counterparty_output: CommitmentTxCounterpartyOutputInfo,
-	/// The set of HTLCs which have been either claimed or failed on chain and have reached
-	/// the requisite confirmations on the claim/fail transaction (either ANTI_REORG_DELAY or the
-	/// spending CSV for revocable outputs).
+	/// The set of HTLCs whose on-chain claim or fail outcome is irrevocably resolved because the
+	/// commitment transaction HTLC output spend has reached anti-reorg finality. Any resulting
+	/// output that is still waiting on CSV maturity is tracked separately as an
+	/// [`OnchainEvent::MaturingOutput`].
 	htlcs_resolved_on_chain: Vec<IrrevocablyResolvedHTLC>,
 
 	/// When a payment is resolved through an on-chain transaction, we tell the `ChannelManager`
@@ -5726,9 +5727,9 @@ impl<Signer: EcdsaChannelSigner> ChannelMonitorImpl<Signer> {
 						break;
 					}
 				}
-				self.is_resolving_htlc_output(&tx, height, &block_hash, logger);
-
 				self.check_tx_and_push_spendable_outputs(&tx, height, &block_hash, logger);
+
+				self.is_resolving_htlc_output(&tx, height, &block_hash, logger);
 			}
 		}
 
@@ -6206,6 +6207,7 @@ impl<Signer: EcdsaChannelSigner> ChannelMonitorImpl<Signer> {
 		&mut self, tx: &Transaction, height: u32, block_hash: &BlockHash, logger: &WithContext<L>,
 	) {
 		let funding_spent = get_confirmed_funding_scope!(self);
+		let txid = tx.compute_txid();
 
 		'outer_loop: for input in &tx.input {
 			let mut payment_data = None;
@@ -6292,18 +6294,34 @@ impl<Signer: EcdsaChannelSigner> ChannelMonitorImpl<Signer> {
 							if payment_data.is_none() {
 								log_claim!($tx_info, $holder_tx, htlc_output, false);
 								let outbound_htlc = $holder_tx == htlc_output.offered;
+								let on_to_local_output_csv = if accepted_preimage_claim && !outbound_htlc {
+									Some(self.on_holder_tx_csv) } else { None };
+								#[cfg(debug_assertions)]
+								if let Some(csv) = on_to_local_output_csv {
+									// The delayed output created by the HTLC spend sits at the same
+									// index as the input spending the commitment HTLC output. This
+									// holds pre-anchors, where the spend has a single input and
+									// output, as well as post-anchors, where the counterparty
+									// signature commits to the pairing via
+									// SIGHASH_SINGLE | ANYONECANPAY.
+									let input_idx = tx.input.iter()
+										.position(|inp| inp.previous_output == input.previous_output)
+										.expect("input is one of tx.input") as u16;
+									debug_assert!(
+										self.has_delayed_maturing_output_for_tx(txid, input_idx, csv),
+										"CSV-delayed HTLC spend confirmation should have a matching MaturingOutput"
+									);
+								}
 								self.onchain_events_awaiting_threshold_conf.push(OnchainEventEntry {
-									txid: tx.compute_txid(), height, block_hash: Some(*block_hash), transaction: Some(tx.clone()),
+									txid, height, block_hash: Some(*block_hash), transaction: Some(tx.clone()),
 									event: OnchainEvent::HTLCSpendConfirmation {
 										commitment_tx_output_idx: input.previous_output.vout,
 										preimage: if accepted_preimage_claim || offered_preimage_claim {
 											Some(payment_preimage) } else { None },
-										// If this is a payment to us (ie !outbound_htlc), wait for
-										// the CSV delay before dropping the HTLC from claimable
-										// balance if the claim was an HTLC-Success transaction (ie
-										// accepted_preimage_claim).
-										on_to_local_output_csv: if accepted_preimage_claim && !outbound_htlc {
-											Some(self.on_holder_tx_csv) } else { None },
+										// If this is a payment to us (ie !outbound_htlc), keep a
+										// record of the CSV delay. The delayed output is tracked
+										// separately as a MaturingOutput until it is spendable.
+										on_to_local_output_csv,
 									},
 								});
 								continue 'outer_loop;
@@ -6454,6 +6472,21 @@ impl<Signer: EcdsaChannelSigner> ChannelMonitorImpl<Signer> {
 			}
 		}
 		spendable_outputs
+	}
+
+	#[cfg(debug_assertions)]
+	fn has_delayed_maturing_output_for_tx(&self, txid: Txid, output_index: u16, csv: u16) -> bool {
+		self.onchain_events_awaiting_threshold_conf.iter().any(|entry| {
+			entry.txid == txid
+				&& match &entry.event {
+					OnchainEvent::MaturingOutput {
+						descriptor: SpendableOutputDescriptor::DelayedPaymentOutput(descriptor),
+					} => {
+						descriptor.outpoint.index == output_index && descriptor.to_self_delay == csv
+					},
+					_ => false,
+				}
+		})
 	}
 
 	/// Checks if the confirmed transaction is paying funds back to some address we can assume to
