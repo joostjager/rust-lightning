@@ -1212,12 +1212,31 @@ impl<'a> HarnessNode<'a> {
 		};
 
 		while self.height < target_height {
-			self.height += 1;
+			let mut next_height = self.height + 1;
+			while next_height <= target_height && chain_state.block_at(next_height).1.is_empty() {
+				next_height += 1;
+			}
+			if next_height > target_height {
+				self.height = target_height;
+				let (header, _) = chain_state.block_at(self.height);
+				self.monitor.best_block_updated(header, self.height);
+				self.node.best_block_updated(header, self.height);
+				break;
+			}
+			if next_height > self.height + 1 {
+				self.height = next_height - 1;
+				let (header, _) = chain_state.block_at(self.height);
+				self.monitor.best_block_updated(header, self.height);
+				self.node.best_block_updated(header, self.height);
+			}
+			self.height = next_height;
 			let (header, txn) = chain_state.block_at(self.height);
 			let txdata: Vec<_> = txn.iter().enumerate().map(|(i, tx)| (i + 1, tx)).collect();
 			if !txdata.is_empty() {
+				self.monitor.transactions_confirmed(header, &txdata, self.height);
 				self.node.transactions_confirmed(header, &txdata, self.height);
 			}
+			self.monitor.best_block_updated(header, self.height);
 			self.node.best_block_updated(header, self.height);
 		}
 	}
