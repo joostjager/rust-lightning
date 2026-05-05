@@ -27,6 +27,7 @@ use bitcoin::script::{Builder, ScriptBuf};
 use bitcoin::transaction::Version;
 use bitcoin::transaction::{Transaction, TxOut};
 use bitcoin::FeeRate;
+use bitcoin::OutPoint as BitcoinOutPoint;
 
 use bitcoin::block::Header;
 use bitcoin::hash_types::Txid;
@@ -187,6 +188,11 @@ struct ChainState {
 	/// Unconfirmed transactions (e.g., splice txs). Conflicting RBF candidates may coexist;
 	/// `confirm_pending_txs` determines which one confirms.
 	pending_txs: Vec<(Txid, Transaction)>,
+	/// Tracks unspent outputs created by confirmed transactions. Only
+	/// transactions that spend existing UTXOs can be confirmed, which
+	/// prevents fuzz hash collisions from creating phantom spends of
+	/// outputs that were never actually created.
+	utxos: HashSet<BitcoinOutPoint>,
 }
 
 impl ChainState {
@@ -197,6 +203,7 @@ impl ChainState {
 			blocks: vec![(genesis_header, Vec::new())],
 			confirmed_txids: HashSet::new(),
 			pending_txs: Vec::new(),
+			utxos: HashSet::new(),
 		}
 	}
 
@@ -204,21 +211,57 @@ impl ChainState {
 		(self.blocks.len() - 1) as u32
 	}
 
-	fn is_outpoint_spent(&self, outpoint: &bitcoin::OutPoint) -> bool {
-		self.blocks.iter().any(|(_, txs)| {
-			txs.iter().any(|tx| tx.input.iter().any(|input| input.previous_output == *outpoint))
-		})
+	fn can_confirm_tx(
+		&self, tx: &Transaction, txid: Txid, utxos: &HashSet<BitcoinOutPoint>,
+	) -> bool {
+		if self.confirmed_txids.contains(&txid) {
+			return false;
+		}
+		// Reject timelocked transactions before their lock_time, matching
+		// consensus rules. Commitment txs encode an obscured commitment
+		// number with bit 29 set, which is not a real timelock.
+		let lock_time = tx.lock_time.to_consensus_u32();
+		if lock_time > 0
+			&& lock_time < 500_000_000
+			&& lock_time & (1 << 29) == 0
+			&& self.tip_height() < lock_time
+		{
+			return false;
+		}
+		// Validate that all inputs spend existing, unspent outputs. This
+		// rejects both double-spends and spends of outputs that were never
+		// created (e.g. due to fuzz txid hash collisions where a different
+		// transaction was confirmed under the same txid).
+		let is_coinbase = tx.is_coinbase();
+		if !is_coinbase {
+			for input in &tx.input {
+				if !utxos.contains(&input.previous_output) {
+					return false;
+				}
+			}
+		}
+		true
+	}
+
+	fn apply_tx_to_utxos(txid: Txid, tx: &Transaction, utxos: &mut HashSet<BitcoinOutPoint>) {
+		let is_coinbase = tx.is_coinbase();
+		if !is_coinbase {
+			for input in &tx.input {
+				utxos.remove(&input.previous_output);
+			}
+		}
+		for idx in 0..tx.output.len() {
+			utxos.insert(BitcoinOutPoint { txid, vout: idx as u32 });
+		}
 	}
 
 	fn confirm_tx(&mut self, tx: Transaction) -> bool {
 		let txid = tx.compute_txid();
-		if self.confirmed_txids.contains(&txid) {
-			return false;
-		}
-		if tx.input.iter().any(|input| self.is_outpoint_spent(&input.previous_output)) {
+		if !self.can_confirm_tx(&tx, txid, &self.utxos) {
 			return false;
 		}
 		self.confirmed_txids.insert(txid);
+		Self::apply_tx_to_utxos(txid, &tx, &mut self.utxos);
 
 		let prev_hash = self.blocks.last().unwrap().0.block_hash();
 		let header = create_dummy_header(prev_hash, 42);
@@ -246,21 +289,13 @@ impl ChainState {
 		txs.sort_by_key(|(txid, _)| *txid);
 
 		let mut confirmed = Vec::new();
-		let mut spent_outpoints = Vec::new();
+		let mut next_utxos = self.utxos.clone();
 		for (txid, tx) in txs {
-			if self.confirmed_txids.contains(&txid) {
-				continue;
-			}
-			if tx.input.iter().any(|input| {
-				self.is_outpoint_spent(&input.previous_output)
-					|| spent_outpoints.contains(&input.previous_output)
-			}) {
+			if !self.can_confirm_tx(&tx, txid, &next_utxos) {
 				continue;
 			}
 			self.confirmed_txids.insert(txid);
-			for input in &tx.input {
-				spent_outpoints.push(input.previous_output);
-			}
+			Self::apply_tx_to_utxos(txid, &tx, &mut next_utxos);
 			confirmed.push(tx);
 		}
 
@@ -271,6 +306,7 @@ impl ChainState {
 		let prev_hash = self.blocks.last().unwrap().0.block_hash();
 		let header = create_dummy_header(prev_hash, 42);
 		self.blocks.push((header, confirmed));
+		self.utxos = next_utxos;
 
 		for _ in 0..5 {
 			let prev_hash = self.blocks.last().unwrap().0.block_hash();
