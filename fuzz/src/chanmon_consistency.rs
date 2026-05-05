@@ -2091,20 +2091,24 @@ impl<'a, 'd, Out: Output + MaybeSend + MaybeSync> Harness<'a, 'd, Out> {
 		let wallet_b = TestWalletSource::new(SecretKey::from_slice(&[2; 32]).unwrap());
 		let wallet_c = TestWalletSource::new(SecretKey::from_slice(&[3; 32]).unwrap());
 		let wallets = [&wallet_a, &wallet_b, &wallet_c];
-		let coinbase_tx = bitcoin::Transaction {
-			version: bitcoin::transaction::Version::TWO,
-			lock_time: bitcoin::absolute::LockTime::ZERO,
-			input: vec![bitcoin::TxIn { ..Default::default() }],
-			output: wallets
-				.iter()
-				.map(|wallet| TxOut {
-					value: Amount::from_sat(100_000),
-					script_pubkey: wallet.get_change_script().unwrap(),
-				})
-				.collect(),
-		};
+		let mut chain_state = ChainState::new();
+		let num_wallet_utxos = 50;
 		for (idx, wallet) in wallets.iter().enumerate() {
-			wallet.add_utxo(coinbase_tx.clone(), idx as u32);
+			let coinbase_tx = bitcoin::Transaction {
+				version: bitcoin::transaction::Version(idx as i32 + 100),
+				lock_time: bitcoin::absolute::LockTime::ZERO,
+				input: vec![bitcoin::TxIn { ..Default::default() }],
+				output: (0..num_wallet_utxos)
+					.map(|_| TxOut {
+						value: Amount::from_sat(100_000),
+						script_pubkey: wallet.get_change_script().unwrap(),
+					})
+					.collect(),
+			};
+			for vout in 0..num_wallet_utxos {
+				wallet.add_utxo(coinbase_tx.clone(), vout);
+			}
+			chain_state.confirm_tx(coinbase_tx);
 		}
 
 		let fee_est_a = Arc::new(FuzzEstimator { ret_val: atomic::AtomicU32::new(253) });
@@ -2149,8 +2153,6 @@ impl<'a, 'd, Out: Output + MaybeSend + MaybeSync> Harness<'a, 'd, Out> {
 			),
 		];
 
-		let mut chain_state = ChainState::new();
-
 		// Connect peers first, then create channels.
 		connect_peers(&nodes[0].node, &nodes[1].node);
 		connect_peers(&nodes[1].node, &nodes[2].node);
@@ -2170,16 +2172,12 @@ impl<'a, 'd, Out: Output + MaybeSend + MaybeSync> Harness<'a, 'd, Out> {
 		make_channel(&nodes[1], &nodes[2], 5, true, false, &mut chain_state);
 		make_channel(&nodes[1], &nodes[2], 6, false, false, &mut chain_state);
 
-		// Wipe the transactions-broadcasted set to make sure we don't broadcast
-		// any transactions during normal operation after setup.
-		nodes[0].broadcaster.txn_broadcasted.borrow_mut().clear();
-		nodes[1].broadcaster.txn_broadcasted.borrow_mut().clear();
-		nodes[2].broadcaster.txn_broadcasted.borrow_mut().clear();
-
-		// Sync all nodes to tip to lock the funding.
-		nodes[0].sync_with_chain_state(&chain_state, None);
-		nodes[1].sync_with_chain_state(&chain_state, None);
-		nodes[2].sync_with_chain_state(&chain_state, None);
+		for node in &nodes {
+			node.broadcaster.txn_broadcasted.borrow_mut().clear();
+		}
+		for node in &mut nodes {
+			node.sync_with_chain_state(&chain_state, None);
+		}
 
 		lock_fundings(&nodes);
 
