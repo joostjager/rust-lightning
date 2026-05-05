@@ -932,6 +932,251 @@ fn test_partial_claim_before_restart() {
 	do_test_partial_claim_before_restart(true, true);
 }
 
+#[test]
+fn test_mpp_claim_htlc_fulfills_unblocked_on_reload() {
+	let chanmon_cfgs = create_chanmon_cfgs(2);
+	let node_cfgs = create_node_cfgs(2, &chanmon_cfgs);
+	let persister;
+	let new_chain_monitor;
+	let node_chanmgrs = create_node_chanmgrs(2, &node_cfgs, &[None, None]);
+	let nodes_1_deserialized;
+	let mut nodes = create_network(2, &node_cfgs, &node_chanmgrs);
+
+	// Open two independent channels between the same nodes. The payment below is large enough to
+	// force the router to split it across both channels, which is what makes the MPP claim depend
+	// on both ChannelMonitors durably learning the preimage.
+	let chan_a = create_announced_chan_between_nodes_with_value(&nodes, 0, 1, 100_000, 0);
+	let chan_b = create_announced_chan_between_nodes_with_value(&nodes, 0, 1, 100_000, 0);
+	let chan_id_a = chan_a.2;
+	let chan_id_b = chan_b.2;
+	let scid_a = chan_a.0.contents.short_channel_id;
+	let scid_b = chan_b.0.contents.short_channel_id;
+
+	// Send an MPP payment to nodes[1]. `send_along_route_with_secret` leaves the payment
+	// claimable but unclaimed, so nodes[1] still has both inbound HTLCs live when we start
+	// manipulating monitor persistence below.
+	let amt_msat = 15_000_000;
+	let (route, payment_hash, payment_preimage, payment_secret) =
+		get_route_and_payment_hash!(nodes[0], nodes[1], amt_msat);
+	assert_eq!(route.paths.len(), 2);
+	send_along_route_with_secret(
+		&nodes[0], route, &[&[&nodes[1]], &[&nodes[1]]], amt_msat, payment_hash,
+		payment_secret,
+	);
+
+	// Move both channels into `AWAITING_REMOTE_REVOKE` by having nodes[0] send fee updates and
+	// withholding nodes[1]'s responding `commitment_signed`s. When nodes[1] later claims the
+	// payment, the fulfill updates cannot be sent immediately and instead sit in each channel's
+	// holding cell.
+	{
+		let mut fee_est = chanmon_cfgs[0].fee_estimator.sat_per_kw.lock().unwrap();
+		*fee_est *= 2;
+	}
+	nodes[0].node.timer_tick_occurred();
+	check_added_monitors(&nodes[0], 2);
+
+	let node_0_id = nodes[0].node.get_our_node_id();
+	let node_1_id = nodes[1].node.get_our_node_id();
+
+	let fee_msgs = nodes[0].node.get_and_clear_pending_msg_events();
+	assert_eq!(fee_msgs.len(), 2);
+	for ev in &fee_msgs {
+		match ev {
+			MessageSendEvent::UpdateHTLCs { updates, .. } => {
+				nodes[1].node.handle_update_fee(node_0_id, updates.update_fee.as_ref().unwrap());
+				nodes[1].node.handle_commitment_signed_batch_test(
+					node_0_id, &updates.commitment_signed,
+				);
+				check_added_monitors(&nodes[1], 1);
+			},
+			_ => panic!("Unexpected message: {:?}", ev),
+		}
+	}
+
+	// nodes[1] responds to each fee update with a `revoke_and_ack` and a new
+	// `commitment_signed`. Deliver only the `revoke_and_ack`s for now. The held
+	// `commitment_signed`s are delivered after nodes[1] claims the payment, creating the blocked
+	// post-claim monitor updates whose release is exercised after reload.
+	let node_1_msgs = nodes[1].node.get_and_clear_pending_msg_events();
+	let mut commitment_signed_msgs = Vec::new();
+	for ev in &node_1_msgs {
+		match ev {
+			MessageSendEvent::SendRevokeAndACK { msg, .. } => {
+				nodes[0].node.handle_revoke_and_ack(node_1_id, msg);
+				check_added_monitors(&nodes[0], 1);
+			},
+			MessageSendEvent::UpdateHTLCs { updates, .. } => {
+				commitment_signed_msgs.push(updates.commitment_signed.clone());
+			},
+			_ => panic!("Unexpected message: {:?}", ev),
+		}
+	}
+
+	let node_0_msgs = nodes[0].node.get_and_clear_pending_msg_events();
+	for ev in &node_0_msgs {
+		match ev {
+			MessageSendEvent::SendRevokeAndACK { msg, .. } => {
+				nodes[1].node.handle_revoke_and_ack(node_0_id, msg);
+				check_added_monitors(&nodes[1], 1);
+			},
+			_ => panic!("Unexpected message: {:?}", ev),
+		}
+	}
+
+	// Snapshot channel B before the claim. The in-memory ChainMonitor applies updates even when
+	// the persister returns `InProgress`, so taking this snapshot after the claim would not model a
+	// crash between two separate monitor writes.
+	let mon_b_serialized = get_monitor!(nodes[1], chan_id_b).encode();
+
+	// Make both preimage monitor writes asynchronous. `claim_funds` attaches an in-memory MPP RAA
+	// blocker so neither channel can release later monitor updates until all channels have the
+	// preimage durably persisted.
+	chanmon_cfgs[1].persister.set_update_ret(ChannelMonitorUpdateStatus::InProgress);
+	chanmon_cfgs[1].persister.set_update_ret(ChannelMonitorUpdateStatus::InProgress);
+	nodes[1].node.claim_funds(payment_preimage);
+	check_added_monitors(&nodes[1], 2);
+
+	// Complete only channel A's preimage update. Channel B will be reloaded from the stale snapshot
+	// above, simulating a crash where one monitor write completed and the other did not.
+	let (update_id_a, _) = get_latest_mon_update_id(&nodes[1], chan_id_a);
+	nodes[1].chain_monitor.chain_monitor.force_channel_monitor_updated(chan_id_a, update_id_a);
+
+	// Now finish the fee-update commitment dance we held back. nodes[1] receives nodes[0]'s
+	// `revoke_and_ack`s while the MPP RAA blocker is still in place, so the resulting monitor
+	// updates are blocked behind state that is not serialized in the ChannelManager.
+	for commitment_signed in &commitment_signed_msgs {
+		nodes[0].node.handle_commitment_signed_batch_test(node_1_id, commitment_signed);
+		check_added_monitors(&nodes[0], 1);
+	}
+	let node_0_msgs = nodes[0].node.get_and_clear_pending_msg_events();
+	for ev in &node_0_msgs {
+		match ev {
+			MessageSendEvent::SendRevokeAndACK { msg, .. } => {
+				nodes[1].node.handle_revoke_and_ack(node_0_id, msg);
+				check_added_monitors(&nodes[1], 0);
+			},
+			_ => panic!("Unexpected message: {:?}", ev),
+		}
+	}
+
+	// Persist the ChannelManager after the blocked post-claim monitor updates have been recorded.
+	// Reload with channel A's up-to-date monitor and channel B's stale monitor. The preimage update
+	// for B is replayed during reload, putting both channels' preimages on disk. The remaining state
+	// under test is the blocked post-claim `revoke_and_ack` monitor updates after the in-memory MPP
+	// RAA blocker that created them is gone.
+	let node_1_serialized = nodes[1].node.encode();
+	let mon_a_serialized = get_monitor!(nodes[1], chan_id_a).encode();
+
+	nodes[0].node.peer_disconnected(node_1_id);
+	reload_node!(
+		nodes[1],
+		node_1_serialized,
+		&[&mon_a_serialized, &mon_b_serialized],
+		persister,
+		new_chain_monitor,
+		nodes_1_deserialized
+	);
+
+	// Reconnect both peers by manually exchanging `channel_reestablish`s. This avoids relying on a
+	// more general reconnect helper while the channels intentionally have asymmetric monitor state.
+	let node_1_id = nodes[1].node.get_our_node_id();
+	nodes[0].node.peer_connected(node_1_id, &msgs::Init {
+		features: nodes[1].node.init_features(), networks: None, remote_network_address: None,
+	}, true).unwrap();
+	nodes[1].node.peer_connected(node_0_id, &msgs::Init {
+		features: nodes[0].node.init_features(), networks: None, remote_network_address: None,
+	}, false).unwrap();
+
+	let reestablish_0 = nodes[0].node.get_and_clear_pending_msg_events();
+	let reestablish_1 = nodes[1].node.get_and_clear_pending_msg_events();
+	let mut reestablish_0_chan_ids = Vec::new();
+	let mut reestablish_1_chan_ids = Vec::new();
+	for ev in &reestablish_1 {
+		match ev {
+			MessageSendEvent::SendChannelReestablish { node_id, msg } => {
+				assert_eq!(*node_id, node_0_id);
+				reestablish_1_chan_ids.push(msg.channel_id);
+				nodes[0].node.handle_channel_reestablish(node_1_id, msg);
+			},
+			_ => panic!("Unexpected message: {:?}", ev),
+		}
+	}
+	for ev in &reestablish_0 {
+		match ev {
+			MessageSendEvent::SendChannelReestablish { node_id, msg } => {
+				assert_eq!(*node_id, node_1_id);
+				reestablish_0_chan_ids.push(msg.channel_id);
+				nodes[1].node.handle_channel_reestablish(node_0_id, msg);
+			},
+			_ => panic!("Unexpected message: {:?}", ev),
+		}
+	}
+	assert_eq!(reestablish_0_chan_ids.len(), 2);
+	assert!(reestablish_0_chan_ids.contains(&chan_id_a));
+	assert!(reestablish_0_chan_ids.contains(&chan_id_b));
+	assert_eq!(reestablish_1_chan_ids.len(), 2);
+	assert!(reestablish_1_chan_ids.contains(&chan_id_a));
+	assert!(reestablish_1_chan_ids.contains(&chan_id_b));
+	// Only nodes[1] was reloaded with stale monitor state. nodes[0] responds to the
+	// `channel_reestablish`s without touching its monitors, while nodes[1] applies the replayed
+	// preimage update for channel B.
+	check_added_monitors(&nodes[0], 0);
+	check_added_monitors(&nodes[1], 1);
+
+	// Reconnect generates only channel-update messages at this point. The HTLC fulfills remain stuck
+	// behind the blocked monitor updates that were deserialized from the ChannelManager, so we
+	// explicitly assert that no `UpdateHTLCs` message is sent here.
+	let restart_msgs_0 = nodes[0].node.get_and_clear_pending_msg_events();
+	let restart_msgs_1 = nodes[1].node.get_and_clear_pending_msg_events();
+	let mut restart_scids_0 = Vec::new();
+	let mut restart_scids_1 = Vec::new();
+	for ev in &restart_msgs_0 {
+		match ev {
+			MessageSendEvent::SendChannelUpdate { node_id, msg } => {
+				assert_eq!(*node_id, node_1_id);
+				restart_scids_0.push(msg.contents.short_channel_id);
+			},
+			_ => panic!("Unexpected restart message from node 0: {:?}", ev),
+		}
+	}
+	for ev in &restart_msgs_1 {
+		match ev {
+			MessageSendEvent::SendChannelUpdate { node_id, msg } => {
+				assert_eq!(*node_id, node_0_id);
+				restart_scids_1.push(msg.contents.short_channel_id);
+			},
+			_ => panic!("Unexpected restart message from node 1: {:?}", ev),
+		}
+	}
+	assert_eq!(restart_scids_0.len(), 2);
+	assert!(restart_scids_0.contains(&scid_a));
+	assert!(restart_scids_0.contains(&scid_b));
+	assert_eq!(restart_scids_1.len(), 2);
+	assert!(restart_scids_1.contains(&scid_a));
+	assert!(restart_scids_1.contains(&scid_b));
+	assert!(nodes[0].node.get_and_clear_pending_msg_events().is_empty());
+	assert!(nodes[1].node.get_and_clear_pending_msg_events().is_empty());
+	check_added_monitors(&nodes[0], 0);
+	check_added_monitors(&nodes[1], 0);
+
+	// This first, test-only commit documents the bug by asserting that a sender channel still has a
+	// pending outbound HTLC after reconnect. The fix commit flips this assertion to require that
+	// the stuck fulfill has been released.
+	let pending: Vec<_> = nodes[0].node.list_channels().iter()
+		.filter(|channel| channel.channel_id == chan_id_a || channel.channel_id == chan_id_b)
+		.filter(|channel| !channel.pending_outbound_htlcs.is_empty())
+		.map(|channel| channel.channel_id)
+		.collect();
+	assert!(!pending.is_empty(), "Expected at least one stuck HTLC fulfill");
+
+	// Leave the queued user events alone in this bug-demonstration commit. Completing the
+	// `PaymentClaimed` event would release additional monitor updates and move the test away from
+	// the reload state it is documenting, while `Node`'s `Drop` implementation expects tests to
+	// drain every pending event. The fix commit changes the expected channel state and can then
+	// retire this early exit.
+	std::mem::forget(nodes);
+}
+
 fn do_forwarded_payment_no_manager_persistence(use_cs_commitment: bool, claim_htlc: bool, use_intercept: bool) {
 	if !use_cs_commitment { assert!(!claim_htlc); }
 	// If we go to forward a payment, and the ChannelMonitor persistence completes, but the
