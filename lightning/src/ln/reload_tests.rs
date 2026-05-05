@@ -1118,18 +1118,19 @@ fn test_mpp_claim_htlc_fulfills_unblocked_on_reload() {
 	assert!(reestablish_1_chan_ids.contains(&chan_id_a));
 	assert!(reestablish_1_chan_ids.contains(&chan_id_b));
 	// Only nodes[1] was reloaded with stale monitor state. nodes[0] responds to the
-	// `channel_reestablish`s without touching its monitors, while nodes[1] applies the replayed
-	// preimage update for channel B.
+	// `channel_reestablish`s without touching its monitors. nodes[1] applies the replayed channel B
+	// preimage update, releases channel A's held RAA update, and frees channel A's held fulfill
+	// during startup processing.
 	check_added_monitors(&nodes[0], 0);
-	check_added_monitors(&nodes[1], 1);
+	check_added_monitors(&nodes[1], 3);
 
-	// Reconnect generates only channel-update messages at this point. The HTLC fulfills remain stuck
-	// behind the blocked monitor updates that were deserialized from the ChannelManager, so we
-	// explicitly assert that no `UpdateHTLCs` message is sent here.
+	// The first message batch after reconnect contains channel updates from both nodes. nodes[1]
+	// also sends the channel A fulfill that startup processing released from the holding cell.
 	let restart_msgs_0 = nodes[0].node.get_and_clear_pending_msg_events();
 	let restart_msgs_1 = nodes[1].node.get_and_clear_pending_msg_events();
 	let mut restart_scids_0 = Vec::new();
 	let mut restart_scids_1 = Vec::new();
+	let mut startup_fulfill_chan_ids = Vec::new();
 	for ev in &restart_msgs_0 {
 		match ev {
 			MessageSendEvent::SendChannelUpdate { node_id, msg } => {
@@ -1145,6 +1146,24 @@ fn test_mpp_claim_htlc_fulfills_unblocked_on_reload() {
 				assert_eq!(*node_id, node_0_id);
 				restart_scids_1.push(msg.contents.short_channel_id);
 			},
+			MessageSendEvent::UpdateHTLCs { node_id, channel_id, updates } => {
+				assert_eq!(*node_id, node_0_id);
+				startup_fulfill_chan_ids.push(*channel_id);
+				assert_eq!(updates.update_fulfill_htlcs.len(), 1);
+				assert!(updates.update_add_htlcs.is_empty());
+				assert!(updates.update_fail_htlcs.is_empty());
+				assert!(updates.update_fail_malformed_htlcs.is_empty());
+				assert!(updates.update_fee.is_none());
+				for fulfill in &updates.update_fulfill_htlcs {
+					nodes[0].node.handle_update_fulfill_htlc(node_1_id, fulfill.clone());
+				}
+				// Complete the standard commitment handshake for the released fulfill. The helper
+				// checks nodes[0]'s incoming commitment monitor update, nodes[1]'s response monitor
+				// updates, and nodes[0]'s held final monitor update.
+				do_commitment_signed_dance(
+					&nodes[0], &nodes[1], &updates.commitment_signed, false, false,
+				);
+			},
 			_ => panic!("Unexpected restart message from node 1: {:?}", ev),
 		}
 	}
@@ -1154,27 +1173,115 @@ fn test_mpp_claim_htlc_fulfills_unblocked_on_reload() {
 	assert_eq!(restart_scids_1.len(), 2);
 	assert!(restart_scids_1.contains(&scid_a));
 	assert!(restart_scids_1.contains(&scid_b));
+	assert_eq!(startup_fulfill_chan_ids, vec![chan_id_a]);
 	assert!(nodes[0].node.get_and_clear_pending_msg_events().is_empty());
 	assert!(nodes[1].node.get_and_clear_pending_msg_events().is_empty());
 	check_added_monitors(&nodes[0], 0);
 	check_added_monitors(&nodes[1], 0);
 
-	// This first, test-only commit documents the bug by asserting that a sender channel still has a
-	// pending outbound HTLC after reconnect. The fix commit flips this assertion to require that
-	// the stuck fulfill has been released.
+	// Receiving the startup-released fulfill gives nodes[0] the payment preimage. That is enough to
+	// emit `PaymentSent`, even though channel B's path-level success still needs its own fulfill.
+	let startup_payment_events = nodes[0].node.get_and_clear_pending_events();
+	assert_eq!(startup_payment_events.len(), 2);
+	let mut saw_startup_payment_sent = false;
+	let mut startup_success_scids = Vec::new();
+	for ev in &startup_payment_events {
+		match ev {
+			Event::PaymentSent {
+				payment_preimage: sent_preimage,
+				payment_hash: sent_hash,
+				amount_msat: sent_amount,
+				fee_paid_msat,
+				..
+			} => {
+				assert_eq!(*sent_preimage, payment_preimage);
+				assert_eq!(*sent_hash, payment_hash);
+				assert_eq!(*sent_amount, Some(amt_msat));
+				assert_eq!(*fee_paid_msat, Some(0));
+				saw_startup_payment_sent = true;
+			},
+			Event::PaymentPathSuccessful { payment_hash: Some(path_hash), path, .. } => {
+				assert_eq!(*path_hash, payment_hash);
+				assert_eq!(path.hops.len(), 1);
+				startup_success_scids.push(path.hops[0].short_channel_id);
+			},
+			_ => panic!("Unexpected startup payment event: {:?}", ev),
+		}
+	}
+	assert!(saw_startup_payment_sent);
+	assert_eq!(startup_success_scids, vec![scid_a]);
+
+	// Handling the claim event runs the event-completion action that releases the remaining
+	// RAA-blocked monitor update. The startup unblock path already released channel A, so channel B
+	// is the only fulfill that should be emitted here.
+	let claim_events = nodes[1].node.get_and_clear_pending_events();
+	assert_eq!(claim_events.len(), 1);
+	match &claim_events[0] {
+		Event::PaymentClaimed { payment_hash: claimed_hash, amount_msat, htlcs, .. } => {
+			assert_eq!(*claimed_hash, payment_hash);
+			assert_eq!(*amount_msat, amt_msat);
+			assert_eq!(htlcs.len(), 2);
+		},
+		_ => panic!("Unexpected event: {:?}", claim_events[0]),
+	}
+	// The `PaymentSent` event above releases the monitor update that nodes[0] held after the final
+	// channel A startup revocation.
+	check_added_monitors(&nodes[0], 1);
+	// Handling `PaymentClaimed` releases channel B's held revocation update and then the fulfill
+	// that was waiting behind it.
+	check_added_monitors(&nodes[1], 2);
+
+	// Channel A's fulfill was already sent during startup. The `PaymentClaimed` completion action
+	// now frees channel B's held fulfill, and no other HTLC update should be bundled with it.
+	let fulfill_msgs = nodes[1].node.get_and_clear_pending_msg_events();
+	assert_eq!(fulfill_msgs.len(), 1);
+	match &fulfill_msgs[0] {
+		MessageSendEvent::UpdateHTLCs { node_id, channel_id, updates } => {
+			assert_eq!(*node_id, node_0_id);
+			assert_eq!(*channel_id, chan_id_b);
+			assert_eq!(updates.update_fulfill_htlcs.len(), 1);
+			assert!(updates.update_add_htlcs.is_empty());
+			assert!(updates.update_fail_htlcs.is_empty());
+			assert!(updates.update_fail_malformed_htlcs.is_empty());
+			assert!(updates.update_fee.is_none());
+			for fulfill in &updates.update_fulfill_htlcs {
+				nodes[0].node.handle_update_fulfill_htlc(node_1_id, fulfill.clone());
+			}
+			// Complete the same commitment handshake for channel B. Here nodes[0]'s final monitor
+			// update is persisted immediately because `PaymentSent` already ran for channel A.
+			do_commitment_signed_dance(
+				&nodes[0], &nodes[1], &updates.commitment_signed, false, false,
+			);
+		},
+		_ => panic!("Unexpected fulfill message: {:?}", fulfill_msgs[0]),
+	}
+	check_added_monitors(&nodes[1], 0);
+	assert!(nodes[0].node.get_and_clear_pending_msg_events().is_empty());
+	assert!(nodes[1].node.get_and_clear_pending_msg_events().is_empty());
+
+	let final_payment_events = nodes[0].node.get_and_clear_pending_events();
+	assert_eq!(final_payment_events.len(), 1);
+	match &final_payment_events[0] {
+		Event::PaymentPathSuccessful { payment_hash: Some(path_hash), path, .. } => {
+			assert_eq!(*path_hash, payment_hash);
+			assert_eq!(path.hops.len(), 1);
+			assert_eq!(path.hops[0].short_channel_id, scid_b);
+		},
+		_ => panic!("Unexpected final payment event: {:?}", final_payment_events[0]),
+	}
+	check_added_monitors(&nodes[0], 0);
+	assert!(nodes[1].node.get_and_clear_pending_events().is_empty());
+	check_added_monitors(&nodes[0], 0);
+	check_added_monitors(&nodes[1], 0);
+
+	// Both MPP parts should have been fulfilled back to nodes[0]. If either channel still has a
+	// pending outbound HTLC, its fulfill remained stuck in nodes[1]'s holding cell after reload.
 	let pending: Vec<_> = nodes[0].node.list_channels().iter()
 		.filter(|channel| channel.channel_id == chan_id_a || channel.channel_id == chan_id_b)
 		.filter(|channel| !channel.pending_outbound_htlcs.is_empty())
 		.map(|channel| channel.channel_id)
 		.collect();
-	assert!(!pending.is_empty(), "Expected at least one stuck HTLC fulfill");
-
-	// Leave the queued user events alone in this bug-demonstration commit. Completing the
-	// `PaymentClaimed` event would release additional monitor updates and move the test away from
-	// the reload state it is documenting, while `Node`'s `Drop` implementation expects tests to
-	// drain every pending event. The fix commit changes the expected channel state and can then
-	// retire this early exit.
-	std::mem::forget(nodes);
+	assert!(pending.is_empty(), "HTLC fulfills remained stuck on channels {:?}", pending);
 }
 
 fn do_forwarded_payment_no_manager_persistence(use_cs_commitment: bool, claim_htlc: bool, use_intercept: bool) {
