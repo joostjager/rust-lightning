@@ -9957,8 +9957,7 @@ impl<
 		ComplFunc: FnOnce(
 			Option<u64>,
 			bool,
-		)
-			-> (Option<MonitorUpdateCompletionAction>, Option<RAAMonitorUpdateBlockingAction>),
+		) -> (Option<MonitorUpdateCompletionAction>, Option<RAAMonitorUpdateBlockingAction>),
 	>(
 		&self, prev_hop: &HTLCPreviousHopData, payment_preimage: PaymentPreimage,
 		payment_info: Option<PaymentClaimDetails>, attribution_data: Option<AttributionData>,
@@ -9996,8 +9995,7 @@ impl<
 		ComplFunc: FnOnce(
 			Option<u64>,
 			bool,
-		)
-			-> (Option<MonitorUpdateCompletionAction>, Option<RAAMonitorUpdateBlockingAction>),
+		) -> (Option<MonitorUpdateCompletionAction>, Option<RAAMonitorUpdateBlockingAction>),
 	>(
 		&self, prev_hop: HTLCClaimSource, payment_preimage: PaymentPreimage,
 		payment_info: Option<PaymentClaimDetails>, attribution_data: Option<AttributionData>,
@@ -11360,10 +11358,13 @@ This indicates a bug inside LDK. Please report this error at https://github.com/
 		let peer_state = &mut *peer_state_lock;
 
 		let logger = WithContext::from(&self.logger, Some(*counterparty_node_id), Some(*channel_id), None);
+		let mut completed_in_flight_update = false;
 		let remaining_in_flight =
 			if let Some((_, pending)) = peer_state.in_flight_monitor_updates.get_mut(channel_id) {
 				if let Some(highest_applied_update_id) = highest_applied_update_id {
+					let previous_len = pending.len();
 					pending.retain(|upd| upd.update_id > highest_applied_update_id);
+					completed_in_flight_update = previous_len != pending.len();
 					log_trace!(
 						logger,
 						"ChannelMonitor updated to {highest_applied_update_id}. {} pending in-flight updates.",
@@ -11387,7 +11388,7 @@ This indicates a bug inside LDK. Please report this error at https://github.com/
 			} else { 0 };
 
 		if remaining_in_flight != 0 {
-			return false;
+			return completed_in_flight_update;
 		}
 
 		if let Some(chan) = peer_state.channel_by_id
@@ -11408,12 +11409,13 @@ This indicates a bug inside LDK. Please report this error at https://github.com/
 				mem::drop(peer_state_lock);
 				mem::drop(per_peer_state);
 
-				let needs_persist = self.handle_post_monitor_update_chan_resume(completion_data);
+				let needs_persist = completed_in_flight_update
+					|| self.handle_post_monitor_update_chan_resume(completion_data);
 				self.handle_holding_cell_free_result(holding_cell_res);
 				needs_persist
 			} else {
 				log_trace!(logger, "Channel is open but not awaiting update");
-				false
+				completed_in_flight_update
 			}
 		} else {
 			let update_actions = peer_state.monitor_update_blocked_actions
@@ -11425,7 +11427,7 @@ This indicates a bug inside LDK. Please report this error at https://github.com/
 				self.handle_monitor_update_completion_actions(update_actions);
 				true
 			} else {
-				false
+				completed_in_flight_update
 			}
 		}
 	}
@@ -16035,7 +16037,7 @@ impl<
 	/// will randomly be placed first or last in the returned array.
 	fn get_and_clear_pending_msg_events(&self) -> Vec<MessageSendEvent> {
 		let events = RefCell::new(Vec::new());
-		PersistenceNotifierGuard::optionally_notify_without_persistence_invariant(self, || {
+		PersistenceNotifierGuard::optionally_notify(self, || {
 			// This method is quite performance-sensitive. Not only is it called very often, but it
 			// *is* the critical path between generating a message for a peer and giving it to the
 			// `PeerManager` to send. Thus, we should avoid adding any more logic here than we
