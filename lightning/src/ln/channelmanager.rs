@@ -10819,12 +10819,11 @@ This indicates a bug inside LDK. Please report this error at https://github.com/
 				None
 			};
 
-			// Checked before handle_channel_resumption moves these fields to capture
-			// ChannelManager mutations performed while the peer lock is still held.
-			let has_state_changes = updates.funding_broadcastable.is_some()
-				|| updates.channel_ready.is_some()
-				|| updates.announcement_sigs.is_some()
-				|| !updates.pending_update_adds.is_empty();
+			let unbroadcasted_batch_funding_txid =
+				chan.context.unbroadcasted_batch_funding_txid(&chan.funding);
+			let mut needs_persist = updates.requires_channel_manager_persistence()
+				|| !update_actions.is_empty()
+				|| unbroadcasted_batch_funding_txid.is_some();
 
 			let (htlc_forwards, decode_update_add_htlcs) = self.handle_channel_resumption(
 				pending_msg_events,
@@ -10841,6 +10840,8 @@ This indicates a bug inside LDK. Please report this error at https://github.com/
 				None,
 				updates.channel_ready_order,
 			);
+			needs_persist |= !htlc_forwards.is_empty();
+
 			if let Some(upd) = channel_update {
 				pending_msg_events.push(upd);
 			}
@@ -10848,16 +10849,6 @@ This indicates a bug inside LDK. Please report this error at https://github.com/
 			if let Some(update_adds) = decode_update_add_htlcs {
 				self.push_decode_update_add_htlcs(update_adds);
 			}
-
-			let unbroadcasted_batch_funding_txid =
-				chan.context.unbroadcasted_batch_funding_txid(&chan.funding);
-			let needs_persist = has_state_changes
-				|| !update_actions.is_empty()
-				|| unbroadcasted_batch_funding_txid.is_some()
-				|| !htlc_forwards.is_empty()
-				|| !updates.finalized_claimed_htlcs.is_empty()
-				|| !updates.failed_htlcs.is_empty()
-				|| !updates.committed_outbound_htlc_sources.is_empty();
 
 			PostMonitorUpdateChanResume::Unblocked {
 				needs_persist,
