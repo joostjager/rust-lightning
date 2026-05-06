@@ -10946,6 +10946,7 @@ This indicates a bug inside LDK. Please report this error at https://github.com/
 	/// persisted before returning control to the caller. In other words, this method executes the
 	/// prepared post-monitor-update work and reports whether the caller should treat monitor
 	/// completion as requiring `ChannelManager` persistence.
+	#[must_use = "callers must either persist when true or explicitly discard the result"]
 	fn handle_post_monitor_update_chan_resume(&self, data: PostMonitorUpdateChanResume) -> bool {
 		debug_assert_ne!(self.per_peer_state.held_by_thread(), LockHeldState::HeldByThread);
 		#[cfg(debug_assertions)]
@@ -11182,6 +11183,7 @@ This indicates a bug inside LDK. Please report this error at https://github.com/
 	}
 
 	#[rustfmt::skip]
+	#[must_use = "callers must either persist when true or explicitly discard the result"]
 	fn channel_monitor_updated(&self, channel_id: &ChannelId, highest_applied_update_id: Option<u64>, counterparty_node_id: &PublicKey) -> bool {
 		debug_assert!(self.total_consistency_lock.try_write().is_err()); // Caller holds read lock
 
