@@ -1200,6 +1200,18 @@ pub(super) struct MonitorRestoreUpdates {
 	pub committed_outbound_htlc_sources: Vec<(HTLCPreviousHopData, u64)>,
 }
 
+impl MonitorRestoreUpdates {
+	pub(super) fn requires_channel_manager_persistence(&self) -> bool {
+		self.funding_broadcastable.is_some()
+			|| self.channel_ready.is_some()
+			|| self.announcement_sigs.is_some()
+			|| !self.pending_update_adds.is_empty()
+			|| !self.finalized_claimed_htlcs.is_empty()
+			|| !self.failed_htlcs.is_empty()
+			|| !self.committed_outbound_htlc_sources.is_empty()
+	}
+}
+
 /// The return value of `signer_maybe_unblocked`
 pub(super) struct SignerResumeUpdates {
 	pub commitment_update: Option<msgs::CommitmentUpdate>,
