@@ -225,9 +225,9 @@ jobs:
       - name: Sanity check fuzz targets on Rust ${{ env.TOOLCHAIN }}
         run: |
           cd fuzz
-          RUSTFLAGS="--cfg=fuzzing --cfg=secp256k1_fuzz --cfg=hashes_fuzz" cargo test --quiet --color always --lib -j8
-          RUSTFLAGS="--cfg=fuzzing --cfg=secp256k1_fuzz --cfg=hashes_fuzz" cargo test --manifest-path fuzz-fake-hashes/Cargo.toml --quiet --color always --bins -j8
-          RUSTFLAGS="--cfg=fuzzing --cfg=secp256k1_fuzz" cargo test --manifest-path fuzz-real-hashes/Cargo.toml --quiet --color always --bins -j8
+          RUSTFLAGS="--cfg=fuzzing --cfg=secp256k1_fuzz --cfg=hashes_fuzz --cfg=chacha20_poly1305_fuzz" cargo test --quiet --color always --lib -j8
+          RUSTFLAGS="--cfg=fuzzing --cfg=secp256k1_fuzz --cfg=hashes_fuzz --cfg=chacha20_poly1305_fuzz" cargo test --manifest-path fuzz-fake-hashes/Cargo.toml --quiet --color always --bins -j8
+          RUSTFLAGS="--cfg=fuzzing --cfg=secp256k1_fuzz --cfg=chacha20_poly1305_fuzz" cargo test --manifest-path fuzz-real-hashes/Cargo.toml --quiet --color always --bins -j8
 
   fuzz:
     runs-on: self-hosted
