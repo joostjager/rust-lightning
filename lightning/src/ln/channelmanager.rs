@@ -3062,26 +3062,91 @@ struct PersistenceNotifierGuard<'a, F: FnOnce() -> NotifyOption> {
 	// [`PersistenceNotifierGuard::drop`].
 	should_persist: Option<F>,
 	// We hold onto this result so the lock doesn't get released immediately.
-	_read_guard: RwLockReadGuard<'a, ()>,
+	read_guard: Option<RwLockReadGuard<'a, ()>>,
+	#[cfg(debug_assertions)]
+	persistence_invariant: Option<PersistenceInvariant<'a>>,
+}
+
+/// Checks that `needs_persist_flag` is aligned with serialized bytes in debug builds.
+#[cfg(debug_assertions)]
+struct PersistenceInvariant<'a> {
+	callsite: &'static core::panic::Location<'static>,
+	serialized_before: Option<Vec<u8>>,
+	serialize: Box<dyn Fn() -> Vec<u8> + 'a>,
+	consistency_lock_available: Box<dyn Fn() -> bool + 'a>,
 }
 
 // We don't care what the concrete F is here, it's unused
 impl<'a> PersistenceNotifierGuard<'a, fn() -> NotifyOption> {
+	#[cfg(debug_assertions)]
+	#[track_caller]
+	fn persistence_invariant<C: AChannelManager>(cm: &'a C) -> Option<PersistenceInvariant<'a>> {
+		let cm_ref = cm.get_cm();
+		if cm_ref.total_consistency_lock.try_write().is_err() {
+			return None;
+		}
+		let serialized_before = if cm_ref.needs_persist_flag.load(Ordering::Acquire) {
+			None
+		} else {
+			Some(cm_ref.encode())
+		};
+		let serialize_cm = cm;
+		let lock_cm = cm;
+		Some(PersistenceInvariant {
+			callsite: core::panic::Location::caller(),
+			serialized_before,
+			serialize: Box::new(move || serialize_cm.get_cm().encode()),
+			consistency_lock_available: Box::new(move || {
+				lock_cm.get_cm().total_consistency_lock.try_write().is_ok()
+			}),
+		})
+	}
+
 	/// Notifies any waiters and indicates that we need to persist, in addition to possibly having
 	/// events to handle.
 	///
 	/// This must always be called if the changes included a `ChannelMonitorUpdate`, as well as in
 	/// other cases where losing the changes on restart may result in a force-close or otherwise
 	/// isn't ideal.
+	#[track_caller]
 	fn notify_on_drop<C: AChannelManager>(
 		cm: &'a C,
 	) -> PersistenceNotifierGuard<'a, impl FnOnce() -> NotifyOption> {
 		Self::optionally_notify(cm, || -> NotifyOption { NotifyOption::DoPersist })
 	}
 
+	#[track_caller]
+	fn notify_on_drop_without_persistence_invariant<C: AChannelManager>(
+		cm: &'a C,
+	) -> PersistenceNotifierGuard<'a, impl FnOnce() -> NotifyOption> {
+		Self::optionally_notify_without_persistence_invariant(cm, || -> NotifyOption {
+			NotifyOption::DoPersist
+		})
+	}
+
+	#[track_caller]
 	fn manually_notify<F: FnOnce(), C: AChannelManager>(
 		cm: &'a C, f: F,
 	) -> PersistenceNotifierGuard<'a, impl FnOnce() -> NotifyOption> {
+		Self::manually_notify_internal(cm, f, true)
+	}
+
+	#[track_caller]
+	#[allow(dead_code)]
+	fn manually_notify_without_persistence_invariant<F: FnOnce(), C: AChannelManager>(
+		cm: &'a C, f: F,
+	) -> PersistenceNotifierGuard<'a, impl FnOnce() -> NotifyOption> {
+		Self::manually_notify_internal(cm, f, false)
+	}
+
+	#[track_caller]
+	fn manually_notify_internal<F: FnOnce(), C: AChannelManager>(
+		cm: &'a C, f: F, check_invariant: bool,
+	) -> PersistenceNotifierGuard<'a, impl FnOnce() -> NotifyOption> {
+		#[cfg(debug_assertions)]
+		let persistence_invariant = if check_invariant { Self::persistence_invariant(cm) } else { None };
+		#[cfg(not(debug_assertions))]
+		let _ = check_invariant;
 		let read_guard = cm.get_cm().total_consistency_lock.read().unwrap();
 		let force_notify = cm.get_cm().process_background_events();
 
@@ -3092,13 +3157,38 @@ impl<'a> PersistenceNotifierGuard<'a, fn() -> NotifyOption> {
 				f();
 				force_notify
 			}),
-			_read_guard: read_guard,
+			read_guard: Some(read_guard),
+			#[cfg(debug_assertions)]
+			persistence_invariant,
 		}
 	}
 
+	#[track_caller]
 	fn optionally_notify<F: FnOnce() -> NotifyOption, C: AChannelManager>(
 		cm: &'a C, persist_check: F,
 	) -> PersistenceNotifierGuard<'a, impl FnOnce() -> NotifyOption> {
+		Self::optionally_notify_internal(cm, persist_check, true)
+	}
+
+	#[track_caller]
+	fn optionally_notify_without_persistence_invariant<
+		F: FnOnce() -> NotifyOption,
+		C: AChannelManager,
+	>(
+		cm: &'a C, persist_check: F,
+	) -> PersistenceNotifierGuard<'a, impl FnOnce() -> NotifyOption> {
+		Self::optionally_notify_internal(cm, persist_check, false)
+	}
+
+	#[track_caller]
+	fn optionally_notify_internal<F: FnOnce() -> NotifyOption, C: AChannelManager>(
+		cm: &'a C, persist_check: F, check_invariant: bool,
+	) -> PersistenceNotifierGuard<'a, impl FnOnce() -> NotifyOption> {
+		#[cfg(debug_assertions)]
+		let persistence_invariant = if check_invariant { Self::persistence_invariant(cm) } else { None };
+		#[cfg(not(debug_assertions))]
+		let _ = check_invariant;
+
 		let read_guard = cm.get_cm().total_consistency_lock.read().unwrap();
 		let force_notify = cm.get_cm().process_background_events();
 
@@ -3121,23 +3211,55 @@ impl<'a> PersistenceNotifierGuard<'a, fn() -> NotifyOption> {
 					_ => NotifyOption::SkipPersistNoEvents,
 				}
 			}),
-			_read_guard: read_guard,
+			read_guard: Some(read_guard),
+			#[cfg(debug_assertions)]
+			persistence_invariant,
 		}
 	}
 
 	/// Note that if any [`ChannelMonitorUpdate`]s are possibly generated,
 	/// [`ChannelManager::process_background_events`] MUST be called first (or
 	/// [`Self::optionally_notify`] used).
+	#[track_caller]
 	fn optionally_notify_skipping_background_events<F: Fn() -> NotifyOption, C: AChannelManager>(
 		cm: &'a C, persist_check: F,
 	) -> PersistenceNotifierGuard<'a, F> {
+		Self::optionally_notify_skipping_background_events_internal(cm, persist_check, true)
+	}
+
+	/// Note that if any [`ChannelMonitorUpdate`]s are possibly generated,
+	/// [`ChannelManager::process_background_events`] MUST be called first (or
+	/// [`Self::optionally_notify`] used).
+	#[track_caller]
+	fn optionally_notify_skipping_background_events_without_persistence_invariant<
+		F: Fn() -> NotifyOption,
+		C: AChannelManager,
+	>(
+		cm: &'a C, persist_check: F,
+	) -> PersistenceNotifierGuard<'a, F> {
+		Self::optionally_notify_skipping_background_events_internal(cm, persist_check, false)
+	}
+
+	#[track_caller]
+	fn optionally_notify_skipping_background_events_internal<
+		F: Fn() -> NotifyOption,
+		C: AChannelManager,
+	>(
+		cm: &'a C, persist_check: F, check_invariant: bool,
+	) -> PersistenceNotifierGuard<'a, F> {
+		#[cfg(debug_assertions)]
+		let persistence_invariant = if check_invariant { Self::persistence_invariant(cm) } else { None };
+		#[cfg(not(debug_assertions))]
+		let _ = check_invariant;
 		let read_guard = cm.get_cm().total_consistency_lock.read().unwrap();
 
 		PersistenceNotifierGuard {
 			event_persist_notifier: &cm.get_cm().event_persist_notifier,
 			needs_persist_flag: &cm.get_cm().needs_persist_flag,
 			should_persist: Some(persist_check),
-			_read_guard: read_guard,
+			read_guard: Some(read_guard),
+			#[cfg(debug_assertions)]
+			persistence_invariant,
 		}
 	}
 }
@@ -3159,6 +3281,46 @@ impl<'a, F: FnOnce() -> NotifyOption> Drop for PersistenceNotifierGuard<'a, F> {
 			NotifyOption::SkipPersistHandleEvents => self.event_persist_notifier.notify(),
 			NotifyOption::SkipPersistNoEvents => {},
 		}
+		drop(self.read_guard.take());
+
+		#[cfg(debug_assertions)]
+		if let Some(persistence_invariant) = self.persistence_invariant.as_ref() {
+			persistence_invariant.check(self.needs_persist_flag);
+		}
+	}
+}
+
+#[cfg(debug_assertions)]
+impl<'a> PersistenceInvariant<'a> {
+	fn check(&self, needs_persist_flag: &AtomicBool) {
+		if !(self.consistency_lock_available)() {
+			return;
+		}
+		let Some(serialized_before) = self.serialized_before.as_ref() else { return };
+
+		let serialized_after = (self.serialize)();
+		let manager_changed = serialized_before.as_slice() != serialized_after.as_slice();
+		let needs_persist_after = needs_persist_flag.load(Ordering::Acquire);
+		let first_diff = serialized_before
+			.iter()
+			.zip(serialized_after.iter())
+			.position(|(before, after)| before != after)
+			.or_else(|| {
+				(serialized_before.len() != serialized_after.len())
+					.then_some(cmp::min(serialized_before.len(), serialized_after.len()))
+			});
+		assert_eq!(
+			manager_changed,
+			needs_persist_after,
+			"{} changed ChannelManager serialization and persistence flag out of sync: \
+			changed {}, needs_persist {}, first diff {:?}, before len {}, after len {}",
+			self.callsite,
+			manager_changed,
+			needs_persist_after,
+			first_diff,
+			serialized_before.len(),
+			serialized_after.len()
+		);
 	}
 }
 
@@ -3900,7 +4062,8 @@ impl<
 			});
 		}
 
-		let _persistence_guard = PersistenceNotifierGuard::notify_on_drop(self);
+		let _persistence_guard =
+			PersistenceNotifierGuard::notify_on_drop_without_persistence_invariant(self);
 		// We want to make sure the lock is actually acquired by PersistenceNotifierGuard.
 		debug_assert!(&self.total_consistency_lock.try_write().is_err());
 
@@ -8863,7 +9026,7 @@ impl<
 	/// [`ChannelUpdate`]: msgs::ChannelUpdate
 	/// [`ChannelConfig`]: crate::util::config::ChannelConfig
 	pub fn timer_tick_occurred(&self) {
-		PersistenceNotifierGuard::optionally_notify(self, || {
+		PersistenceNotifierGuard::optionally_notify_without_persistence_invariant(self, || {
 			let mut should_persist = NotifyOption::SkipPersistNoEvents;
 
 			let mut handle_errors: Vec<(Result<(), _>, _)> = Vec::new();
@@ -9794,7 +9957,8 @@ impl<
 		ComplFunc: FnOnce(
 			Option<u64>,
 			bool,
-		) -> (Option<MonitorUpdateCompletionAction>, Option<RAAMonitorUpdateBlockingAction>),
+		)
+			-> (Option<MonitorUpdateCompletionAction>, Option<RAAMonitorUpdateBlockingAction>),
 	>(
 		&self, prev_hop: &HTLCPreviousHopData, payment_preimage: PaymentPreimage,
 		payment_info: Option<PaymentClaimDetails>, attribution_data: Option<AttributionData>,
@@ -9832,7 +9996,8 @@ impl<
 		ComplFunc: FnOnce(
 			Option<u64>,
 			bool,
-		) -> (Option<MonitorUpdateCompletionAction>, Option<RAAMonitorUpdateBlockingAction>),
+		)
+			-> (Option<MonitorUpdateCompletionAction>, Option<RAAMonitorUpdateBlockingAction>),
 	>(
 		&self, prev_hop: HTLCClaimSource, payment_preimage: PaymentPreimage,
 		payment_info: Option<PaymentClaimDetails>, attribution_data: Option<AttributionData>,
@@ -11342,7 +11507,8 @@ This indicates a bug inside LDK. Please report this error at https://github.com/
 			Some(*temporary_channel_id),
 			None,
 		);
-		let _persistence_guard = PersistenceNotifierGuard::notify_on_drop(self);
+		let _persistence_guard =
+			PersistenceNotifierGuard::notify_on_drop_without_persistence_invariant(self);
 
 		let peers_without_funded_channels =
 			self.peers_without_funded_channels(|peer| peer.total_channel_count() > 0);
@@ -11918,7 +12084,7 @@ This indicates a bug inside LDK. Please report this error at https://github.com/
 	}
 
 	#[rustfmt::skip]
-	fn internal_peer_storage(&self, counterparty_node_id: PublicKey, msg: msgs::PeerStorage) -> Result<(), MsgHandleErrInternal> {
+	fn internal_peer_storage(&self, counterparty_node_id: PublicKey, msg: msgs::PeerStorage) -> Result<bool, MsgHandleErrInternal> {
 		let per_peer_state = self.per_peer_state.read().unwrap();
 		let peer_state_mutex = per_peer_state.get(&counterparty_node_id).ok_or_else(|| {
 			MsgHandleErrInternal::unreachable_no_such_peer(&counterparty_node_id, ChannelId([0; 32]))
@@ -11947,9 +12113,12 @@ This indicates a bug inside LDK. Please report this error at https://github.com/
 		}
 
 		log_trace!(logger, "Received peer_storage from {}", log_pubkey!(counterparty_node_id));
+		if peer_state.peer_storage == msg.data {
+			return Ok(false);
+		}
 		peer_state.peer_storage = msg.data;
 
-		Ok(())
+		Ok(true)
 	}
 
 	#[rustfmt::skip]
@@ -13932,7 +14101,8 @@ This indicates a bug inside LDK. Please report this error at https://github.com/
 	///
 	/// [`ChannelSigner`]: crate::sign::ChannelSigner
 	pub fn signer_unblocked(&self, channel_opt: Option<(PublicKey, ChannelId)>) {
-		let _persistence_guard = PersistenceNotifierGuard::notify_on_drop(self);
+		let _persistence_guard =
+			PersistenceNotifierGuard::notify_on_drop_without_persistence_invariant(self);
 
 		// Returns whether we should remove this channel as it's just been closed.
 		let unblock_chan = |chan: &mut Channel<SP>,
@@ -15726,7 +15896,7 @@ impl<
 
 		let mut res = Ok(());
 
-		PersistenceNotifierGuard::optionally_notify(self, || {
+		PersistenceNotifierGuard::optionally_notify_without_persistence_invariant(self, || {
 			// If we have too many peers connected which don't have funded channels, disconnect the
 			// peer immediately (as long as it doesn't have funded channels). If we have a bunch of
 			// unfunded channels taking up space in memory for disconnected peers, we still let new
@@ -15865,7 +16035,7 @@ impl<
 	/// will randomly be placed first or last in the returned array.
 	fn get_and_clear_pending_msg_events(&self) -> Vec<MessageSendEvent> {
 		let events = RefCell::new(Vec::new());
-		PersistenceNotifierGuard::optionally_notify(self, || {
+		PersistenceNotifierGuard::optionally_notify_without_persistence_invariant(self, || {
 			// This method is quite performance-sensitive. Not only is it called very often, but it
 			// *is* the critical path between generating a message for a peer and giving it to the
 			// `PeerManager` to send. Thus, we should avoid adding any more logic here than we
@@ -16021,7 +16191,7 @@ impl<
 		log_trace!(self.logger, "{} transactions included in block {} at height {} provided", txdata.len(), block_hash, height);
 
 		let _persistence_guard =
-			PersistenceNotifierGuard::optionally_notify_skipping_background_events(
+			PersistenceNotifierGuard::optionally_notify_skipping_background_events_without_persistence_invariant(
 				self, || -> NotifyOption { NotifyOption::DoPersist });
 		self.do_chain_event(Some(height), |channel| channel.transactions_confirmed(&block_hash, height, txdata, self.chain_hash, &self.node_signer, &self.config.read().unwrap(), &&WithChannelContext::from(&self.logger, &channel.context, None))
 			.map(|(a, b)| (a, Vec::new(), b)));
@@ -16529,21 +16699,23 @@ impl<
 {
 	fn handle_open_channel(&self, counterparty_node_id: PublicKey, message: &msgs::OpenChannel) {
 		// Note that we never need to persist the updated ChannelManager for an inbound
-		// open_channel message - pre-funded channels are never written so there should be no
-		// change to the contents.
-		let _persistence_guard = PersistenceNotifierGuard::optionally_notify(self, || {
-			let msg = OpenChannelMessageRef::V1(message);
-			let res = self.internal_open_channel(&counterparty_node_id, msg);
-			let persist = match &res {
-				Err(e) if e.closes_channel() => {
-					debug_assert!(false, "We shouldn't close a new channel");
-					NotifyOption::DoPersist
-				},
-				_ => NotifyOption::SkipPersistHandleEvents,
-			};
-			let _ = self.handle_error(res, counterparty_node_id);
-			persist
-		});
+		// open_channel message - any pre-funded state touched here is recoverable through the
+		// channel handshake, and the `ChannelMonitor` won't be updated so we will not force-close
+		// the channel on startup.
+		let _persistence_guard =
+			PersistenceNotifierGuard::optionally_notify_without_persistence_invariant(self, || {
+				let msg = OpenChannelMessageRef::V1(message);
+				let res = self.internal_open_channel(&counterparty_node_id, msg);
+				let persist = match &res {
+					Err(e) if e.closes_channel() => {
+						debug_assert!(false, "We shouldn't close a new channel");
+						NotifyOption::DoPersist
+					},
+					_ => NotifyOption::SkipPersistHandleEvents,
+				};
+				let _ = self.handle_error(res, counterparty_node_id);
+				persist
+			});
 	}
 
 	#[rustfmt::skip]
@@ -16555,9 +16727,11 @@ impl<
 			return;
 		}
 		// Note that we never need to persist the updated ChannelManager for an inbound
-		// open_channel message - pre-funded channels are never written so there should be no
-		// change to the contents.
-		let _persistence_guard = PersistenceNotifierGuard::optionally_notify(self, || {
+		// open_channel message - any pre-funded state touched here is recoverable through the
+		// channel handshake, and the `ChannelMonitor` won't be updated so we will not force-close
+		// the channel on startup.
+		let _persistence_guard =
+			PersistenceNotifierGuard::optionally_notify_without_persistence_invariant(self, || {
 			let res = self.internal_open_channel(&counterparty_node_id, OpenChannelMessageRef::V2(msg));
 			let persist = match &res {
 				Err(e) if e.closes_channel() => {
@@ -16573,13 +16747,15 @@ impl<
 
 	fn handle_accept_channel(&self, counterparty_node_id: PublicKey, msg: &msgs::AcceptChannel) {
 		// Note that we never need to persist the updated ChannelManager for an inbound
-		// accept_channel message - pre-funded channels are never written so there should be no
-		// change to the contents.
-		let _persistence_guard = PersistenceNotifierGuard::optionally_notify(self, || {
-			let res = self.internal_accept_channel(&counterparty_node_id, msg);
-			let _ = self.handle_error(res, counterparty_node_id);
-			NotifyOption::SkipPersistHandleEvents
-		});
+		// accept_channel message - any pre-funded state touched here is recoverable through the
+		// channel handshake, and the `ChannelMonitor` won't be updated so we will not force-close
+		// the channel on startup.
+		let _persistence_guard =
+			PersistenceNotifierGuard::optionally_notify_without_persistence_invariant(self, || {
+				let res = self.internal_accept_channel(&counterparty_node_id, msg);
+				let _ = self.handle_error(res, counterparty_node_id);
+				NotifyOption::SkipPersistHandleEvents
+			});
 	}
 
 	fn handle_accept_channel_v2(
@@ -16605,10 +16781,16 @@ impl<
 	}
 
 	fn handle_peer_storage(&self, counterparty_node_id: PublicKey, msg: msgs::PeerStorage) {
-		let _persistence_guard =
-			PersistenceNotifierGuard::optionally_notify(self, || NotifyOption::SkipPersistNoEvents);
-		let res = self.internal_peer_storage(counterparty_node_id, msg);
-		let _ = self.handle_error(res, counterparty_node_id);
+		let _persistence_guard = PersistenceNotifierGuard::optionally_notify(self, || {
+			let res = self.internal_peer_storage(counterparty_node_id, msg);
+			let persist = match &res {
+				Ok(true) => NotifyOption::DoPersist,
+				Ok(false) => NotifyOption::SkipPersistNoEvents,
+				Err(_) => NotifyOption::SkipPersistHandleEvents,
+			};
+			let _ = self.handle_error(res.map(|_| ()), counterparty_node_id);
+			persist
+		});
 	}
 
 	fn handle_peer_storage_retrieval(
@@ -16625,15 +16807,16 @@ impl<
 		// channel_ready message - while the channel's state will change, any channel_ready message
 		// will ultimately be re-sent on startup and the `ChannelMonitor` won't be updated so we
 		// will not force-close the channel on startup.
-		let _persistence_guard = PersistenceNotifierGuard::optionally_notify(self, || {
-			let res = self.internal_channel_ready(&counterparty_node_id, msg);
-			let persist = match &res {
-				Err(e) if e.closes_channel() => NotifyOption::DoPersist,
-				_ => NotifyOption::SkipPersistHandleEvents,
-			};
-			let _ = self.handle_error(res, counterparty_node_id);
-			persist
-		});
+		let _persistence_guard =
+			PersistenceNotifierGuard::optionally_notify_without_persistence_invariant(self, || {
+				let res = self.internal_channel_ready(&counterparty_node_id, msg);
+				let persist = match &res {
+					Err(e) if e.closes_channel() => NotifyOption::DoPersist,
+					_ => NotifyOption::SkipPersistHandleEvents,
+				};
+				let _ = self.handle_error(res, counterparty_node_id);
+				persist
+			});
 	}
 
 	fn handle_stfu(&self, counterparty_node_id: PublicKey, msg: &msgs::Stfu) {
@@ -16804,18 +16987,19 @@ impl<
 
 	fn handle_update_fee(&self, counterparty_node_id: PublicKey, msg: &msgs::UpdateFee) {
 		// Note that we never need to persist the updated ChannelManager for an inbound
-		// update_fee message - the message itself doesn't change our channel state only the
-		// `commitment_signed` message afterwards will.
-		let _persistence_guard = PersistenceNotifierGuard::optionally_notify(self, || {
-			let res = self.internal_update_fee(&counterparty_node_id, msg);
-			let persist = match &res {
-				Err(e) if e.closes_channel() => NotifyOption::DoPersist,
-				Err(_) => NotifyOption::SkipPersistHandleEvents,
-				Ok(()) => NotifyOption::SkipPersistNoEvents,
-			};
-			let _ = self.handle_error(res, counterparty_node_id);
-			persist
-		});
+		// update_fee message. Any state update here is recoverable through the
+		// `commitment_signed` message afterwards.
+		let _persistence_guard =
+			PersistenceNotifierGuard::optionally_notify_without_persistence_invariant(self, || {
+				let res = self.internal_update_fee(&counterparty_node_id, msg);
+				let persist = match &res {
+					Err(e) if e.closes_channel() => NotifyOption::DoPersist,
+					Err(_) => NotifyOption::SkipPersistHandleEvents,
+					Ok(()) => NotifyOption::SkipPersistNoEvents,
+				};
+				let _ = self.handle_error(res, counterparty_node_id);
+				persist
+			});
 	}
 
 	fn handle_announcement_signatures(
@@ -16827,7 +17011,7 @@ impl<
 	}
 
 	fn handle_channel_update(&self, counterparty_node_id: PublicKey, msg: &msgs::ChannelUpdate) {
-		PersistenceNotifierGuard::optionally_notify(self, || {
+		let _persistence_guard = PersistenceNotifierGuard::optionally_notify(self, || {
 			let res = self.internal_channel_update(&counterparty_node_id, msg);
 			if let Ok(persist) = self.handle_error(res, counterparty_node_id) {
 				persist
@@ -16840,7 +17024,8 @@ impl<
 	fn handle_channel_reestablish(
 		&self, counterparty_node_id: PublicKey, msg: &msgs::ChannelReestablish,
 	) {
-		let _persistence_guard = PersistenceNotifierGuard::notify_on_drop(self);
+		let _persistence_guard =
+			PersistenceNotifierGuard::notify_on_drop_without_persistence_invariant(self);
 		let res = self.internal_channel_reestablish(&counterparty_node_id, msg);
 		let _ = self.handle_error(res, counterparty_node_id);
 	}
