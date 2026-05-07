@@ -11126,7 +11126,7 @@ This indicates a bug inside LDK. Please report this error at https://github.com/
 		} else if let Some((splice_tx, tx_type)) = funding_tx_signed
 			.as_mut()
 			.and_then(|v| v.funding_tx.take())
-			.filter(|(_, tx_type)| matches!(tx_type, TransactionType::Splice { .. }))
+			.filter(|(_, tx_type)| matches!(tx_type, TransactionType::InteractiveFunding { .. }))
 		{
 			log_info!(logger, "Broadcasting signed splice transaction with txid {}", splice_tx.compute_txid());
 			self.tx_broadcaster.broadcast_transactions(&[(&splice_tx, tx_type)]);
