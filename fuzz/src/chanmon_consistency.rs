@@ -2939,6 +2939,24 @@ pub fn do_test<Out: Output + MaybeSend + MaybeSync>(data: &[u8], out: Out) {
 					);
 				}
 
+				// All HTLCs should have been claimed or failed once we reach quiescence.
+				for (idx, node) in nodes.iter().enumerate() {
+					for chan in node.list_channels() {
+						assert!(
+							chan.pending_inbound_htlcs.is_empty()
+								&& chan.pending_outbound_htlcs.is_empty(),
+							"Node {} channel {:?} has stuck HTLCs after settling all state: \
+							 {} inbound {:?}, {} outbound {:?}",
+							idx,
+							chan.channel_id,
+							chan.pending_inbound_htlcs.len(),
+							chan.pending_inbound_htlcs,
+							chan.pending_outbound_htlcs.len(),
+							chan.pending_outbound_htlcs
+						);
+					}
+				}
+
 				// Finally, make sure that at least one end of each channel can make a substantial payment
 				for &chan_id in &chan_ab_ids {
 					assert!(
