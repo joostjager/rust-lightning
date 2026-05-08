@@ -817,6 +817,7 @@ struct HarnessNode<'a> {
 	fee_estimator: Arc<FuzzEstimator>,
 	wallet: TestWalletSource,
 	persistence_style: ChannelMonitorUpdateStatus,
+	deferred: bool,
 	serialized_manager: Vec<u8>,
 	height: u32,
 	last_htlc_clear_fee: u32,
@@ -847,7 +848,7 @@ impl<'a> HarnessNode<'a> {
 	fn build_chain_monitor(
 		broadcaster: &Arc<TestBroadcaster>, fee_estimator: &Arc<FuzzEstimator>,
 		keys_manager: &Arc<KeyProvider>, logger: Arc<dyn Logger + MaybeSend + MaybeSync>,
-		persister: &Arc<HarnessPersister>,
+		persister: &Arc<HarnessPersister>, deferred: bool,
 	) -> Arc<TestChainMonitor> {
 		Arc::new(chainmonitor::ChainMonitor::new(
 			None,
@@ -857,14 +858,14 @@ impl<'a> HarnessNode<'a> {
 			Arc::clone(persister),
 			Arc::clone(keys_manager),
 			keys_manager.get_peer_storage_key(),
-			false,
+			deferred,
 		))
 	}
 
 	fn new<Out: Output + MaybeSend + MaybeSync>(
 		node_id: u8, wallet: TestWalletSource, fee_estimator: Arc<FuzzEstimator>,
 		broadcaster: Arc<TestBroadcaster>, persistence_style: ChannelMonitorUpdateStatus,
-		out: &Out, router: &'a FuzzRouter, chan_type: ChanType,
+		deferred: bool, out: &Out, router: &'a FuzzRouter, chan_type: ChanType,
 	) -> Self {
 		let logger = Self::build_logger(node_id, out);
 		let node_secret = SecretKey::from_slice(&[
@@ -884,6 +885,7 @@ impl<'a> HarnessNode<'a> {
 			&keys_manager,
 			Arc::clone(&logger),
 			&persister,
+			deferred,
 		);
 		let network = Network::Bitcoin;
 		let best_block_timestamp = genesis_block(network).header.time;
@@ -913,6 +915,7 @@ impl<'a> HarnessNode<'a> {
 			fee_estimator,
 			wallet,
 			persistence_style,
+			deferred,
 			serialized_manager: Vec::new(),
 			height: 0,
 			last_htlc_clear_fee: 253,
@@ -930,10 +933,13 @@ impl<'a> HarnessNode<'a> {
 		self.persister.mark_update_completed(chan_id, monitor_id, data);
 	}
 
-	fn complete_all_monitor_updates(&self, chan_id: &ChannelId) {
-		for (monitor_id, data) in self.persister.drain_pending_updates(chan_id) {
+	fn complete_all_monitor_updates(&self, chan_id: &ChannelId) -> bool {
+		let completed_updates = self.persister.drain_pending_updates(chan_id);
+		let completed_any = !completed_updates.is_empty();
+		for (monitor_id, data) in completed_updates {
 			self.finish_monitor_update(*chan_id, monitor_id, data);
 		}
+		completed_any
 	}
 
 	fn complete_all_pending_monitor_updates(&self) {
@@ -966,9 +972,30 @@ impl<'a> HarnessNode<'a> {
 		}
 	}
 
-	fn refresh_serialized_manager(&mut self) {
+	fn checkpoint_manager_persistence(&mut self) -> bool {
 		if self.node.get_and_clear_needs_persistence() {
+			let pending_monitor_writes = self.monitor.pending_operation_count();
 			self.serialized_manager = self.node.encode();
+			if self.deferred {
+				self.monitor.flush(pending_monitor_writes, &self.logger);
+			} else {
+				assert_eq!(pending_monitor_writes, 0);
+			}
+			true
+		} else {
+			assert_eq!(self.monitor.pending_operation_count(), 0);
+			false
+		}
+	}
+
+	fn force_checkpoint_manager_persistence(&mut self) {
+		let pending_monitor_writes = self.monitor.pending_operation_count();
+		self.serialized_manager = self.node.encode();
+		self.node.get_and_clear_needs_persistence();
+		if self.deferred {
+			self.monitor.flush(pending_monitor_writes, &self.logger);
+		} else {
+			assert_eq!(pending_monitor_writes, 0);
 		}
 	}
 
@@ -1073,15 +1100,14 @@ impl<'a> HarnessNode<'a> {
 		&mut self, use_old_mons: u8, out: &Out, router: &'a FuzzRouter, chan_type: ChanType,
 	) {
 		let logger = Self::build_logger(self.node_id, out);
-		// Re-registering monitors during reload reflects data that was already selected from
-		// simulated storage, so these startup watch_channel calls should complete immediately.
-		let persister = Self::build_persister(ChannelMonitorUpdateStatus::Completed);
+		let persister = Self::build_persister(self.persistence_style);
 		let chain_monitor = Self::build_chain_monitor(
 			&self.broadcaster,
 			&self.fee_estimator,
 			&self.keys_manager,
 			Arc::clone(&logger),
 			&persister,
+			self.deferred,
 		);
 
 		let mut monitors = new_hash_map();
@@ -1128,19 +1154,22 @@ impl<'a> HarnessNode<'a> {
 
 		let manager = <(BlockLocator, ChanMan)>::read(&mut &self.serialized_manager[..], read_args)
 			.expect("Failed to read manager");
+		let expected_status = if self.deferred {
+			ChannelMonitorUpdateStatus::InProgress
+		} else {
+			self.persistence_style
+		};
 		for (channel_id, mon) in monitors.drain() {
-			assert_eq!(
-				chain_monitor.watch_channel(channel_id, mon),
-				Ok(ChannelMonitorUpdateStatus::Completed)
-			);
+			assert_eq!(chain_monitor.watch_channel(channel_id, mon), Ok(expected_status));
 		}
-		// Future monitor writes should follow the node's configured persistence style; only the
-		// startup watch_channel registration above is forced to Completed.
-		*persister.update_ret.lock().unwrap() = self.persistence_style;
 		self.node = manager.1;
 		self.monitor = chain_monitor;
 		self.persister = persister;
 		self.logger = logger;
+		// In deferred mode, the startup watch_channel registrations above queue monitor operations
+		// even if the reloaded ChannelManager does not need persistence. Always checkpoint here so
+		// those registrations can be flushed against the manager snapshot they belong to.
+		self.force_checkpoint_manager_persistence();
 	}
 }
 
@@ -1362,11 +1391,13 @@ impl PeerLink {
 			|| (self.node_a == node_b && self.node_b == node_a)
 	}
 
-	fn complete_all_monitor_updates(&self, nodes: &[HarnessNode<'_>; 3]) {
+	fn complete_all_monitor_updates(&self, nodes: &[HarnessNode<'_>; 3]) -> bool {
+		let mut completed_updates = false;
 		for id in &self.channel_ids {
-			nodes[self.node_a].complete_all_monitor_updates(id);
-			nodes[self.node_b].complete_all_monitor_updates(id);
+			completed_updates |= nodes[self.node_a].complete_all_monitor_updates(id);
+			completed_updates |= nodes[self.node_b].complete_all_monitor_updates(id);
 		}
+		completed_updates
 	}
 
 	fn complete_monitor_updates_for_node(
@@ -1937,9 +1968,12 @@ fn connect_peers(source: &ChanMan<'_>, dest: &ChanMan<'_>) {
 }
 
 fn make_channel(
-	source: &HarnessNode<'_>, dest: &HarnessNode<'_>, chan_id: i32, trusted_open: bool,
-	trusted_accept: bool, chain_state: &mut ChainState,
+	nodes: &mut [HarnessNode<'_>; 3], source_idx: usize, dest_idx: usize, chan_id: i32,
+	trusted_open: bool, trusted_accept: bool, chain_state: &mut ChainState,
 ) {
+	assert!(source_idx < dest_idx);
+	let (left, right) = nodes.split_at_mut(dest_idx);
+	let (source, dest) = (&mut left[source_idx], &mut right[0]);
 	if trusted_open {
 		source
 			.create_channel_to_trusted_peer_0reserve(
@@ -2050,7 +2084,8 @@ fn make_channel(
 		}
 	};
 	dest.handle_funding_created(source.get_our_node_id(), &funding_created);
-	// Complete any pending monitor persistence callbacks for dest after watch_channel.
+	dest.checkpoint_manager_persistence();
+	// Complete any monitor persistence callbacks made available for dest after watch_channel.
 	dest.complete_all_pending_monitor_updates();
 
 	let (funding_signed, channel_id) = {
@@ -2071,7 +2106,8 @@ fn make_channel(
 	}
 
 	source.handle_funding_signed(dest.get_our_node_id(), &funding_signed);
-	// Complete any pending monitor persistence callbacks for source after watch_channel.
+	source.checkpoint_manager_persistence();
+	// Complete any monitor persistence callbacks made available for source after watch_channel.
 	source.complete_all_pending_monitor_updates();
 
 	let events = source.get_and_clear_pending_events();
@@ -2143,6 +2179,11 @@ impl<'a, Out: Output + MaybeSend + MaybeSync> Harness<'a, Out> {
 				ChannelMonitorUpdateStatus::Completed
 			},
 		];
+		let deferred = [
+			config_byte & 0b0010_0000 != 0,
+			config_byte & 0b0100_0000 != 0,
+			config_byte & 0b1000_0000 != 0,
+		];
 
 		let wallet_a = TestWalletSource::new(SecretKey::from_slice(&[1; 32]).unwrap());
 		let wallet_b = TestWalletSource::new(SecretKey::from_slice(&[2; 32]).unwrap());
@@ -2180,6 +2221,7 @@ impl<'a, Out: Output + MaybeSend + MaybeSync> Harness<'a, Out> {
 				Arc::clone(&fee_est_a),
 				Arc::clone(&broadcast_a),
 				persistence_styles[0],
+				deferred[0],
 				&out,
 				router,
 				chan_type,
@@ -2190,6 +2232,7 @@ impl<'a, Out: Output + MaybeSend + MaybeSync> Harness<'a, Out> {
 				Arc::clone(&fee_est_b),
 				Arc::clone(&broadcast_b),
 				persistence_styles[1],
+				deferred[1],
 				&out,
 				router,
 				chan_type,
@@ -2200,6 +2243,7 @@ impl<'a, Out: Output + MaybeSend + MaybeSync> Harness<'a, Out> {
 				Arc::clone(&fee_est_c),
 				Arc::clone(&broadcast_c),
 				persistence_styles[2],
+				deferred[2],
 				&out,
 				router,
 				chan_type,
@@ -2217,14 +2261,14 @@ impl<'a, Out: Output + MaybeSend + MaybeSync> Harness<'a, Out> {
 		// channel gets its own txid and funding outpoint.
 		// A-B: channel 2 A and B have 0-reserve (trusted open + trusted accept),
 		//      channel 3 A has 0-reserve (trusted accept).
-		make_channel(&nodes[0], &nodes[1], 1, false, false, &mut chain_state);
-		make_channel(&nodes[0], &nodes[1], 2, true, true, &mut chain_state);
-		make_channel(&nodes[0], &nodes[1], 3, false, true, &mut chain_state);
+		make_channel(&mut nodes, 0, 1, 1, false, false, &mut chain_state);
+		make_channel(&mut nodes, 0, 1, 2, true, true, &mut chain_state);
+		make_channel(&mut nodes, 0, 1, 3, false, true, &mut chain_state);
 		// B-C: channel 4 B has 0-reserve (via trusted accept),
 		//      channel 5 C has 0-reserve (via trusted open).
-		make_channel(&nodes[1], &nodes[2], 4, false, true, &mut chain_state);
-		make_channel(&nodes[1], &nodes[2], 5, true, false, &mut chain_state);
-		make_channel(&nodes[1], &nodes[2], 6, false, false, &mut chain_state);
+		make_channel(&mut nodes, 1, 2, 4, false, true, &mut chain_state);
+		make_channel(&mut nodes, 1, 2, 5, true, false, &mut chain_state);
+		make_channel(&mut nodes, 1, 2, 6, false, false, &mut chain_state);
 
 		// Wipe the transactions-broadcasted set to make sure we don't broadcast
 		// any transactions during normal operation after setup.
@@ -2251,7 +2295,7 @@ impl<'a, Out: Output + MaybeSend + MaybeSync> Harness<'a, Out> {
 		};
 
 		for node in &mut nodes {
-			node.serialized_manager = node.encode();
+			node.force_checkpoint_manager_persistence();
 		}
 
 		Self {
@@ -2671,7 +2715,7 @@ impl<'a, Out: Output + MaybeSend + MaybeSync> Harness<'a, Out> {
 		// claim/fail handling per event batch.
 		let mut claim_set = new_hash_map();
 		let mut events = nodes[node_idx].get_and_clear_pending_events();
-		let had_events = !events.is_empty();
+		let mut had_events = !events.is_empty();
 		for event in events.drain(..) {
 			match event {
 				events::Event::PaymentClaimable { payment_hash, .. } => {
@@ -2727,6 +2771,7 @@ impl<'a, Out: Output + MaybeSend + MaybeSync> Harness<'a, Out> {
 		}
 		while nodes[node_idx].needs_pending_htlc_processing() {
 			nodes[node_idx].process_pending_htlc_forwards();
+			had_events = true;
 		}
 		had_events
 	}
@@ -2749,9 +2794,10 @@ impl<'a, Out: Output + MaybeSend + MaybeSync> Harness<'a, Out> {
 					"It may take may iterations to settle the state, but it should not take forever"
 				);
 			}
+			let mut made_progress = self.checkpoint_manager_persistences();
 			// Next, make sure no monitor completion callbacks are pending.
-			self.ab_link.complete_all_monitor_updates(&self.nodes);
-			self.bc_link.complete_all_monitor_updates(&self.nodes);
+			made_progress |= self.ab_link.complete_all_monitor_updates(&self.nodes);
+			made_progress |= self.bc_link.complete_all_monitor_updates(&self.nodes);
 			// Then, make sure any current forwards make their way to their destination.
 			if self.process_msg_events(0, false, ProcessMessages::AllMessages) {
 				last_pass_no_updates = false;
@@ -2775,6 +2821,10 @@ impl<'a, Out: Output + MaybeSend + MaybeSync> Harness<'a, Out> {
 				continue;
 			}
 			if self.process_events(2, false) {
+				last_pass_no_updates = false;
+				continue;
+			}
+			if made_progress {
 				last_pass_no_updates = false;
 				continue;
 			}
@@ -2876,19 +2926,22 @@ impl<'a, Out: Output + MaybeSend + MaybeSync> Harness<'a, Out> {
 		self.nodes[2].record_last_htlc_clear_fee();
 	}
 
-	fn refresh_serialized_managers(&mut self) {
+	fn checkpoint_manager_persistences(&mut self) -> bool {
+		let mut made_progress = false;
 		for node in &mut self.nodes {
-			node.refresh_serialized_manager();
+			made_progress |= node.checkpoint_manager_persistence();
 		}
+		made_progress
 	}
 }
 
 #[inline]
 pub fn do_test<Out: Output + MaybeSend + MaybeSync>(data: &[u8], out: Out) {
 	let router = FuzzRouter {};
-	// Read initial monitor styles and channel type from fuzz input byte 0:
+	// Read initial monitor styles, channel type, and deferred write mode from fuzz input byte 0:
 	// bits 0-2: monitor styles (1 bit per node)
 	// bits 3-4: channel type (0=Legacy, 1=KeyedAnchors, 2=ZeroFeeCommitments)
+	// bits 5-7: deferred monitor write mode (1 bit per node)
 	let config_byte = if !data.is_empty() { data[0] } else { 0 };
 	let mut harness = Harness::new(config_byte, out, &router);
 	let mut read_pos = 1; // First byte was consumed for initial config.
@@ -3300,7 +3353,7 @@ pub fn do_test<Out: Output + MaybeSend + MaybeSync>(data: &[u8], out: Out) {
 			_ => break 'fuzz_loop,
 		}
 
-		harness.refresh_serialized_managers();
+		harness.checkpoint_manager_persistences();
 	}
 	harness.finish();
 }
