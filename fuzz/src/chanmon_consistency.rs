@@ -2771,7 +2771,7 @@ impl<'a, Out: Output + MaybeSend + MaybeSync> Harness<'a, Out> {
 		}
 		while nodes[node_idx].needs_pending_htlc_processing() {
 			nodes[node_idx].process_pending_htlc_forwards();
-			had_events = true;
+			//had_events = true;
 		}
 		had_events
 	}
