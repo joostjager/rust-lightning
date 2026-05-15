@@ -1211,6 +1211,14 @@ pub(super) struct MonitorRestoreUpdates {
 	pub committed_outbound_htlc_sources: Vec<(HTLCPreviousHopData, u64)>,
 }
 
+#[cfg(debug_assertions)]
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) struct PersistenceInvariantMonitorState {
+	pub(super) monitor_update_in_progress: bool,
+	pub(super) monitor_pending_revoke_and_ack: bool,
+	pub(super) monitor_pending_commitment_signed: bool,
+}
+
 impl MonitorRestoreUpdates {
 	pub(super) fn requires_channel_manager_persistence(&self) -> bool {
 		self.funding_broadcastable.is_some()
@@ -11388,6 +11396,15 @@ where
 		self.context.channel_state.is_monitor_update_in_progress()
 	}
 
+	#[cfg(debug_assertions)]
+	pub(super) fn persistence_invariant_monitor_state(&self) -> PersistenceInvariantMonitorState {
+		PersistenceInvariantMonitorState {
+			monitor_update_in_progress: self.context.channel_state.is_monitor_update_in_progress(),
+			monitor_pending_revoke_and_ack: self.context.monitor_pending_revoke_and_ack,
+			monitor_pending_commitment_signed: self.context.monitor_pending_commitment_signed,
+		}
+	}
+
 	/// Gets the latest [`ChannelMonitorUpdate`] ID which has been released and is in-flight.
 	pub fn get_latest_unblocked_monitor_update_id(&self) -> u64 {
 		self.context.get_latest_unblocked_monitor_update_id()
@@ -15515,8 +15532,10 @@ impl Readable for AnnouncementSigsState {
 	}
 }
 
-impl<SP: SignerProvider> Writeable for FundedChannel<SP> {
-	fn write<W: Writer>(&self, writer: &mut W) -> Result<(), io::Error> {
+impl<SP: SignerProvider> FundedChannel<SP> {
+	pub(super) fn write_with_options<W: Writer>(
+		&self, writer: &mut W, normalize_replayable_monitor_state: bool,
+	) -> Result<(), io::Error> {
 		// Note that we write out as if remove_uncommitted_htlcs_and_mark_paused had just been
 		// called.
 
@@ -15554,6 +15573,9 @@ impl<SP: SignerProvider> Writeable for FundedChannel<SP> {
 				ChannelState::FundingNegotiated(_)
 					if self.context.interactive_tx_signing_session.is_some() => {},
 				_ => debug_assert!(false, "Pre-funded/shutdown channels should not be written"),
+			}
+			if normalize_replayable_monitor_state {
+				channel_state.clear_monitor_update_in_progress();
 			}
 			channel_state.set_peer_disconnected();
 			channel_state.to_u32().write(writer)?;
@@ -15773,8 +15795,10 @@ impl<SP: SignerProvider> Writeable for FundedChannel<SP> {
 		}
 
 		self.context.monitor_pending_channel_ready.write(writer)?;
-		self.context.monitor_pending_revoke_and_ack.write(writer)?;
-		self.context.monitor_pending_commitment_signed.write(writer)?;
+		(self.context.monitor_pending_revoke_and_ack && !normalize_replayable_monitor_state)
+			.write(writer)?;
+		(self.context.monitor_pending_commitment_signed && !normalize_replayable_monitor_state)
+			.write(writer)?;
 
 		(self.context.monitor_pending_forwards.len() as u64).write(writer)?;
 		for &(ref pending_forward, ref htlc_id) in self.context.monitor_pending_forwards.iter() {
@@ -15998,6 +16022,12 @@ impl<SP: SignerProvider> Writeable for FundedChannel<SP> {
 		});
 
 		Ok(())
+	}
+}
+
+impl<SP: SignerProvider> Writeable for FundedChannel<SP> {
+	fn write<W: Writer>(&self, writer: &mut W) -> Result<(), io::Error> {
+		self.write_with_options(writer, false)
 	}
 }
 

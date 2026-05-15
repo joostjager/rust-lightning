@@ -55,6 +55,8 @@ use crate::events::{
 };
 use crate::events::{FundingInfo, PaidBolt12Invoice};
 use crate::ln::chan_utils::selected_commitment_sat_per_1000_weight;
+#[cfg(debug_assertions)]
+use crate::ln::channel::PersistenceInvariantMonitorState;
 #[cfg(any(test, fuzzing, feature = "_test_utils"))]
 use crate::ln::channel::QuiescentAction;
 use crate::ln::channel::QuiescentError;
@@ -3080,9 +3082,163 @@ struct PersistenceNotifierGuard<'a, F: FnOnce() -> NotifyOption> {
 #[cfg(debug_assertions)]
 struct PersistenceInvariant<'a> {
 	callsite: &'static core::panic::Location<'static>,
-	serialized_before: Option<Vec<u8>>,
-	serialize: Box<dyn Fn() -> Vec<u8> + 'a>,
+	snapshot_before: Option<PersistenceInvariantSnapshot>,
+	snapshot: Box<dyn Fn() -> PersistenceInvariantSnapshot + 'a>,
 	consistency_lock_available: Box<dyn Fn() -> bool + 'a>,
+}
+
+#[cfg(debug_assertions)]
+struct PersistenceInvariantSnapshot {
+	serialized: Vec<u8>,
+	serialized_ignoring_replayable_fields: Vec<u8>,
+	replayable_fields: PersistenceInvariantReplayableFields,
+}
+
+#[cfg(debug_assertions)]
+struct PersistenceInvariantReplayableFields {
+	in_flight_monitor_updates: Vec<(PublicKey, ChannelId, OutPoint, Vec<ChannelMonitorUpdate>)>,
+	monitor_state: Vec<(PublicKey, ChannelId, PersistenceInvariantMonitorState)>,
+}
+
+#[cfg(debug_assertions)]
+impl PersistenceInvariantSnapshot {
+	fn new<C: AChannelManager>(cm: &C) -> Self {
+		let cm_ref = cm.get_cm();
+		let serialized = Self::encode(cm_ref, false);
+		let serialized_ignoring_replayable_fields = Self::encode(cm_ref, true);
+		let replayable_fields = PersistenceInvariantReplayableFields::new(cm);
+		Self { serialized, serialized_ignoring_replayable_fields, replayable_fields }
+	}
+
+	fn encode<C: AChannelManager>(cm: &C, normalize_replayable_fields: bool) -> Vec<u8> {
+		let cm_ref = cm.get_cm();
+		cm_ref.encode_with_options(normalize_replayable_fields)
+	}
+
+	fn critical_change_since(&self, after: &Self) -> bool {
+		self.serialized_ignoring_replayable_fields != after.serialized_ignoring_replayable_fields
+			|| self.replayable_fields.critical_change_since(&after.replayable_fields)
+	}
+}
+
+#[cfg(debug_assertions)]
+impl PersistenceInvariantReplayableFields {
+	fn new<C: AChannelManager>(cm: &C) -> Self {
+		let cm_ref = cm.get_cm();
+		let per_peer_state = cm_ref.per_peer_state.read().unwrap();
+		let mut in_flight_monitor_updates = Vec::new();
+		let mut monitor_state = Vec::new();
+
+		for (counterparty_node_id, peer_state_mutex) in per_peer_state.iter() {
+			let peer_state = peer_state_mutex.lock().unwrap();
+			for (channel_id, (funding_txo, updates)) in peer_state.in_flight_monitor_updates.iter()
+			{
+				if !updates.is_empty() {
+					in_flight_monitor_updates.push((
+						*counterparty_node_id,
+						*channel_id,
+						*funding_txo,
+						updates.clone(),
+					));
+				}
+			}
+			for (channel_id, channel) in peer_state.channel_by_id.iter() {
+				if let Some(chan) = channel.as_funded() {
+					monitor_state.push((
+						*counterparty_node_id,
+						*channel_id,
+						chan.persistence_invariant_monitor_state(),
+					));
+				}
+			}
+		}
+
+		in_flight_monitor_updates.sort_unstable_by(
+			|(node_a, channel_a, outpoint_a, _), (node_b, channel_b, outpoint_b, _)| {
+				node_a
+					.serialize()
+					.cmp(&node_b.serialize())
+					.then_with(|| channel_a.cmp(channel_b))
+					.then_with(|| outpoint_a.cmp(outpoint_b))
+			},
+		);
+		monitor_state.sort_unstable_by(|(node_a, channel_a, _), (node_b, channel_b, _)| {
+			node_a.serialize().cmp(&node_b.serialize()).then_with(|| channel_a.cmp(channel_b))
+		});
+
+		Self { in_flight_monitor_updates, monitor_state }
+	}
+
+	fn critical_change_since(&self, after: &Self) -> bool {
+		self.in_flight_monitor_updates_critical_change_since(&after.in_flight_monitor_updates)
+			|| self.monitor_state_critical_change_since(&after.monitor_state)
+	}
+
+	fn in_flight_monitor_updates_critical_change_since(
+		&self, after: &[(PublicKey, ChannelId, OutPoint, Vec<ChannelMonitorUpdate>)],
+	) -> bool {
+		for (after_node_id, after_channel_id, after_funding_txo, after_updates) in after {
+			let before_updates = self.in_flight_monitor_updates.iter().find(
+				|(before_node_id, before_channel_id, before_funding_txo, _)| {
+					before_node_id == after_node_id
+						&& before_channel_id == after_channel_id
+						&& before_funding_txo == after_funding_txo
+				},
+			);
+			let Some((_, _, _, before_updates)) = before_updates else { return true };
+			if !Self::monitor_updates_are_subset(after_updates, before_updates) {
+				return true;
+			}
+		}
+		false
+	}
+
+	fn monitor_updates_are_subset(
+		after_updates: &[ChannelMonitorUpdate], before_updates: &[ChannelMonitorUpdate],
+	) -> bool {
+		let mut used_before_updates = vec![false; before_updates.len()];
+		for after_update in after_updates {
+			let before_idx = before_updates
+				.iter()
+				.enumerate()
+				.find(|(idx, before_update)| {
+					!used_before_updates[*idx] && *before_update == after_update
+				})
+				.map(|(idx, _)| idx);
+			let Some(before_idx) = before_idx else { return false };
+			used_before_updates[before_idx] = true;
+		}
+		true
+	}
+
+	fn monitor_state_critical_change_since(
+		&self, after: &[(PublicKey, ChannelId, PersistenceInvariantMonitorState)],
+	) -> bool {
+		for (after_node_id, after_channel_id, after_state) in after {
+			let before_state =
+				self.monitor_state.iter().find(|(before_node_id, before_channel_id, _)| {
+					before_node_id == after_node_id && before_channel_id == after_channel_id
+				});
+			let Some((_, _, before_state)) = before_state else {
+				if after_state.monitor_update_in_progress
+					|| after_state.monitor_pending_revoke_and_ack
+					|| after_state.monitor_pending_commitment_signed
+				{
+					return true;
+				}
+				continue;
+			};
+			if (!before_state.monitor_update_in_progress && after_state.monitor_update_in_progress)
+				|| (!before_state.monitor_pending_revoke_and_ack
+					&& after_state.monitor_pending_revoke_and_ack)
+				|| (!before_state.monitor_pending_commitment_signed
+					&& after_state.monitor_pending_commitment_signed)
+			{
+				return true;
+			}
+		}
+		false
+	}
 }
 
 // We don't care what the concrete F is here, it's unused
@@ -3094,17 +3250,17 @@ impl<'a> PersistenceNotifierGuard<'a, fn() -> NotifyOption> {
 		if cm_ref.total_consistency_lock.try_write().is_err() {
 			return None;
 		}
-		let serialized_before = if cm_ref.needs_persist_flag.load(Ordering::Acquire) {
+		let snapshot_before = if cm_ref.needs_persist_flag.load(Ordering::Acquire) {
 			None
 		} else {
-			Some(cm_ref.encode())
+			Some(PersistenceInvariantSnapshot::new(cm))
 		};
-		let serialize_cm = cm;
+		let snapshot_cm = cm;
 		let lock_cm = cm;
 		Some(PersistenceInvariant {
 			callsite: core::panic::Location::caller(),
-			serialized_before,
-			serialize: Box::new(move || serialize_cm.get_cm().encode()),
+			snapshot_before,
+			snapshot: Box::new(move || PersistenceInvariantSnapshot::new(snapshot_cm)),
 			consistency_lock_available: Box::new(move || {
 				lock_cm.get_cm().total_consistency_lock.try_write().is_ok()
 			}),
@@ -3305,30 +3461,36 @@ impl<'a> PersistenceInvariant<'a> {
 		if !(self.consistency_lock_available)() {
 			return;
 		}
-		let Some(serialized_before) = self.serialized_before.as_ref() else { return };
+		let Some(snapshot_before) = self.snapshot_before.as_ref() else { return };
 
-		let serialized_after = (self.serialize)();
-		let manager_changed = serialized_before.as_slice() != serialized_after.as_slice();
+		let snapshot_after = (self.snapshot)();
+		let manager_changed =
+			snapshot_before.serialized.as_slice() != snapshot_after.serialized.as_slice();
+		let critical_manager_changed = snapshot_before.critical_change_since(&snapshot_after);
 		let needs_persist_after = needs_persist_flag.load(Ordering::Acquire);
-		let first_diff = serialized_before
+		let first_diff = snapshot_before
+			.serialized
 			.iter()
-			.zip(serialized_after.iter())
+			.zip(snapshot_after.serialized.iter())
 			.position(|(before, after)| before != after)
 			.or_else(|| {
-				(serialized_before.len() != serialized_after.len())
-					.then_some(cmp::min(serialized_before.len(), serialized_after.len()))
+				(snapshot_before.serialized.len() != snapshot_after.serialized.len()).then_some(
+					cmp::min(snapshot_before.serialized.len(), snapshot_after.serialized.len()),
+				)
 			});
 		assert_eq!(
-			manager_changed,
+			critical_manager_changed,
 			needs_persist_after,
 			"{} changed ChannelManager serialization and persistence flag out of sync: \
-			changed {}, needs_persist {}, first diff {:?}, before len {}, after len {}",
+			changed {}, critical_changed {}, needs_persist {}, first diff {:?}, before len {}, \
+			after len {}",
 			self.callsite,
 			manager_changed,
+			critical_manager_changed,
 			needs_persist_after,
 			first_diff,
-			serialized_before.len(),
-			serialized_after.len()
+			snapshot_before.serialized.len(),
+			snapshot_after.serialized.len()
 		);
 	}
 }
@@ -9966,8 +10128,7 @@ impl<
 		ComplFunc: FnOnce(
 			Option<u64>,
 			bool,
-		)
-			-> (Option<MonitorUpdateCompletionAction>, Option<RAAMonitorUpdateBlockingAction>),
+		) -> (Option<MonitorUpdateCompletionAction>, Option<RAAMonitorUpdateBlockingAction>),
 	>(
 		&self, prev_hop: &HTLCPreviousHopData, payment_preimage: PaymentPreimage,
 		payment_info: Option<PaymentClaimDetails>, attribution_data: Option<AttributionData>,
@@ -10005,8 +10166,7 @@ impl<
 		ComplFunc: FnOnce(
 			Option<u64>,
 			bool,
-		)
-			-> (Option<MonitorUpdateCompletionAction>, Option<RAAMonitorUpdateBlockingAction>),
+		) -> (Option<MonitorUpdateCompletionAction>, Option<RAAMonitorUpdateBlockingAction>),
 	>(
 		&self, prev_hop: HTLCClaimSource, payment_preimage: PaymentPreimage,
 		payment_info: Option<PaymentClaimDetails>, attribution_data: Option<AttributionData>,
@@ -18272,10 +18432,19 @@ impl<
 		R: Router,
 		MR: MessageRouter,
 		L: Logger,
-	> Writeable for ChannelManager<M, T, ES, NS, SP, F, R, MR, L>
+	> ChannelManager<M, T, ES, NS, SP, F, R, MR, L>
 {
+	#[cfg(debug_assertions)]
+	fn encode_with_options(&self, normalize_replayable_fields: bool) -> Vec<u8> {
+		let mut msg = VecWriter(Vec::new());
+		self.write_with_options(&mut msg, normalize_replayable_fields).unwrap();
+		msg.0
+	}
+
 	#[rustfmt::skip]
-	fn write<W: Writer>(&self, writer: &mut W) -> Result<(), io::Error> {
+	fn write_with_options<W: Writer>(
+		&self, writer: &mut W, normalize_replayable_fields: bool,
+	) -> Result<(), io::Error> {
 		let _consistency_lock = self.total_consistency_lock.write().unwrap();
 
 		write_ver_prefix!(writer, SERIALIZATION_VERSION, MIN_SERIALIZATION_VERSION);
@@ -18316,7 +18485,7 @@ impl<
 					.filter_map(Channel::as_funded)
 					.filter(|channel| channel.context.can_resume_on_restart())
 				{
-					channel.write(writer)?;
+					channel.write_with_options(writer, normalize_replayable_fields)?;
 				}
 			}
 		}
@@ -18512,13 +18681,15 @@ impl<
 
 		let mut legacy_in_flight_monitor_updates: Option<Vec<((&PublicKey, &OutPoint), &Vec<ChannelMonitorUpdate>)>> = None;
 		let mut in_flight_monitor_updates: Option<Vec<((&PublicKey, &ChannelId), &Vec<ChannelMonitorUpdate>)>> = None;
-		for ((counterparty_id, _), peer_state) in per_peer_state.iter().zip(peer_states.iter()) {
-			for (channel_id, (funding_txo, updates)) in peer_state.in_flight_monitor_updates.iter() {
-				if !updates.is_empty() {
-					legacy_in_flight_monitor_updates.get_or_insert_with(Vec::new)
-						.push(((counterparty_id, funding_txo), updates));
-					in_flight_monitor_updates.get_or_insert_with(Vec::new)
-						.push(((counterparty_id, channel_id), updates));
+		if !normalize_replayable_fields {
+			for ((counterparty_id, _), peer_state) in per_peer_state.iter().zip(peer_states.iter()) {
+				for (channel_id, (funding_txo, updates)) in peer_state.in_flight_monitor_updates.iter() {
+					if !updates.is_empty() {
+						legacy_in_flight_monitor_updates.get_or_insert_with(Vec::new)
+							.push(((counterparty_id, funding_txo), updates));
+						in_flight_monitor_updates.get_or_insert_with(Vec::new)
+							.push(((counterparty_id, channel_id), updates));
+					}
 				}
 			}
 		}
@@ -18559,6 +18730,23 @@ impl<
 		events.truncate(event_count);
 
 		Ok(())
+	}
+}
+
+impl<
+		M: chain::Watch<SP::EcdsaSigner>,
+		T: BroadcasterInterface,
+		ES: EntropySource,
+		NS: NodeSigner,
+		SP: SignerProvider,
+		F: FeeEstimator,
+		R: Router,
+		MR: MessageRouter,
+		L: Logger,
+	> Writeable for ChannelManager<M, T, ES, NS, SP, F, R, MR, L>
+{
+	fn write<W: Writer>(&self, writer: &mut W) -> Result<(), io::Error> {
+		self.write_with_options(writer, false)
 	}
 }
 
