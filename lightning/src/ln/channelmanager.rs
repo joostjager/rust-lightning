@@ -134,8 +134,8 @@ use crate::util::errors::APIError;
 use crate::util::logger::{Level, Logger, WithContext};
 use crate::util::scid_utils::fake_scid;
 use crate::util::ser::{
-	BigSize, FixedLengthReader, LengthReadable, MaybeReadable, Readable, ReadableArgs, VecWriter,
-	WithoutLength, Writeable, Writer,
+	BigSize, CollectionLength, FixedLengthReader, LengthReadable, MaybeReadable, Readable,
+	ReadableArgs, VecWriter, WithoutLength, Writeable, Writer,
 };
 use crate::util::wakers::{Future, Notifier};
 
@@ -1600,6 +1600,15 @@ enum PostMonitorUpdateChanResume {
 		failed_htlcs: Vec<(HTLCSource, PaymentHash, HTLCFailReason)>,
 		committed_outbound_htlc_sources: Vec<(HTLCPreviousHopData, u64)>,
 	},
+}
+
+struct OrderedWriteableVec<T>(Vec<T>);
+
+impl<T: Writeable> Writeable for OrderedWriteableVec<T> {
+	fn write<W: Writer>(&self, writer: &mut W) -> Result<(), io::Error> {
+		CollectionLength(self.0.len() as u64).write(writer)?;
+		WithoutLength(self.0.as_slice()).write(writer)
+	}
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -18287,16 +18296,22 @@ impl<
 		}
 
 		// Encode without retry info for 0.0.101 compatibility.
-		let mut pending_outbound_payments_no_retry: HashMap<PaymentId, HashSet<[u8; 32]>> = new_hash_map();
+		let mut pending_outbound_payments_no_retry: Vec<
+			(PaymentId, OrderedWriteableVec<[u8; 32]>),
+		> = Vec::new();
 		for (id, outbound) in pending_outbound_payments.iter() {
 			match outbound {
 				PendingOutboundPayment::Legacy { session_privs } |
 				PendingOutboundPayment::Retryable { session_privs, .. } => {
-					pending_outbound_payments_no_retry.insert(*id, session_privs.clone());
+					let mut session_privs = session_privs.iter().copied().collect::<Vec<_>>();
+					session_privs.sort_unstable();
+					pending_outbound_payments_no_retry.push((*id, OrderedWriteableVec(session_privs)));
 				},
 				_ => {},
 			}
 		}
+		pending_outbound_payments_no_retry
+			.sort_unstable_by(|(id_a, _), (id_b, _)| id_a.0.cmp(&id_b.0));
 
 		let mut pending_intercepted_htlcs = None;
 		if our_pending_intercepts.len() != 0 {
@@ -18310,17 +18325,28 @@ impl<
 			pending_claiming_payments = None;
 		}
 
-		let mut legacy_in_flight_monitor_updates: Option<HashMap<(&PublicKey, &OutPoint), &Vec<ChannelMonitorUpdate>>> = None;
-		let mut in_flight_monitor_updates: Option<HashMap<(&PublicKey, &ChannelId), &Vec<ChannelMonitorUpdate>>> = None;
+		let mut legacy_in_flight_monitor_updates: Option<Vec<((&PublicKey, &OutPoint), &Vec<ChannelMonitorUpdate>)>> = None;
+		let mut in_flight_monitor_updates: Option<Vec<((&PublicKey, &ChannelId), &Vec<ChannelMonitorUpdate>)>> = None;
 		for ((counterparty_id, _), peer_state) in per_peer_state.iter().zip(peer_states.iter()) {
 			for (channel_id, (funding_txo, updates)) in peer_state.in_flight_monitor_updates.iter() {
 				if !updates.is_empty() {
-					legacy_in_flight_monitor_updates.get_or_insert_with(|| new_hash_map())
-						.insert((counterparty_id, funding_txo), updates);
-					in_flight_monitor_updates.get_or_insert_with(|| new_hash_map())
-						.insert((counterparty_id, channel_id), updates);
+					legacy_in_flight_monitor_updates.get_or_insert_with(Vec::new)
+						.push(((counterparty_id, funding_txo), updates));
+					in_flight_monitor_updates.get_or_insert_with(Vec::new)
+						.push(((counterparty_id, channel_id), updates));
 				}
 			}
+		}
+		if let Some(updates) = legacy_in_flight_monitor_updates.as_mut() {
+			updates.sort_unstable_by(|((node_a, outpoint_a), _), ((node_b, outpoint_b), _)| {
+				node_a.serialize().cmp(&node_b.serialize()).then_with(|| outpoint_a.cmp(outpoint_b))
+			});
+		}
+		if let Some(updates) = in_flight_monitor_updates.as_mut() {
+			updates.sort_unstable_by(|((node_a, channel_id_a), _), ((node_b, channel_id_b), _)| {
+				node_a.serialize().cmp(&node_b.serialize())
+					.then_with(|| channel_id_a.cmp(channel_id_b))
+			});
 		}
 
 		write_tlv_fields!(writer, {
