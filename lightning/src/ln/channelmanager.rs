@@ -4656,7 +4656,7 @@ impl<
 	fn apply_post_close_monitor_update(
 		&self, counterparty_node_id: PublicKey, channel_id: ChannelId, funding_txo: OutPoint,
 		monitor_update: ChannelMonitorUpdate,
-	) {
+	) -> bool {
 		// Note that there may be some post-close updates which need to be well-ordered with
 		// respect to the `update_id`, so we hold the `peer_state` lock here.
 		let per_peer_state = self.per_peer_state.read().unwrap();
@@ -4678,9 +4678,9 @@ impl<
 					) {
 						mem::drop(peer_state_lock);
 						mem::drop(per_peer_state);
-						let _ = self.handle_post_monitor_update_chan_resume(data);
+						return self.handle_post_monitor_update_chan_resume(data);
 					}
-					return;
+					return false;
 				} else {
 					debug_assert!(false, "We shouldn't have an update for a non-funded channel");
 				}
@@ -4699,6 +4699,9 @@ impl<
 			mem::drop(peer_state_lock);
 			mem::drop(per_peer_state);
 			self.handle_monitor_update_completion_actions(actions);
+			true
+		} else {
+			false
 		}
 	}
 
@@ -5053,7 +5056,7 @@ impl<
 			log_error!(logger, "Closed channel due to close-required error: {}", msg);
 
 			if let Some((_, funding_txo, _, update)) = shutdown_res.monitor_update.take() {
-				self.handle_new_monitor_update_locked_actions_handled_by_caller(
+				let _ = self.handle_new_monitor_update_locked_actions_handled_by_caller(
 					in_flight_monitor_updates,
 					chan.context.channel_id(),
 					funding_txo,
@@ -9103,6 +9106,7 @@ impl<
 			return NotifyOption::SkipPersistNoEvents;
 		}
 
+		let mut needs_persist = false;
 		for event in background_events.drain(..) {
 			match event {
 				BackgroundEvent::MonitorUpdateRegeneratedOnStartup {
@@ -9111,7 +9115,7 @@ impl<
 					channel_id,
 					update,
 				} => {
-					self.apply_post_close_monitor_update(
+					needs_persist |= self.apply_post_close_monitor_update(
 						counterparty_node_id,
 						channel_id,
 						funding_txo,
@@ -9128,7 +9132,7 @@ impl<
 					// already been persisted to the monitor and can be applied to our internal
 					// state such that the channel resumes operation if no new updates have been
 					// made since.
-					let _ = self.channel_monitor_updated(
+					needs_persist |= self.channel_monitor_updated(
 						&channel_id,
 						Some(highest_update_id_completed),
 						&counterparty_node_id,
@@ -9136,7 +9140,11 @@ impl<
 				},
 			}
 		}
-		NotifyOption::DoPersist
+		if needs_persist {
+			NotifyOption::DoPersist
+		} else {
+			NotifyOption::SkipPersistHandleEvents
+		}
 	}
 
 	#[cfg(any(test, feature = "_test_utils"))]
@@ -14054,7 +14062,6 @@ This indicates a bug inside LDK. Please report this error at https://github.com/
 			for monitor_event in monitor_events.drain(..) {
 				match monitor_event {
 					MonitorEvent::HTLCEvent(htlc_update) => {
-						needs_persist = true;
 						let logger = WithContext::from(
 							&self.logger,
 							Some(counterparty_node_id),
@@ -14105,7 +14112,6 @@ This indicates a bug inside LDK. Please report this error at https://github.com/
 					},
 					MonitorEvent::HolderForceClosed(_)
 					| MonitorEvent::HolderForceClosedWithInfo { .. } => {
-						needs_persist = true;
 						let per_peer_state = self.per_peer_state.read().unwrap();
 						if let Some(peer_state_mutex) = per_peer_state.get(&counterparty_node_id) {
 							let mut peer_state_lock = peer_state_mutex.lock().unwrap();
@@ -14113,6 +14119,7 @@ This indicates a bug inside LDK. Please report this error at https://github.com/
 							if let hash_map::Entry::Occupied(chan_entry) =
 								peer_state.channel_by_id.entry(channel_id)
 							{
+								needs_persist = true;
 								let reason = if let MonitorEvent::HolderForceClosedWithInfo {
 									reason,
 									..
@@ -14138,7 +14145,6 @@ This indicates a bug inside LDK. Please report this error at https://github.com/
 						}
 					},
 					MonitorEvent::CommitmentTxConfirmed(_) => {
-						needs_persist = true;
 						let per_peer_state = self.per_peer_state.read().unwrap();
 						if let Some(peer_state_mutex) = per_peer_state.get(&counterparty_node_id) {
 							let mut peer_state_lock = peer_state_mutex.lock().unwrap();
@@ -14146,6 +14152,7 @@ This indicates a bug inside LDK. Please report this error at https://github.com/
 							if let hash_map::Entry::Occupied(chan_entry) =
 								peer_state.channel_by_id.entry(channel_id)
 							{
+								needs_persist = true;
 								let reason = ClosureReason::CommitmentTxConfirmed;
 								let err = ChannelError::Close((reason.to_string(), reason));
 								let mut chan = chan_entry.remove();
@@ -16204,7 +16211,7 @@ impl<
 	/// will randomly be placed first or last in the returned array.
 	fn get_and_clear_pending_msg_events(&self) -> Vec<MessageSendEvent> {
 		let events = RefCell::new(Vec::new());
-		PersistenceNotifierGuard::optionally_notify_without_persistence_invariant(self, || {
+		PersistenceNotifierGuard::optionally_notify(self, || {
 			// This method is quite performance-sensitive. Not only is it called very often, but it
 			// *is* the critical path between generating a message for a peer and giving it to the
 			// `PeerManager` to send. Thus, we should avoid adding any more logic here than we
@@ -16582,7 +16589,7 @@ impl<
 											insert_short_channel_id!(short_to_chan_info, funded_channel);
 
 											if let Some(monitor_update) = monitor_update_opt {
-												self.handle_new_monitor_update_locked_actions_handled_by_caller(
+												let _ = self.handle_new_monitor_update_locked_actions_handled_by_caller(
 													&mut peer_state.in_flight_monitor_updates,
 													funded_channel.context.channel_id(),
 													funding_txo,
