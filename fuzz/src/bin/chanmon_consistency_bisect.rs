@@ -1,7 +1,9 @@
+use std::collections::hash_map::DefaultHasher;
 use std::collections::{HashMap, VecDeque};
 use std::env;
 use std::ffi::{OsStr, OsString};
 use std::fs;
+use std::hash::{Hash, Hasher};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
@@ -21,6 +23,11 @@ const DEFAULT_TOOLCHAIN: &str = "1.75.0";
 const DEFAULT_BRANCH: &str = "HEAD";
 const SPLIT_REAL_HASHES_TARGET_PATH: &str =
 	"fuzz/fuzz-real-hashes/src/bin/chanmon_consistency_target.rs";
+const EMPTY_CASE_HEX_LABEL: &str = "<empty>";
+const EMPTY_CASE_RESULT_KEY: &str = "__empty__";
+const CASE_HEX_LABEL_MAX_LEN: usize = 64;
+const CASE_HEX_LABEL_PREFIX_LEN: usize = 32;
+const CASE_HEX_LABEL_SUFFIX_LEN: usize = 16;
 const REPLAY_RUNS: usize = 10;
 const REPLAY_TIMEOUT_SECS: u64 = 10;
 const REPLAY_TIMEOUT_POLL_MS: u64 = 50;
@@ -78,6 +85,13 @@ fn real_main() -> Result<(), String> {
 			let since = since.unwrap_or_else(|| OsString::from(DEFAULT_SINCE));
 			bisect_cached(&branch, &since, &options)
 		},
+		"fixed-by" => {
+			let (options, args) = parse_build_options(args.collect(), "fixed-by")?;
+			let (case_path, args) = parse_fixed_by_input(args)?;
+			let (branch, since) = parse_branch_and_optional_since(args, "fixed-by", true)?;
+			let since = since.unwrap_or_else(|| OsString::from(DEFAULT_SINCE));
+			fixed_by_cached(&branch, &since, &case_path, &options)
+		},
 		"list-merges" => {
 			let args: Vec<OsString> = args.collect();
 			let (branch, since) = parse_branch_and_optional_since(args, "list-merges", true)?;
@@ -114,6 +128,7 @@ fn print_usage() {
   cargo run --bin chanmon_consistency_bisect -- cache-commit [--cfg <name>] <rev> [<rev>...]
   cargo run --bin chanmon_consistency_bisect -- replay [--cfg <name>] <rev> <case-name>
   cargo run --bin chanmon_consistency_bisect -- bisect [--cfg <name>] [<branch>] [<since>]
+  cargo run --bin chanmon_consistency_bisect -- fixed-by [--cfg <name>] (--case <case-name> | --hex <hex>) [<branch>] [<since>]
   cargo run --bin chanmon_consistency_bisect -- list-merges [<branch>] [<since>]
   cargo run --bin chanmon_consistency_bisect -- list-cache [--cfg <name>]
 
@@ -122,7 +137,7 @@ If <branch> is omitted, {DEFAULT_BRANCH} is used. If <since> is omitted, {DEFAUL
 <branch> may also be provided as --branch <rev>.
 --cfg <name> may be repeated. Requested cfgs are only enabled for commits whose Cargo manifests
 declare the cfg in check-cfg.
-`bisect` automatically caches any missing first-parent merge revisions in the selected window, plus the selected tip.
+`bisect` and `fixed-by` automatically cache any missing first-parent merge revisions in the selected window, plus the selected tip.
 
 Environment:
   CHANMON_CACHE_DIR   Override the cache root, default {DEFAULT_CACHE_DIR}
@@ -193,6 +208,110 @@ fn validate_cfg_name(value: &str, command_name: &str) -> Result<String, String> 
 		return Err(format!("{command_name} invalid cfg name: {value}"));
 	}
 	Ok(value.to_string())
+}
+
+fn parse_fixed_by_input(args: Vec<OsString>) -> Result<(PathBuf, Vec<OsString>), String> {
+	let mut case_path = None;
+	let mut remaining = Vec::new();
+	let mut idx = 0usize;
+
+	while idx < args.len() {
+		let arg = &args[idx];
+		if arg == "--case" {
+			idx += 1;
+			let Some(value) = args.get(idx) else {
+				return Err("fixed-by requires a testcase name after --case".to_string());
+			};
+			set_fixed_by_case_path(
+				&mut case_path,
+				case_path_from_name(Path::new(value.as_os_str()))?,
+			)?;
+		} else if let Some(value) = arg.to_string_lossy().strip_prefix("--case=") {
+			set_fixed_by_case_path(&mut case_path, case_path_from_name(Path::new(value))?)?;
+		} else if arg == "--hex" {
+			idx += 1;
+			let Some(value) = args.get(idx) else {
+				return Err("fixed-by requires a hex string after --hex".to_string());
+			};
+			let bytes = decode_hex_input(value.as_os_str())?;
+			set_fixed_by_case_path(&mut case_path, write_hex_input_file(&bytes)?)?;
+		} else if let Some(value) = arg.to_string_lossy().strip_prefix("--hex=") {
+			let bytes = decode_hex_string(value)?;
+			set_fixed_by_case_path(&mut case_path, write_hex_input_file(&bytes)?)?;
+		} else {
+			remaining.push(arg.clone());
+		}
+		idx += 1;
+	}
+
+	let Some(case_path) = case_path else {
+		return Err("fixed-by needs --case <case-name> or --hex <hex>".to_string());
+	};
+	Ok((case_path, remaining))
+}
+
+fn set_fixed_by_case_path(slot: &mut Option<PathBuf>, path: PathBuf) -> Result<(), String> {
+	if slot.replace(path).is_some() {
+		return Err("fixed-by accepts exactly one --case or --hex input".to_string());
+	}
+	Ok(())
+}
+
+fn decode_hex_input(value: &OsStr) -> Result<Vec<u8>, String> {
+	let Some(value) = value.to_str() else {
+		return Err("fixed-by hex input must be valid utf-8".to_string());
+	};
+	decode_hex_string(value)
+}
+
+fn decode_hex_string(value: &str) -> Result<Vec<u8>, String> {
+	let mut normalized = String::new();
+	let mut chars = value.chars().peekable();
+	while let Some(ch) = chars.next() {
+		if ch.is_ascii_whitespace() {
+			continue;
+		}
+		if ch == '\\' {
+			if matches!(chars.peek(), Some('x' | 'X')) {
+				chars.next();
+			}
+			continue;
+		}
+		if ch == '0' && matches!(chars.peek(), Some('x' | 'X')) {
+			chars.next();
+			continue;
+		}
+		normalized.push(ch);
+	}
+
+	if normalized.is_empty() {
+		return Err("fixed-by hex input must not be empty".to_string());
+	}
+	if normalized.len() % 2 != 0 {
+		return Err("fixed-by hex input must contain an even number of hex digits".to_string());
+	}
+
+	let mut bytes = Vec::with_capacity(normalized.len() / 2);
+	let mut chars = normalized.chars();
+	while let (Some(high), Some(low)) = (chars.next(), chars.next()) {
+		let high =
+			high.to_digit(16).ok_or_else(|| format!("fixed-by invalid hex digit: {high:?}"))?;
+		let low = low.to_digit(16).ok_or_else(|| format!("fixed-by invalid hex digit: {low:?}"))?;
+		bytes.push(((high << 4) | low) as u8);
+	}
+	Ok(bytes)
+}
+
+fn write_hex_input_file(bytes: &[u8]) -> Result<PathBuf, String> {
+	let dir = cache_root()?.join("hex-inputs");
+	fs::create_dir_all(&dir)
+		.map_err(|err| format!("failed to create hex input dir {}: {err}", dir.display()))?;
+	let mut hasher = DefaultHasher::new();
+	bytes.hash(&mut hasher);
+	let path = dir.join(format!("{}-{:016x}", bytes.len(), hasher.finish()));
+	fs::write(&path, bytes)
+		.map_err(|err| format!("failed to write hex input {}: {err}", path.display()))?;
+	Ok(path)
 }
 
 fn parse_branch_and_optional_since(
@@ -539,7 +658,7 @@ fn commit_results_dir(cache_key: &str) -> Result<PathBuf, String> {
 }
 
 fn replay_result_path(cache_key: &str, case_hex: &str) -> Result<PathBuf, String> {
-	Ok(commit_results_dir(cache_key)?.join(case_hex))
+	Ok(commit_results_dir(cache_key)?.join(case_result_key(case_hex)))
 }
 
 fn write_build_info(
@@ -965,6 +1084,16 @@ struct CaseSummary {
 	result: CaseResult,
 }
 
+struct FixResult {
+	last_nonpass_commit: Option<String>,
+	last_nonpass_verdict: Option<ReplayVerdict>,
+	fixed_by_commit: Option<String>,
+	nonpassing_at_tip: bool,
+	passing_from_start: bool,
+	commits_tested: usize,
+	cached_commits_tested: usize,
+}
+
 fn bisect_cached(branch: &OsStr, since: &OsStr, options: &BuildOptions) -> Result<(), String> {
 	let expected_commits = merge_commits_since(since, branch)?;
 	cache_missing_binaries(&expected_commits, options)?;
@@ -981,9 +1110,9 @@ fn bisect_cached(branch: &OsStr, since: &OsStr, options: &BuildOptions) -> Resul
 
 	let mut summaries = Vec::new();
 	let total_cases = cases.len();
-	let max_case_hex_len = cases
+	let max_case_label_len = cases
 		.iter()
-		.map(|case_path| case_hex(case_path).map(|hex| hex.len()))
+		.map(|case_path| case_hex(case_path).map(|hex| case_hex_label(&hex).len()))
 		.collect::<Result<Vec<_>, _>>()?
 		.into_iter()
 		.max()
@@ -992,6 +1121,7 @@ fn bisect_cached(branch: &OsStr, since: &OsStr, options: &BuildOptions) -> Resul
 	for (idx, case_path) in cases.iter().enumerate() {
 		let case_start = Instant::now();
 		let case_hex = case_hex(case_path)?;
+		let case_label = case_hex_label(&case_hex);
 		let result = first_breaking_commit_for_case(case_path, &cached)?;
 		let case_elapsed = case_start.elapsed();
 		recent_case_durations.push_back(case_elapsed);
@@ -1014,13 +1144,13 @@ fn bisect_cached(branch: &OsStr, since: &OsStr, options: &BuildOptions) -> Resul
 			"[{}/{}] {:width$} {:<5} {} (commits {}, cached {}){}",
 			completed_cases,
 			total_cases,
-			case_hex,
+			case_label,
 			case_result_status(&result),
 			describe_case_result_detail(&result)?,
 			result.commits_tested,
 			result.cached_commits_tested,
 			eta_suffix,
-			width = max_case_hex_len
+			width = max_case_label_len
 		);
 		summaries.push(CaseSummary { case_hex, result });
 	}
@@ -1055,13 +1185,78 @@ fn bisect_cached(branch: &OsStr, since: &OsStr, options: &BuildOptions) -> Resul
 				.first_nonpass_verdict
 				.map(|verdict| format!(" [{}]", verdict.as_str()))
 				.unwrap_or_default();
-			println!("{}{}", summary.case_hex, status_suffix);
+			println!("{}{}", case_hex_label(&summary.case_hex), status_suffix);
 		}
 	}
 
 	if !printed_failure_section {
 		println!("\nNo failing or flaky testcases across cached merge commits.");
 	}
+	Ok(())
+}
+
+fn fixed_by_cached(
+	branch: &OsStr, since: &OsStr, case_path: &Path, options: &BuildOptions,
+) -> Result<(), String> {
+	let expected_commits = merge_commits_since(since, branch)?;
+	cache_missing_binaries(&expected_commits, options)?;
+
+	let cached = cached_commits_for_expected(&expected_commits, options)?;
+	if cached.is_empty() {
+		return Err("no cached commits found for the selected fixed-by window".to_string());
+	}
+
+	let case_hex = case_hex(case_path)?;
+	let result = fixing_commit_for_case(case_path, &cached)?;
+	println!("case {}", case_hex_label(&case_hex));
+
+	if result.nonpassing_at_tip {
+		let commit = result
+			.last_nonpass_commit
+			.as_deref()
+			.ok_or_else(|| "missing tip non-pass commit".to_string())?;
+		let verdict = result
+			.last_nonpass_verdict
+			.ok_or_else(|| "missing tip non-pass verdict".to_string())?;
+		println!(
+			"tip {} {} is still {}",
+			short_commit(commit)?,
+			commit_summary(commit)?,
+			verdict.as_str()
+		);
+		println!(
+			"commits tested {}, cached {}",
+			result.commits_tested, result.cached_commits_tested
+		);
+		return Ok(());
+	}
+
+	if result.passing_from_start {
+		println!("no failing or flaky result found across cached merge commits");
+		println!(
+			"commits tested {}, cached {}",
+			result.commits_tested, result.cached_commits_tested
+		);
+		return Ok(());
+	}
+
+	let fixed_by_commit =
+		result.fixed_by_commit.as_deref().ok_or_else(|| "missing fixing commit".to_string())?;
+	let last_nonpass_commit = result
+		.last_nonpass_commit
+		.as_deref()
+		.ok_or_else(|| "missing previous non-pass commit".to_string())?;
+	let last_nonpass_verdict = result
+		.last_nonpass_verdict
+		.ok_or_else(|| "missing previous non-pass verdict".to_string())?;
+	println!("fixed by {} {}", short_commit(fixed_by_commit)?, commit_summary(fixed_by_commit)?);
+	println!(
+		"previous non-pass {} {} [{}]",
+		short_commit(last_nonpass_commit)?,
+		commit_summary(last_nonpass_commit)?,
+		last_nonpass_verdict.as_str()
+	);
+	println!("commits tested {}, cached {}", result.commits_tested, result.cached_commits_tested);
 	Ok(())
 }
 
@@ -1123,6 +1318,66 @@ fn first_breaking_commit_for_case(
 		first_nonpass_commit: Some(cached[transition_idx].commit.clone()),
 		first_nonpass_verdict: Some(nonpass.verdict),
 		nonpassing_from_start: false,
+		commits_tested,
+		cached_commits_tested,
+	})
+}
+
+fn fixing_commit_for_case(case_path: &Path, cached: &[CachedCommit]) -> Result<FixResult, String> {
+	let mut outcomes = HashMap::new();
+	let mut commits_tested = 0usize;
+	let mut cached_commits_tested = 0usize;
+	let mut replay_at = |idx: usize, runs: usize| -> Result<ReplayOutcome, String> {
+		if let Some(result) = outcomes.get(&(idx, runs)) {
+			return Ok(*result);
+		}
+		let outcome = replay_cached_commit(&cached[idx], case_path, false, runs)?;
+		commits_tested += 1;
+		if outcome.cached {
+			cached_commits_tested += 1;
+		}
+		outcomes.insert((idx, runs), outcome);
+		Ok(outcome)
+	};
+
+	let latest_idx = cached.len() - 1;
+	let latest = replay_at(latest_idx, REPLAY_RUNS)?;
+	if !latest.verdict.is_pass() {
+		return Ok(FixResult {
+			last_nonpass_commit: Some(cached[latest_idx].commit.clone()),
+			last_nonpass_verdict: Some(latest.verdict),
+			fixed_by_commit: None,
+			nonpassing_at_tip: true,
+			passing_from_start: false,
+			commits_tested,
+			cached_commits_tested,
+		});
+	}
+
+	let mut fixed_by_idx = latest_idx;
+	for idx in (0..latest_idx).rev() {
+		let outcome = replay_at(idx, REPLAY_RUNS)?;
+		if outcome.verdict.is_pass() {
+			fixed_by_idx = idx;
+			continue;
+		}
+		return Ok(FixResult {
+			last_nonpass_commit: Some(cached[idx].commit.clone()),
+			last_nonpass_verdict: Some(outcome.verdict),
+			fixed_by_commit: Some(cached[fixed_by_idx].commit.clone()),
+			nonpassing_at_tip: false,
+			passing_from_start: false,
+			commits_tested,
+			cached_commits_tested,
+		});
+	}
+
+	Ok(FixResult {
+		last_nonpass_commit: None,
+		last_nonpass_verdict: None,
+		fixed_by_commit: None,
+		nonpassing_at_tip: false,
+		passing_from_start: true,
 		commits_tested,
 		cached_commits_tested,
 	})
@@ -1217,7 +1472,7 @@ fn cache_missing_binaries(
 		return Ok(());
 	}
 
-	println!("caching {} missing commit(s) required for bisect", missing_commits.len());
+	println!("caching {} missing commit(s) required for replay", missing_commits.len());
 	let total = missing_commits.len();
 	for (idx, commit) in missing_commits.iter().enumerate() {
 		cache_commit(OsStr::new(commit), Some((idx + 1, total)), options)?;
@@ -1341,6 +1596,29 @@ fn case_hex(path: &Path) -> Result<String, String> {
 	Ok(hex)
 }
 
+fn case_hex_label(case_hex: &str) -> String {
+	if case_hex.is_empty() {
+		EMPTY_CASE_HEX_LABEL.to_string()
+	} else if case_hex.len() > CASE_HEX_LABEL_MAX_LEN {
+		format!(
+			"{}..{} ({} bytes)",
+			&case_hex[..CASE_HEX_LABEL_PREFIX_LEN],
+			&case_hex[case_hex.len() - CASE_HEX_LABEL_SUFFIX_LEN..],
+			case_hex.len() / 2
+		)
+	} else {
+		case_hex.to_string()
+	}
+}
+
+fn case_result_key(case_hex: &str) -> &str {
+	if case_hex.is_empty() {
+		EMPTY_CASE_RESULT_KEY
+	} else {
+		case_hex
+	}
+}
+
 fn cargo_failure_summary(stdout: &[u8], stderr: &[u8]) -> String {
 	let combined = [stdout, stderr].concat();
 	let text = String::from_utf8_lossy(&combined);
@@ -1446,4 +1724,26 @@ fn run_output(command: &mut Command, description: &str) -> Result<std::process::
 
 fn exit_code(status: ExitStatus) -> i32 {
 	status.code().unwrap_or(1)
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[test]
+	fn empty_case_has_nonempty_result_key() {
+		assert_eq!(case_hex_label(""), EMPTY_CASE_HEX_LABEL);
+		assert_eq!(case_result_key(""), EMPTY_CASE_RESULT_KEY);
+		assert_eq!(case_hex_label("00ff"), "00ff");
+		assert_eq!(case_result_key("00ff"), "00ff");
+	}
+
+	#[test]
+	fn long_case_hex_label_is_bounded() {
+		let case_hex = "0123456789abcdef".repeat(16);
+		let label = case_hex_label(&case_hex);
+		assert!(label.len() < case_hex.len());
+		assert!(label.starts_with("0123456789abcdef0123456789abcdef.."));
+		assert!(label.ends_with("0123456789abcdef (128 bytes)"));
+	}
 }
