@@ -852,7 +852,7 @@ impl ReplayRunResult {
 	}
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ReplayVerdict {
 	Pass,
 	Fail,
@@ -1079,6 +1079,12 @@ struct CaseResult {
 	cached_commits_tested: usize,
 }
 
+struct RegressionSearchResult {
+	nonpass_idx: Option<usize>,
+	nonpass_verdict: Option<ReplayVerdict>,
+	nonpassing_from_start: bool,
+}
+
 struct CaseSummary {
 	case_hex: String,
 	result: CaseResult,
@@ -1263,63 +1269,69 @@ fn fixed_by_cached(
 fn first_breaking_commit_for_case(
 	case_path: &Path, cached: &[CachedCommit],
 ) -> Result<CaseResult, String> {
-	let mut outcomes = HashMap::new();
+	let mut outcomes = HashMap::<usize, ReplayOutcome>::new();
 	let mut commits_tested = 0usize;
 	let mut cached_commits_tested = 0usize;
-	let mut replay_at = |idx: usize, runs: usize| -> Result<ReplayOutcome, String> {
-		if let Some(result) = outcomes.get(&(idx, runs)) {
-			return Ok(*result);
+	let mut replay_at = |idx: usize| -> Result<ReplayVerdict, String> {
+		if let Some(result) = outcomes.get(&idx) {
+			return Ok(result.verdict);
 		}
-		let outcome = replay_cached_commit(&cached[idx], case_path, false, runs)?;
+		let outcome = replay_cached_commit(&cached[idx], case_path, false, REPLAY_RUNS)?;
 		commits_tested += 1;
 		if outcome.cached {
 			cached_commits_tested += 1;
 		}
-		outcomes.insert((idx, runs), outcome);
-		Ok(outcome)
+		outcomes.insert(idx, outcome);
+		Ok(outcome.verdict)
 	};
 
-	let latest_idx = cached.len() - 1;
-	let latest = replay_at(latest_idx, REPLAY_RUNS)?;
-	if latest.verdict.is_pass() {
-		return Ok(CaseResult {
-			first_nonpass_commit: None,
-			first_nonpass_verdict: None,
+	let search = latest_regression_search(cached.len(), &mut replay_at)?;
+	Ok(CaseResult {
+		first_nonpass_commit: search.nonpass_idx.map(|idx| cached[idx].commit.clone()),
+		first_nonpass_verdict: search.nonpass_verdict,
+		nonpassing_from_start: search.nonpassing_from_start,
+		commits_tested,
+		cached_commits_tested,
+	})
+}
+
+fn latest_regression_search<F>(
+	commit_count: usize, mut replay_at: F,
+) -> Result<RegressionSearchResult, String>
+where
+	F: FnMut(usize) -> Result<ReplayVerdict, String>,
+{
+	let latest_idx = commit_count
+		.checked_sub(1)
+		.ok_or_else(|| "cannot search an empty commit list".to_string())?;
+	let latest = replay_at(latest_idx)?;
+	if latest.is_pass() {
+		return Ok(RegressionSearchResult {
+			nonpass_idx: None,
+			nonpass_verdict: None,
 			nonpassing_from_start: false,
-			commits_tested,
-			cached_commits_tested,
-		});
-	}
-
-	let bisect_runs = REPLAY_RUNS;
-
-	let oldest = replay_at(0, bisect_runs)?;
-	if !oldest.verdict.is_pass() {
-		return Ok(CaseResult {
-			first_nonpass_commit: Some(cached[0].commit.clone()),
-			first_nonpass_verdict: Some(oldest.verdict),
-			nonpassing_from_start: true,
-			commits_tested,
-			cached_commits_tested,
 		});
 	}
 
 	let mut transition_idx = latest_idx;
+	let mut transition_verdict = latest;
 	for idx in (0..latest_idx).rev() {
-		let outcome = replay_at(idx, bisect_runs)?;
-		if outcome.verdict.is_pass() {
-			break;
+		let verdict = replay_at(idx)?;
+		if verdict.is_pass() {
+			return Ok(RegressionSearchResult {
+				nonpass_idx: Some(transition_idx),
+				nonpass_verdict: Some(transition_verdict),
+				nonpassing_from_start: false,
+			});
 		}
 		transition_idx = idx;
+		transition_verdict = verdict;
 	}
 
-	let nonpass = replay_at(transition_idx, bisect_runs)?;
-	Ok(CaseResult {
-		first_nonpass_commit: Some(cached[transition_idx].commit.clone()),
-		first_nonpass_verdict: Some(nonpass.verdict),
-		nonpassing_from_start: false,
-		commits_tested,
-		cached_commits_tested,
+	Ok(RegressionSearchResult {
+		nonpass_idx: Some(0),
+		nonpass_verdict: Some(transition_verdict),
+		nonpassing_from_start: true,
 	})
 }
 
@@ -1745,5 +1757,53 @@ mod tests {
 		assert!(label.len() < case_hex.len());
 		assert!(label.starts_with("0123456789abcdef0123456789abcdef.."));
 		assert!(label.ends_with("0123456789abcdef (128 bytes)"));
+	}
+
+	#[test]
+	fn latest_regression_search_ignores_old_failures_before_nearest_pass() {
+		let verdicts = [ReplayVerdict::Fail, ReplayVerdict::Pass, ReplayVerdict::Fail];
+		let mut tested = Vec::new();
+		let result = latest_regression_search(verdicts.len(), |idx| {
+			tested.push(idx);
+			Ok(verdicts[idx])
+		})
+		.unwrap();
+
+		assert_eq!(result.nonpass_idx, Some(2));
+		assert_eq!(result.nonpass_verdict, Some(ReplayVerdict::Fail));
+		assert!(!result.nonpassing_from_start);
+		assert_eq!(tested, vec![2, 1]);
+	}
+
+	#[test]
+	fn latest_regression_search_reports_unbounded_when_no_pass_is_found() {
+		let verdicts = [ReplayVerdict::Fail, ReplayVerdict::Flake, ReplayVerdict::Fail];
+		let mut tested = Vec::new();
+		let result = latest_regression_search(verdicts.len(), |idx| {
+			tested.push(idx);
+			Ok(verdicts[idx])
+		})
+		.unwrap();
+
+		assert_eq!(result.nonpass_idx, Some(0));
+		assert_eq!(result.nonpass_verdict, Some(ReplayVerdict::Fail));
+		assert!(result.nonpassing_from_start);
+		assert_eq!(tested, vec![2, 1, 0]);
+	}
+
+	#[test]
+	fn latest_regression_search_returns_none_when_tip_passes() {
+		let verdicts = [ReplayVerdict::Fail, ReplayVerdict::Pass];
+		let mut tested = Vec::new();
+		let result = latest_regression_search(verdicts.len(), |idx| {
+			tested.push(idx);
+			Ok(verdicts[idx])
+		})
+		.unwrap();
+
+		assert_eq!(result.nonpass_idx, None);
+		assert_eq!(result.nonpass_verdict, None);
+		assert!(!result.nonpassing_from_start);
+		assert_eq!(tested, vec![1]);
 	}
 }
