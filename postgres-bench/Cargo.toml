@@ -1,0 +1,14 @@
+[package]
+name = "postgres-bench"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+clap = { version = "4.5.38", features = ["derive", "env"] }
+ctrlc = "3.4.7"
+hdrhistogram = "7.5.4"
+native-tls = "0.2.14"
+postgres = "0.19.10"
+postgres-native-tls = "0.5.1"
+
+[workspace]
