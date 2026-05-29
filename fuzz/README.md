@@ -157,6 +157,9 @@ RUSTFLAGS="--cfg=fuzzing --cfg=secp256k1_fuzz --cfg=hashes_fuzz" \
 	cargo test --manifest-path fuzz-fake-hashes/Cargo.toml --bin "${TARGET}_target"
 ```
 
+The `cargo test` command above is for fake-hashes targets. For `chanmon_consistency`, use
+`fuzz-real-hashes/Cargo.toml` and omit `--cfg=hashes_fuzz`.
+
 Note that if the fuzz test failed locally, moving the offending run's trace
 to the `test_cases` folder should also do the trick; simply replace the `echo $HEX |` line above
 with (the trace file name is of course a bit longer than in the example):
@@ -167,14 +170,12 @@ mv hfuzz_workspace/fuzz_target/SIGABRT.PC.7ffff7e21ce1.STACK.[…].fuzz ./test_c
 
 This will reproduce the failing fuzz input and yield a usable stack trace.
 
-Alternatively, you can use the `stdin_fuzz` feature to pipe the crash input directly without
-creating test case files on disk:
+Alternatively, use `replay-fuzz-hex.sh` to pipe the crash input directly without creating
+test case files on disk. It detects the right fuzz crate and `RUSTFLAGS` for the target:
 
 ```shell
 cd fuzz
-echo -ne '\x2d\x31\x36\x38\x37\x34\x09\x01...' | \
-	RUSTFLAGS="--cfg=fuzzing --cfg=secp256k1_fuzz --cfg=hashes_fuzz" \
-	cargo run --manifest-path fuzz-fake-hashes/Cargo.toml --features stdin_fuzz --bin full_stack_target
+./replay-fuzz-hex.sh "$TARGET" "$HEX"
 ```
 
 Panics will abort the process directly (the crate uses `panic = "abort"`), resulting in a
