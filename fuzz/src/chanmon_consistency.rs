@@ -14,9 +14,10 @@
 //! To test this we stand up a network of three nodes and read bytes from the fuzz input to denote
 //! actions such as sending payments, handling events, or changing monitor update return values on
 //! a per-node basis. This should allow it to find any cases where the ordering of actions results
-//! in us getting out of sync with ourselves, and, assuming at least one of our recieve- or
-//! send-side handling is correct, other peers. We consider it a failure if any action results in a
-//! channel being force-closed.
+//! in us getting out of sync with ourselves, and, assuming at least one of our receive- or
+//! send-side handling is correct, other peers. The fuzzer also models transaction relay
+//! through a harness mempool, making splice confirmation and block delivery closer to
+//! normal node behavior.
 
 use bitcoin::amount::Amount;
 use bitcoin::constants::genesis_block;
@@ -27,6 +28,7 @@ use bitcoin::script::{Builder, ScriptBuf};
 use bitcoin::transaction::Version;
 use bitcoin::transaction::{Transaction, TxOut};
 use bitcoin::FeeRate;
+use bitcoin::OutPoint as BitcoinOutPoint;
 
 use bitcoin::block::Header;
 use bitcoin::hash_types::Txid;
@@ -102,6 +104,22 @@ use std::sync::atomic;
 use std::sync::{Arc, Mutex};
 
 const MAX_FEE: u32 = 10_000;
+// The fuzz wallet needs enough confirmed inputs to build many splice
+// transactions without accidentally exhausting wallet liquidity before the
+// transaction-relay logic is what the test is really exercising.
+const NUM_WALLET_UTXOS: u32 = 50;
+// A mined transaction is considered deeply confirmed after this many blocks.
+// This confirms the transaction in one block and then mines five empty depth
+// blocks.
+const DEFAULT_TX_CONFIRMATION_BLOCKS: u32 = 6;
+// Single fuzz bytes can mine more than one block so a corpus entry does not
+// need long runs of identical "mine one block" commands to reach CSV or CLTV
+// boundaries. Mining is clipped below if unresolved HTLCs are near expiry.
+const MINE_BLOCK_COUNTS: [u32; 8] = [1, 2, 3, 6, 12, 24, 48, 144];
+// Finish-time relay/mining is capped so cleanup can drive realistic
+// asynchronous transaction work without letting a malformed state spin forever.
+const MAX_FINISH_RELAY_MINE_ROUNDS: usize = 32;
+
 struct FuzzEstimator {
 	ret_val: atomic::AtomicU32,
 }
@@ -183,19 +201,29 @@ impl BroadcasterInterface for TestBroadcaster {
 struct ChainState {
 	blocks: Vec<(Header, Vec<Transaction>)>,
 	confirmed_txids: HashSet<Txid>,
-	/// Unconfirmed transactions (e.g., splice txs). Conflicting RBF candidates may coexist;
-	/// `confirm_pending_txs` determines which one confirms.
+	/// Unconfirmed transactions admitted by the harness mempool. Admission keeps
+	/// this vector in block order: every input is either confirmed already or
+	/// created by an earlier transaction in this vector.
 	pending_txs: Vec<(Txid, Transaction)>,
+	/// Tracks unspent outputs created by confirmed transactions. Admission builds
+	/// a temporary package view from this set plus earlier mempool transactions,
+	/// which prevents phantom spends of outputs the harness never created.
+	utxos: HashSet<BitcoinOutPoint>,
 }
 
 impl ChainState {
 	fn new() -> Self {
+		// Height zero is a dummy genesis block. All later heights are built by
+		// the harness and connected to ChannelManagers and ChannelMonitors
+		// through the same callback sequence LDK receives from a real chain
+		// source.
 		let genesis_hash = genesis_block(Network::Bitcoin).block_hash();
 		let genesis_header = create_dummy_header(genesis_hash, 42);
 		Self {
 			blocks: vec![(genesis_header, Vec::new())],
 			confirmed_txids: HashSet::new(),
 			pending_txs: Vec::new(),
+			utxos: HashSet::new(),
 		}
 	}
 
@@ -203,79 +231,275 @@ impl ChainState {
 		(self.blocks.len() - 1) as u32
 	}
 
-	fn is_outpoint_spent(&self, outpoint: &bitcoin::OutPoint) -> bool {
-		self.blocks.iter().any(|(_, txs)| {
-			txs.iter().any(|tx| tx.input.iter().any(|input| input.previous_output == *outpoint))
-		})
+	// Identifies harness-created funding placeholders. We need to distinguish
+	// them from relayable transactions because they bypass normal mempool input
+	// validation during channel setup.
+	fn is_synthetic_funding_tx(tx: &Transaction) -> bool {
+		// Initial channel funding in this harness is represented by a no-input
+		// transaction. It is not a valid Bitcoin transaction, but it gives LDK a
+		// stable funding outpoint without making the harness model coin
+		// selection during channel setup.
+		!tx.is_coinbase() && tx.input.is_empty()
 	}
 
-	fn confirm_tx(&mut self, tx: Transaction) -> bool {
-		let txid = tx.compute_txid();
-		if self.confirmed_txids.contains(&txid) {
-			return false;
+	// Checks whether a transaction spends unavailable or duplicate inputs. We
+	// need this to keep double-spends and unknown-prevout spends from producing
+	// impossible on-chain state.
+	fn has_invalid_inputs(tx: &Transaction, utxos: &HashSet<BitcoinOutPoint>) -> bool {
+		// The tiny UTXO set protects the chain model from two false positives:
+		// accepting a double-spend in the same block, and accepting a
+		// spend of an output the harness never created.
+		let mut spent_inputs = HashSet::new();
+		for input in &tx.input {
+			if !spent_inputs.insert(input.previous_output) {
+				return true;
+			}
+			if !utxos.contains(&input.previous_output) {
+				return true;
+			}
 		}
-		if tx.input.iter().any(|input| self.is_outpoint_spent(&input.previous_output)) {
-			return false;
-		}
-		self.confirmed_txids.insert(txid);
+		false
+	}
 
+	// Applies a confirmed transaction to ChainState's UTXO set. We need this
+	// whenever setup mining or mempool mining makes new outputs available to
+	// later confirmed transactions.
+	fn apply_tx_to_utxos(&mut self, txid: Txid, tx: &Transaction) {
+		// Coinbase transactions have a null input, and synthetic funding
+		// transactions have no inputs, but neither consumes a modeled UTXO.
+		// Normal transactions consume their inputs before exposing outputs to
+		// later transactions.
+		let is_coinbase = tx.is_coinbase();
+		if !is_coinbase {
+			for input in &tx.input {
+				self.utxos.remove(&input.previous_output);
+			}
+		}
+		for idx in 0..tx.output.len() {
+			self.utxos.insert(BitcoinOutPoint { txid, vout: idx as u32 });
+		}
+	}
+
+	// Appends one block to the harness chain. We need a single primitive so
+	// setup mining, empty mining, and mempool mining share block construction.
+	fn mine_block(&mut self, txs: Vec<Transaction>) {
 		let prev_hash = self.blocks.last().unwrap().0.block_hash();
 		let header = create_dummy_header(prev_hash, 42);
-		self.blocks.push((header, vec![tx]));
-
-		for _ in 0..5 {
-			let prev_hash = self.blocks.last().unwrap().0.block_hash();
-			let header = create_dummy_header(prev_hash, 42);
-			self.blocks.push((header, Vec::new()));
-		}
-		true
+		self.blocks.push((header, txs));
 	}
 
-	/// Add a transaction to the pending pool (mempool). Multiple conflicting transactions (RBF
-	/// candidates) may coexist; `confirm_pending_txs` selects which one to confirm.
-	fn add_pending_tx(&mut self, tx: Transaction) {
-		self.pending_txs.push((tx.compute_txid(), tx));
+	// Mines empty height-only blocks. We need this for confirmation depth and
+	// CSV/CLTV advancement without inventing transactions.
+	fn mine_empty_blocks(&mut self, count: u32) {
+		for _ in 0..count {
+			self.mine_block(Vec::new());
+		}
 	}
 
-	/// Confirm pending transactions in a single block, selecting deterministically among
-	/// conflicting RBF candidates. Sorting by txid ensures the winner is determined by fuzz input
-	/// content. Transactions that double-spend an already-confirmed outpoint are skipped.
-	fn confirm_pending_txs(&mut self) {
-		let mut txs = std::mem::take(&mut self.pending_txs);
-		txs.sort_by_key(|(txid, _)| *txid);
+	// Directly mines harness-generated setup transactions to a target depth. We
+	// need this bypass because wallet seeding and synthetic funding are not
+	// relayable mempool transactions.
+	fn mine_setup_tx_to_depth(&mut self, tx: Transaction, depth: u32) {
+		// Channel setup and wallet seeding need immediate confirmation. This
+		// bypasses the mempool and is only for harness-generated coinbase
+		// wallet transactions and synthetic no-input channel funding
+		// transactions.
+		assert!(
+			tx.is_coinbase() || Self::is_synthetic_funding_tx(&tx),
+			"direct setup mining is only for coinbase and synthetic funding transactions: {:?}",
+			tx,
+		);
+		let txid = tx.compute_txid();
+		assert!(
+			self.confirmed_txids.insert(txid),
+			"direct setup transaction was already confirmed: {:?}",
+			tx,
+		);
+		self.apply_tx_to_utxos(txid, &tx);
 
-		let mut confirmed = Vec::new();
-		let mut spent_outpoints = Vec::new();
-		for (txid, tx) in txs {
-			if self.confirmed_txids.contains(&txid) {
-				continue;
-			}
-			if tx.input.iter().any(|input| {
-				self.is_outpoint_spent(&input.previous_output)
-					|| spent_outpoints.contains(&input.previous_output)
-			}) {
-				continue;
-			}
-			self.confirmed_txids.insert(txid);
-			for input in &tx.input {
-				spent_outpoints.push(input.previous_output);
-			}
-			confirmed.push(tx);
+		self.mine_block(vec![tx]);
+		self.mine_empty_blocks(depth.saturating_sub(1));
+	}
+
+	// Attempts to admit a broadcast transaction to the modeled mempool. We need
+	// admission to enforce locktime, input, and RBF rules so mining can later
+	// confirm the whole mempool without doing transaction selection.
+	fn admit_tx_to_mempool(&mut self, tx: Transaction) {
+		let txid = tx.compute_txid();
+		// Enforce locktime at mempool admission. Once a transaction is admitted,
+		// mining can move the whole mempool into a block without rechecking
+		// whether each transaction has become height-ready.
+		let lock_time = tx.lock_time.to_consensus_u32();
+		let locktime_enabled =
+			tx.input.iter().any(|input| input.sequence.enables_absolute_lock_time());
+
+		// Commitment transactions split the obscured commitment number across
+		// nSequence and nLockTime with fixed top bytes 0x80 and 0x20. The
+		// non-final sequence makes rust-bitcoin treat nLockTime as relevant,
+		// and the fixed 0x20 byte puts it above the 500M timestamp threshold
+		// even though it is not a fuzz-driven wall-clock lock.
+		let is_ldk_commitment_obscured_locktime =
+			tx.input.len() == 1 && tx.input[0].sequence.0 >> 24 == 0x80 && lock_time >> 24 == 0x20;
+
+		// A height lock at or below the current tip is mempool-safe because
+		// mempools evaluate finality against the next block height.
+		let immature_absolute_locktime =
+			locktime_enabled && tx.lock_time.is_block_height() && self.tip_height() < lock_time;
+		assert!(
+			!immature_absolute_locktime,
+			"broadcast immature locktime transaction into chanmon harness mempool: {:?}",
+			tx,
+		);
+
+		// Timestamp locktimes depend on median-time-past, which this fuzzer does
+		// not model. Treat them as unsupported except for the commitment
+		// encoding identified above.
+		let unmodeled_time_locktime = locktime_enabled
+			&& tx.lock_time.is_block_time()
+			&& !is_ldk_commitment_obscured_locktime;
+		assert!(
+			!unmodeled_time_locktime,
+			"broadcast time-locked transaction into chanmon harness mempool: {:?}",
+			tx,
+		);
+
+		// Coinbase transactions and the harness's no-input setup funding
+		// transactions are setup-only artifacts. They must be directly mined by
+		// mine_setup_tx_to_depth, never relayed through the normal mempool path.
+		assert!(
+			!tx.is_coinbase() && !Self::is_synthetic_funding_tx(&tx),
+			"setup-only transaction entered chanmon harness mempool: {:?}",
+			tx,
+		);
+
+		if self.confirmed_txids.contains(&txid) {
+			return;
 		}
-
-		if confirmed.is_empty() {
+		if self.pending_txs.iter().any(|(pending_txid, _)| *pending_txid == txid) {
 			return;
 		}
 
-		let prev_hash = self.blocks.last().unwrap().0.block_hash();
-		let header = create_dummy_header(prev_hash, 42);
-		self.blocks.push((header, confirmed));
-
-		for _ in 0..5 {
-			let prev_hash = self.blocks.last().unwrap().0.block_hash();
-			let header = create_dummy_header(prev_hash, 42);
-			self.blocks.push((header, Vec::new()));
+		// A real node's mempool cannot contain two transactions spending the
+		// same input. This harness models direct RBF conflicts at admission: a
+		// new transaction can replace a conflicting mempool transaction only if
+		// that conflicting transaction itself signals RBF. The harness does not
+		// model fee-rate policy, so fuzz-controlled relay order chooses between
+		// otherwise valid RBF candidates.
+		let mut conflicting_pending_txids = HashSet::new();
+		for (pending_txid, pending_tx) in &self.pending_txs {
+			let signals_rbf = pending_tx.input.iter().any(|input| input.sequence.is_rbf());
+			let conflicts_with_new_tx = pending_tx.input.iter().any(|pending_input| {
+				tx.input.iter().any(|input| input.previous_output == pending_input.previous_output)
+			});
+			if conflicts_with_new_tx {
+				if !signals_rbf {
+					return;
+				}
+				conflicting_pending_txids.insert(*pending_txid);
+			}
 		}
+		if !conflicting_pending_txids.is_empty() {
+			let mut removed_outputs = HashSet::new();
+			let mut retained_txs = Vec::new();
+			for (pending_txid, pending_tx) in self.pending_txs.drain(..) {
+				let direct_conflict = conflicting_pending_txids.contains(&pending_txid);
+				let spends_removed_tx = pending_tx
+					.input
+					.iter()
+					.any(|input| removed_outputs.contains(&input.previous_output));
+				if direct_conflict || spends_removed_tx {
+					// Remove direct conflicts and any children that would become
+					// orphans. Descendants do not make a conflict replaceable;
+					// they are only removed to keep the modeled mempool valid.
+					for idx in 0..pending_tx.output.len() {
+						removed_outputs
+							.insert(BitcoinOutPoint { txid: pending_txid, vout: idx as u32 });
+					}
+				} else {
+					retained_txs.push((pending_txid, pending_tx));
+				}
+			}
+			self.pending_txs = retained_txs;
+		}
+
+		// Build the UTXO set this transaction would see if the current mempool
+		// confirmed as a package. Start from the confirmed chain, then apply
+		// each admitted mempool transaction in order so the new transaction can
+		// spend outputs from earlier mempool parents, but not from later
+		// transactions or from nowhere. Mining consumes pending_txs in this
+		// same order, so admission checks the exact order later block
+		// construction will use.
+		let mut available_utxos = self.utxos.clone();
+		for (pending_txid, pending_tx) in &self.pending_txs {
+			// Mutate only the temporary package view. ChainState's real UTXO
+			// set changes later, when mining confirms the mempool.
+			let is_coinbase = pending_tx.is_coinbase();
+			if !is_coinbase {
+				for input in &pending_tx.input {
+					available_utxos.remove(&input.previous_output);
+				}
+			}
+			for idx in 0..pending_tx.output.len() {
+				available_utxos.insert(BitcoinOutPoint { txid: *pending_txid, vout: idx as u32 });
+			}
+		}
+		if Self::has_invalid_inputs(&tx, &available_utxos) {
+			return;
+		}
+		self.pending_txs.push((txid, tx));
+	}
+
+	// Feeds broadcast transactions through modeled mempool admission. We need
+	// this on ChainState so propagation and confirmation share one owner for
+	// duplicate, locktime, input, and RBF rules.
+	fn relay_transactions(&mut self, txs: Vec<Transaction>) {
+		for tx in txs {
+			// Broadcast does not imply confirmation. Accepted transactions
+			// enter ChainState's pending pool, and a mining command later moves
+			// every admitted mempool transaction into the next block.
+			self.admit_tx_to_mempool(tx);
+		}
+	}
+
+	// Mines `count` blocks, confirming the current mempool in the first block.
+	// We need this on ChainState so block production is kept with the mempool
+	// state that decides which transactions are eligible to confirm.
+	fn mine_blocks(&mut self, count: u32) -> Vec<Transaction> {
+		assert!(count > 0, "mining zero blocks should not be requested");
+
+		let mempool_txs = std::mem::take(&mut self.pending_txs);
+		let confirmed_txs = if mempool_txs.is_empty() {
+			// A mining command should always advance height by at least one
+			// block. If the mempool was empty, that one block is empty.
+			self.mine_empty_blocks(1);
+			Vec::new()
+		} else {
+			let mut confirmed = Vec::new();
+			for (txid, tx) in mempool_txs {
+				// Admission made this transaction block-ready. Mining deliberately
+				// does not reselect or drop transactions; it only consumes the
+				// mempool in order.
+				assert!(
+					!Self::has_invalid_inputs(&tx, &self.utxos),
+					"mempool transaction was no longer valid at mining time: {:?}",
+					tx,
+				);
+				assert!(
+					self.confirmed_txids.insert(txid),
+					"mempool transaction was already confirmed at mining time: {:?}",
+					tx,
+				);
+				self.apply_tx_to_utxos(txid, &tx);
+				confirmed.push(tx);
+			}
+			let confirmed_txs = confirmed.clone();
+			self.mine_block(confirmed);
+			confirmed_txs
+		};
+		// The first block either confirmed the mempool or was empty. Mine the
+		// remaining requested blocks as empty blocks.
+		self.mine_empty_blocks(count - 1);
+		confirmed_txs
 	}
 
 	fn block_at(&self, height: u32) -> &(Header, Vec<Transaction>) {
@@ -816,7 +1040,7 @@ struct HarnessNode<'a> {
 	logger: Arc<dyn Logger + MaybeSend + MaybeSync>,
 	broadcaster: Arc<TestBroadcaster>,
 	fee_estimator: Arc<FuzzEstimator>,
-	wallet: TestWalletSource,
+	wallet: Arc<TestWalletSource>,
 	persistence_style: ChannelMonitorUpdateStatus,
 	deferred: bool,
 	serialized_manager: Vec<u8>,
@@ -865,7 +1089,7 @@ impl<'a> HarnessNode<'a> {
 	}
 
 	fn new<Out: Output + MaybeSend + MaybeSync>(
-		node_id: u8, wallet: TestWalletSource, fee_estimator: Arc<FuzzEstimator>,
+		node_id: u8, wallet: Arc<TestWalletSource>, fee_estimator: Arc<FuzzEstimator>,
 		broadcaster: Arc<TestBroadcaster>, persistence_style: ChannelMonitorUpdateStatus,
 		deferred: bool, out: &Out, router: &'a FuzzRouter, chan_type: ChanType,
 	) -> Self {
@@ -957,6 +1181,60 @@ impl<'a> HarnessNode<'a> {
 		}
 	}
 
+	// Connects this node from its tracked height to target_height, delivering
+	// each relevant chain callback to both ChainMonitor and ChannelManager.
+	fn connect_chain_range(&mut self, chain_state: &ChainState, target_height: u32) {
+		// Mining commands can advance the harness chain by more than one block.
+		// Transaction blocks must be connected explicitly so LDK learns about
+		// on-chain spends, while empty depth blocks still need best-block
+		// updates so CSV/CLTV-sensitive logic can run. This is the normal sync
+		// path, so both the raw ChainMonitor and the ChannelManager receive the
+		// callbacks and the node's tracked height advances to the target.
+		let mut height = self.height;
+		while height < target_height {
+			let mut next_height = height + 1;
+			while next_height <= target_height && chain_state.block_at(next_height).1.is_empty() {
+				next_height += 1;
+			}
+			if next_height > target_height {
+				// The rest of the range is empty. One best-block update to the
+				// final height is enough because LDK's Confirm API explicitly
+				// allows best_block_updated to skip intermediary blocks, and
+				// empty blocks have no transactions_confirmed calls whose chain
+				// order must be preserved.
+				height = target_height;
+				let (header, _) = chain_state.block_at(height);
+				self.monitor.best_block_updated(header, height);
+				self.node.best_block_updated(header, height);
+				break;
+			}
+			if next_height > height + 1 {
+				// Advance across the empty prefix before the next transaction
+				// block. Confirm::best_block_updated may skip intermediary
+				// blocks, so this compressed update still lets height-triggered
+				// LDK work run at the correct tip before the transaction
+				// confirmations are connected.
+				height = next_height - 1;
+				let (header, _) = chain_state.block_at(height);
+				self.monitor.best_block_updated(header, height);
+				self.node.best_block_updated(header, height);
+			}
+			height = next_height;
+			let (header, txn) = chain_state.block_at(height);
+			let txdata: Vec<_> = txn.iter().enumerate().map(|(i, tx)| (i + 1, tx)).collect();
+			if !txdata.is_empty() {
+				// Transaction blocks need the explicit confirmation callback
+				// before the best-block update so watched spends are delivered
+				// in chain order before the node advances to that tip.
+				self.monitor.transactions_confirmed(header, &txdata, height);
+				self.node.transactions_confirmed(header, &txdata, height);
+			}
+			self.monitor.best_block_updated(header, height);
+			self.node.best_block_updated(header, height);
+		}
+		self.height = target_height;
+	}
+
 	fn sync_with_chain_state(&mut self, chain_state: &ChainState, num_blocks: Option<u32>) {
 		let target_height = if let Some(num_blocks) = num_blocks {
 			std::cmp::min(self.height + num_blocks, chain_state.tip_height())
@@ -964,15 +1242,7 @@ impl<'a> HarnessNode<'a> {
 			chain_state.tip_height()
 		};
 
-		while self.height < target_height {
-			self.height += 1;
-			let (header, txn) = chain_state.block_at(self.height);
-			let txdata: Vec<_> = txn.iter().enumerate().map(|(i, tx)| (i + 1, tx)).collect();
-			if !txdata.is_empty() {
-				self.node.transactions_confirmed(header, &txdata, self.height);
-			}
-			self.node.best_block_updated(header, self.height);
-		}
+		self.connect_chain_range(chain_state, target_height);
 	}
 
 	fn checkpoint_manager_persistence(&mut self) -> bool {
@@ -1033,7 +1303,7 @@ impl<'a> HarnessNode<'a> {
 	}
 
 	fn splice_in(&self, counterparty_node_id: &PublicKey, channel_id: &ChannelId) {
-		let wallet = WalletSync::new(&self.wallet, Arc::clone(&self.logger));
+		let wallet = WalletSync::new(Arc::clone(&self.wallet), Arc::clone(&self.logger));
 		match self.node.splice_channel(channel_id, counterparty_node_id) {
 			Ok(funding_template) => {
 				let feerate =
@@ -1173,6 +1443,7 @@ impl<'a> HarnessNode<'a> {
 			assert_eq!(chain_monitor.watch_channel(channel_id, mon), Ok(expected_status));
 		}
 		self.node = manager.1;
+		self.height = self.node.current_best_block().height;
 		self.monitor = chain_monitor;
 		self.persister = persister;
 		self.logger = logger;
@@ -1940,7 +2211,6 @@ impl PaymentTracker {
 				.get(&payment_hash)
 				.expect("PaymentClaimable for unknown payment hash");
 			node.claim_funds(payment_preimage);
-			self.claimed_payment_hashes.insert(payment_hash);
 		}
 	}
 
@@ -2008,7 +2278,8 @@ fn assert_test_invariants(nodes: &[HarnessNode<'_>; 3]) {
 	assert_eq!(nodes[1].list_channels().len(), 6);
 	assert_eq!(nodes[2].list_channels().len(), 3);
 
-	// All broadcasters should be empty. Broadcast transactions are handled explicitly.
+	// All broadcasters should be empty because broadcast transactions only enter
+	// the modeled mempool through explicit relay commands or finish cleanup.
 	assert!(nodes[0].broadcaster.txn_broadcasted.borrow().is_empty());
 	assert!(nodes[1].broadcaster.txn_broadcasted.borrow().is_empty());
 	assert!(nodes[2].broadcaster.txn_broadcasted.borrow().is_empty());
@@ -2124,7 +2395,7 @@ fn make_channel(
 					tx.clone(),
 				)
 				.unwrap();
-			chain_state.confirm_tx(tx);
+			chain_state.mine_setup_tx_to_depth(tx, DEFAULT_TX_CONFIRMATION_BLOCKS);
 		} else {
 			panic!("Wrong event type");
 		}
@@ -2241,24 +2512,32 @@ impl<'a, Out: Output + MaybeSend + MaybeSync> Harness<'a, Out> {
 			config_byte & 0b1000_0000 != 0,
 		];
 
-		let wallet_a = TestWalletSource::new(SecretKey::from_slice(&[1; 32]).unwrap());
-		let wallet_b = TestWalletSource::new(SecretKey::from_slice(&[2; 32]).unwrap());
-		let wallet_c = TestWalletSource::new(SecretKey::from_slice(&[3; 32]).unwrap());
-		let wallets = [&wallet_a, &wallet_b, &wallet_c];
-		let coinbase_tx = bitcoin::Transaction {
-			version: bitcoin::transaction::Version::TWO,
-			lock_time: bitcoin::absolute::LockTime::ZERO,
-			input: vec![bitcoin::TxIn { ..Default::default() }],
-			output: wallets
-				.iter()
-				.map(|wallet| TxOut {
-					value: Amount::from_sat(100_000),
-					script_pubkey: wallet.get_change_script().unwrap(),
-				})
-				.collect(),
-		};
-		for (idx, wallet) in wallets.iter().enumerate() {
-			wallet.add_utxo(coinbase_tx.clone(), idx as u32);
+		let wallet_a = Arc::new(TestWalletSource::new(SecretKey::from_slice(&[1; 32]).unwrap()));
+		let wallet_b = Arc::new(TestWalletSource::new(SecretKey::from_slice(&[2; 32]).unwrap()));
+		let wallet_c = Arc::new(TestWalletSource::new(SecretKey::from_slice(&[3; 32]).unwrap()));
+		let wallets = [wallet_a.as_ref(), wallet_b.as_ref(), wallet_c.as_ref()];
+		let mut chain_state = ChainState::new();
+		for wallet in wallets {
+			// Seed each wallet with many confirmed outputs. Splice flows may need
+			// fresh inputs long after the channel setup phase, and exhausting the
+			// wallet would obscure the transaction-relay behavior under test.
+			let coinbase_tx = bitcoin::Transaction {
+				version: bitcoin::transaction::Version::TWO,
+				lock_time: bitcoin::absolute::LockTime::ZERO,
+				input: vec![bitcoin::TxIn { ..Default::default() }],
+				output: (0..NUM_WALLET_UTXOS)
+					.map(|_| TxOut {
+						value: Amount::from_sat(100_000),
+						script_pubkey: wallet.get_change_script().unwrap(),
+					})
+					.collect(),
+			};
+			for vout in 0..NUM_WALLET_UTXOS {
+				wallet.add_utxo(coinbase_tx.clone(), vout);
+			}
+			// Mine the wallet UTXOs into the same ChainState that later drives
+			// channel funding and splice transactions.
+			chain_state.mine_setup_tx_to_depth(coinbase_tx, DEFAULT_TX_CONFIRMATION_BLOCKS);
 		}
 
 		let fee_est_a = Arc::new(FuzzEstimator { ret_val: atomic::AtomicU32::new(253) });
@@ -2273,7 +2552,7 @@ impl<'a, Out: Output + MaybeSend + MaybeSync> Harness<'a, Out> {
 		let mut nodes = [
 			HarnessNode::new(
 				0,
-				wallet_a,
+				Arc::clone(&wallet_a),
 				Arc::clone(&fee_est_a),
 				Arc::clone(&broadcast_a),
 				persistence_styles[0],
@@ -2284,7 +2563,7 @@ impl<'a, Out: Output + MaybeSend + MaybeSync> Harness<'a, Out> {
 			),
 			HarnessNode::new(
 				1,
-				wallet_b,
+				Arc::clone(&wallet_b),
 				Arc::clone(&fee_est_b),
 				Arc::clone(&broadcast_b),
 				persistence_styles[1],
@@ -2295,7 +2574,7 @@ impl<'a, Out: Output + MaybeSend + MaybeSync> Harness<'a, Out> {
 			),
 			HarnessNode::new(
 				2,
-				wallet_c,
+				Arc::clone(&wallet_c),
 				Arc::clone(&fee_est_c),
 				Arc::clone(&broadcast_c),
 				persistence_styles[2],
@@ -2305,8 +2584,6 @@ impl<'a, Out: Output + MaybeSend + MaybeSync> Harness<'a, Out> {
 				chan_type,
 			),
 		];
-		let mut chain_state = ChainState::new();
-
 		// Connect peers first, then create channels.
 		connect_peers(&nodes[0], &nodes[1]);
 		connect_peers(&nodes[1], &nodes[2]);
@@ -2327,8 +2604,9 @@ impl<'a, Out: Output + MaybeSend + MaybeSync> Harness<'a, Out> {
 		make_channel(&mut nodes, 1, 2, 5, set_0reserve, false, &mut chain_state);
 		make_channel(&mut nodes, 1, 2, 6, false, false, &mut chain_state);
 
-		// Wipe the transactions-broadcasted set to make sure we don't broadcast
-		// any transactions during normal operation after setup.
+		// Wipe setup-time broadcasts so normal operation starts with an empty
+		// relay queue. Later broadcasts only enter the mempool through relay
+		// commands or finish cleanup.
 		nodes[0].broadcaster.txn_broadcasted.borrow_mut().clear();
 		nodes[1].broadcaster.txn_broadcasted.borrow_mut().clear();
 		nodes[2].broadcaster.txn_broadcasted.borrow_mut().clear();
@@ -2375,7 +2653,33 @@ impl<'a, Out: Output + MaybeSend + MaybeSync> Harness<'a, Out> {
 		self.bc_link.first_channel_id()
 	}
 
-	fn finish(&self) {
+	// Runs end-of-input cleanup by relaying and mining remaining broadcasts.
+	// Final invariants should not depend on the input ending with explicit relay
+	// and mining bytes.
+	fn finish(&mut self) {
+		for _ in 0..MAX_FINISH_RELAY_MINE_ROUNDS {
+			// Finish paths should not leave already-broadcast transactions
+			// stranded. Relay all broadcasts, mine them to normal depth, and
+			// repeat because confirmed transactions can trigger later broadcasts.
+			let mut txs = Vec::new();
+			for node in &self.nodes {
+				txs.extend(node.broadcaster.txn_broadcasted.borrow_mut().drain(..));
+			}
+			self.chain_state.relay_transactions(txs);
+			if self.chain_state.pending_txs.is_empty() {
+				assert_test_invariants(&self.nodes);
+				return;
+			}
+			assert!(
+				self.mine_blocks(DEFAULT_TX_CONFIRMATION_BLOCKS) > 0,
+				"finish cannot mine pending mempool transactions without crossing an unresolved HTLC timeout deadline"
+			);
+		}
+		assert!(
+			!self.nodes.iter().any(|node| !node.broadcaster.txn_broadcasted.borrow().is_empty())
+				&& self.chain_state.pending_txs.is_empty(),
+			"finish tx mining loop failed to quiesce",
+		);
 		assert_test_invariants(&self.nodes);
 	}
 
@@ -2774,7 +3078,6 @@ impl<'a, Out: Output + MaybeSend + MaybeSync> Harness<'a, Out> {
 
 	fn process_events(&mut self, node_idx: usize, fail: bool) -> bool {
 		let nodes = &self.nodes;
-		let chain_state = &mut self.chain_state;
 		let payments = &mut self.payments;
 		// Multiple HTLCs can resolve for the same payment hash, so deduplicate
 		// claim/fail handling per event batch.
@@ -2801,7 +3104,11 @@ impl<'a, Out: Output + MaybeSend + MaybeSync> Harness<'a, Out> {
 				| events::Event::ProbeFailed { payment_id, .. } => {
 					payments.nodes[node_idx].mark_resolved_without_hash(payment_id);
 				},
-				events::Event::PaymentClaimed { .. } => {},
+				events::Event::PaymentClaimed { payment_hash, .. } => {
+					if payments.payment_preimages.contains_key(&payment_hash) {
+						payments.claimed_payment_hashes.insert(payment_hash);
+					}
+				},
 				events::Event::PaymentPathSuccessful { .. } => {},
 				events::Event::PaymentPathFailed { .. } => {},
 				events::Event::PaymentForwarded { .. } if node_idx == 1 => {},
@@ -2818,13 +3125,7 @@ impl<'a, Out: Output + MaybeSend + MaybeSync> Harness<'a, Out> {
 						.funding_transaction_signed(&channel_id, &counterparty_node_id, signed_tx)
 						.unwrap();
 				},
-				events::Event::SpliceNegotiated { new_funding_txo, .. } => {
-					let mut txs = nodes[node_idx].broadcaster.txn_broadcasted.borrow_mut();
-					assert!(txs.len() >= 1);
-					let splice_tx = txs.remove(0);
-					assert_eq!(new_funding_txo.txid, splice_tx.compute_txid());
-					chain_state.add_pending_tx(splice_tx);
-				},
+				events::Event::SpliceNegotiated { .. } => {},
 				events::Event::SpliceNegotiationFailed { .. } => {},
 				events::Event::DiscardFunding {
 					funding_info:
@@ -2950,6 +3251,11 @@ impl<'a, Out: Output + MaybeSend + MaybeSync> Harness<'a, Out> {
 	}
 
 	fn settle_all(&mut self) {
+		let chain_state = &self.chain_state;
+		for node in &mut self.nodes {
+			node.sync_with_chain_state(chain_state, None);
+		}
+
 		// First, make sure peers are all connected to each other
 		self.reconnect_ab();
 		self.reconnect_bc();
@@ -3023,6 +3329,107 @@ impl<'a, Out: Output + MaybeSend + MaybeSync> Harness<'a, Out> {
 			made_progress |= node.checkpoint_manager_persistence();
 		}
 		made_progress
+	}
+
+	// Relays one node's broadcasts into the modeled mempool. We need per-node
+	// relays so fuzz bytes can explore partial propagation before a block is
+	// mined.
+	fn relay_broadcasts_for_node(&mut self, node_idx: usize) {
+		// Move only one node's broadcasts into the harness mempool. Separate
+		// fuzz bytes for each node let corpus inputs model partial transaction
+		// propagation before mining.
+		let txs = self.nodes[node_idx]
+			.broadcaster
+			.txn_broadcasted
+			.borrow_mut()
+			.drain(..)
+			.collect::<Vec<_>>();
+		self.chain_state.relay_transactions(txs);
+	}
+
+	fn earliest_pending_htlc_expiry(&self) -> Option<u32> {
+		let mut earliest_expiry: Option<u32> = None;
+		for node in &self.nodes {
+			for chan in node.list_channels() {
+				for htlc in &chan.pending_inbound_htlcs {
+					earliest_expiry = Some(
+						earliest_expiry
+							.map_or(htlc.cltv_expiry, |expiry| expiry.min(htlc.cltv_expiry)),
+					);
+				}
+				for htlc in &chan.pending_outbound_htlcs {
+					earliest_expiry = Some(
+						earliest_expiry
+							.map_or(htlc.cltv_expiry, |expiry| expiry.min(htlc.cltv_expiry)),
+					);
+				}
+			}
+		}
+		earliest_expiry
+	}
+
+	fn safe_mine_block_count(&self, count: u32) -> u32 {
+		if let Some(expiry) = self.earliest_pending_htlc_expiry() {
+			let current_tip = self.chain_state.tip_height();
+			// LDK may close to protect a pending HTLC before its raw CLTV
+			// expiry. Keep modeled mining outside that fail-back window so
+			// fuzzed block production does not force an on-chain timeout path.
+			let timeout_deadline = expiry.saturating_sub(channelmonitor::HTLC_FAIL_BACK_BUFFER);
+			assert!(
+				current_tip < timeout_deadline,
+				"pending HTLC with expiry {} and timeout deadline {} is already unsafe at tip {}",
+				expiry,
+				timeout_deadline,
+				current_tip
+			);
+			// Stop before the deadline block itself, since connecting it is
+			// enough for ChannelMonitor timeout handling to run.
+			count.min(timeout_deadline - current_tip - 1)
+		} else {
+			count
+		}
+	}
+
+	// Mines blocks through ChainState, then syncs wallets and nodes. We need the
+	// harness wrapper because block production is chain-only, while confirmed
+	// transactions still update wallet UTXOs and LDK chain listeners.
+	fn mine_blocks(&mut self, count: u32) -> u32 {
+		assert!(count > 0, "mining zero blocks should not be requested");
+
+		let count = self.safe_mine_block_count(count);
+		if count == 0 {
+			return 0;
+		}
+		let confirmed_txs = self.chain_state.mine_blocks(count);
+		let wallets = [
+			self.nodes[0].wallet.as_ref(),
+			self.nodes[1].wallet.as_ref(),
+			self.nodes[2].wallet.as_ref(),
+		];
+		for tx in &confirmed_txs {
+			for wallet in wallets.iter().copied() {
+				let change_script = wallet.get_change_script().unwrap();
+				for input in &tx.input {
+					// The test wallet is a simple UTXO source. When one of its
+					// outputs is spent by a confirmed transaction, remove it so
+					// later funding attempts cannot double-spend it.
+					wallet.remove_utxo(input.previous_output);
+				}
+				for (vout, output) in tx.output.iter().enumerate() {
+					if output.script_pubkey == change_script {
+						// Add wallet-owned outputs back to whichever test wallet
+						// owns the script. This lets splice flows recycle wallet
+						// change through later fuzz commands.
+						wallet.add_utxo(tx.clone(), vout as u32);
+					}
+				}
+			}
+		}
+		let chain_state = &self.chain_state;
+		for node in &mut self.nodes {
+			node.sync_with_chain_state(chain_state, None);
+		}
+		count
 	}
 }
 
@@ -3257,32 +3664,14 @@ pub fn do_test<Out: Output + MaybeSend + MaybeSync>(data: &[u8], out: Out) {
 				harness.nodes[2].splice_out(&cp_node_id, &harness.chan_b_id());
 			},
 
-			// Sync node by 1 block to cover confirmation of a transaction.
-			0xa8 => {
-				harness.chain_state.confirm_pending_txs();
-				harness.nodes[0].sync_with_chain_state(&harness.chain_state, Some(1));
-			},
-			0xa9 => {
-				harness.chain_state.confirm_pending_txs();
-				harness.nodes[1].sync_with_chain_state(&harness.chain_state, Some(1));
-			},
-			0xaa => {
-				harness.chain_state.confirm_pending_txs();
-				harness.nodes[2].sync_with_chain_state(&harness.chain_state, Some(1));
-			},
-			// Sync node to chain tip to cover confirmation of a transaction post-reorg-risk.
-			0xab => {
-				harness.chain_state.confirm_pending_txs();
-				harness.nodes[0].sync_with_chain_state(&harness.chain_state, None);
-			},
-			0xac => {
-				harness.chain_state.confirm_pending_txs();
-				harness.nodes[1].sync_with_chain_state(&harness.chain_state, None);
-			},
-			0xad => {
-				harness.chain_state.confirm_pending_txs();
-				harness.nodes[2].sync_with_chain_state(&harness.chain_state, None);
-			},
+			// Sync node by 1 block.
+			0xa8 => harness.nodes[0].sync_with_chain_state(&harness.chain_state, Some(1)),
+			0xa9 => harness.nodes[1].sync_with_chain_state(&harness.chain_state, Some(1)),
+			0xaa => harness.nodes[2].sync_with_chain_state(&harness.chain_state, Some(1)),
+			// Sync node to chain tip.
+			0xab => harness.nodes[0].sync_with_chain_state(&harness.chain_state, None),
+			0xac => harness.nodes[1].sync_with_chain_state(&harness.chain_state, None),
+			0xad => harness.nodes[2].sync_with_chain_state(&harness.chain_state, None),
 
 			0xb0 | 0xb1 | 0xb2 => {
 				// Restart node A, picking among persisted and in-flight `ChannelMonitor`
@@ -3406,6 +3795,19 @@ pub fn do_test<Out: Output + MaybeSend + MaybeSync>(data: &[u8], out: Out) {
 					.keys_manager
 					.enable_op_for_all_signers(SignerOp::SignSpliceSharedInput);
 				harness.nodes[2].signer_unblocked(None);
+			},
+			// Relay and mining commands share a contiguous range so mutations can
+			// move between "propagate transaction" and "advance chain state"
+			// without landing in unrelated signer or monitor-control commands.
+			0xd5 => harness.relay_broadcasts_for_node(0),
+			0xd6 => harness.relay_broadcasts_for_node(1),
+			0xd7 => harness.relay_broadcasts_for_node(2),
+			0xd8..=0xdf => {
+				// The table maps one byte range to several useful block counts,
+				// allowing both one-block timeout exploration and large jumps to
+				// CSV or CLTV boundaries.
+				let count = MINE_BLOCK_COUNTS[(v - 0xd8) as usize];
+				harness.mine_blocks(count);
 			},
 
 			0xf0 => harness.ab_link.complete_monitor_updates_for_node(
