@@ -942,13 +942,16 @@ impl SignerProvider for KeyProvider {
 	}
 }
 
-// Since this fuzzer is only concerned with live-channel operations, we don't need to worry about
-// any signer operations that come after a force close.
-const SUPPORTED_SIGNER_OPS: [SignerOp; 4] = [
+// These signer operations can be blocked by fuzz bytes. The first four cover
+// live-channel and splice signing, while the holder-side operations cover local
+// on-chain claim signing after LDK has moved a channel to chain handling.
+const SUPPORTED_SIGNER_OPS: [SignerOp; 6] = [
 	SignerOp::SignCounterpartyCommitment,
 	SignerOp::GetPerCommitmentPoint,
 	SignerOp::ReleaseCommitmentSecret,
 	SignerOp::SignSpliceSharedInput,
+	SignerOp::SignHolderCommitment,
+	SignerOp::SignHolderHtlcTransaction,
 ];
 
 impl KeyProvider {
@@ -1292,6 +1295,18 @@ impl<'a> HarnessNode<'a> {
 	fn reset_fee_estimate(&self) {
 		self.fee_estimator.ret_val.store(253, atomic::Ordering::Release);
 		self.node.timer_tick_occurred();
+	}
+
+	// Re-enables holder-side signer operations and asks the chain monitor to
+	// retry pending claim transactions. Holder signing becomes relevant after
+	// on-chain close handling starts.
+	fn enable_holder_signer_ops(&self) {
+		// Holder-side signing is requested when a node needs to build local
+		// on-chain claim transactions. Keep it separate from live-channel
+		// signing so fuzz inputs can choose when those requests unblock.
+		self.keys_manager.enable_op_for_all_signers(SignerOp::SignHolderCommitment);
+		self.keys_manager.enable_op_for_all_signers(SignerOp::SignHolderHtlcTransaction);
+		self.monitor.signer_unblocked(None);
 	}
 
 	fn current_feerate_sat_per_kw(&self) -> FeeRate {
@@ -3265,9 +3280,14 @@ impl<'a, Out: Output + MaybeSend + MaybeSync> Harness<'a, Out> {
 			self.nodes[1].keys_manager.enable_op_for_all_signers(op);
 			self.nodes[2].keys_manager.enable_op_for_all_signers(op);
 		}
+		// Live-channel signer work retries through the manager, while
+		// on-chain holder claims retry through the chain monitor.
 		self.nodes[0].signer_unblocked(None);
 		self.nodes[1].signer_unblocked(None);
 		self.nodes[2].signer_unblocked(None);
+		self.nodes[0].monitor.signer_unblocked(None);
+		self.nodes[1].monitor.signer_unblocked(None);
+		self.nodes[2].monitor.signer_unblocked(None);
 
 		self.process_all_events();
 
@@ -3809,6 +3829,13 @@ pub fn do_test<Out: Output + MaybeSend + MaybeSync>(data: &[u8], out: Out) {
 				let count = MINE_BLOCK_COUNTS[(v - 0xd8) as usize];
 				harness.mine_blocks(count);
 			},
+			// Keep holder signer unblocks near the signer op bytes while leaving
+			// the relay/mining range above contiguous. The helper re-enables both
+			// holder-side operations for every signer owned by the selected node,
+			// matching the existing key-manager-wide blocking model.
+			0xe4 => harness.nodes[0].enable_holder_signer_ops(),
+			0xe5 => harness.nodes[1].enable_holder_signer_ops(),
+			0xe6 => harness.nodes[2].enable_holder_signer_ops(),
 
 			0xf0 => harness.ab_link.complete_monitor_updates_for_node(
 				0,
