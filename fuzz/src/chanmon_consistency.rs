@@ -17,7 +17,7 @@
 //! in us getting out of sync with ourselves, and, assuming at least one of our receive- or
 //! send-side handling is correct, other peers. We consider it a failure if any action results in
 //! a channel being force-closed. The fuzzer also models transaction relay through a harness
-//! mempool, making transaction confirmation and block delivery closer to normal node behavior.
+//! mempool, making splice confirmation and block delivery closer to normal node behavior.
 
 use bitcoin::amount::Amount;
 use bitcoin::constants::genesis_block;
@@ -932,16 +932,14 @@ type ChanMan<'a> = ChannelManager<
 >;
 
 #[inline]
-fn assert_disconnect_action(action: &msgs::ErrorAction) -> (&msgs::WarningMessage, bool) {
+fn assert_disconnect_action(action: &msgs::ErrorAction) -> &msgs::WarningMessage {
 	// Since sending/receiving messages may be delayed, `timer_tick_occurred` may cause a node to
 	// disconnect their counterparty if they're expecting a timely response.
 	if let msgs::ErrorAction::DisconnectPeerWithWarning { ref msg } = action {
-		let is_quiescent_msg = msg.data.contains("already sent splice_locked, cannot RBF");
-		if !msg.data.contains("Disconnecting due to timeout awaiting response") && !is_quiescent_msg
-		{
+		if !msg.data.contains("Disconnecting due to timeout awaiting response") {
 			panic!("Unexpected disconnect case: {}", msg.data);
 		}
-		(msg, is_quiescent_msg)
+		msg
 	} else {
 		panic!("Expected disconnect, got: {:?}", action);
 	}
@@ -2947,15 +2945,8 @@ impl<'a, Out: Output + MaybeSend + MaybeSync> Harness<'a, Out> {
 					None
 				},
 				MessageSendEvent::HandleError { ref action, ref node_id, .. } => {
-					let (msg, is_quiescent) = assert_disconnect_action(action);
-					let dest_idx = log_peer_message(node_idx, node_id, nodes, out, "warning");
-					if is_quiescent {
-						nodes[node_idx].node.exit_quiescence(node_id, &msg.channel_id).unwrap();
-						nodes[dest_idx]
-							.node
-							.exit_quiescence(&source_node_id, &msg.channel_id)
-							.unwrap();
-					}
+					assert_disconnect_action(action);
+					log_peer_message(node_idx, node_id, nodes, out, "warning");
 					None
 				},
 				MessageSendEvent::SendChannelReady { .. }

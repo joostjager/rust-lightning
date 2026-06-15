@@ -13575,6 +13575,7 @@ This indicates a bug inside LDK. Please report this error at https://github.com/
 			)),
 			hash_map::Entry::Occupied(mut chan_entry) => {
 				if let Some(ref mut funded_channel) = chan_entry.get_mut().as_funded_mut() {
+					let user_channel_id = funded_channel.context.get_user_id();
 					let splice_ack_res = funded_channel.splice_ack(
 						msg,
 						&self.entropy_source,
@@ -13582,12 +13583,22 @@ This indicates a bug inside LDK. Please report this error at https://github.com/
 						self.config.read().unwrap().channel_handshake_limits.min_funding_satoshis,
 						&self.logger,
 					);
-					let tx_msg_opt =
-						try_channel_entry!(self, peer_state, splice_ack_res, chan_entry);
-					if let Some(tx_msg) = tx_msg_opt {
-						peer_state
-							.pending_msg_events
-							.push(tx_msg.into_msg_send_event(counterparty_node_id.clone()));
+					match splice_ack_res {
+						Ok(tx_msg_opt) => {
+							if let Some(tx_msg) = tx_msg_opt {
+								peer_state
+									.pending_msg_events
+									.push(tx_msg.into_msg_send_event(counterparty_node_id.clone()));
+							}
+						},
+						Err(err) => {
+							return Err(self.handle_interactive_tx_msg_err(
+								err,
+								msg.channel_id,
+								counterparty_node_id,
+								user_channel_id,
+							))
+						},
 					}
 					Ok(())
 				} else {
@@ -13620,6 +13631,7 @@ This indicates a bug inside LDK. Please report this error at https://github.com/
 			)),
 			hash_map::Entry::Occupied(mut chan_entry) => {
 				if let Some(ref mut funded_channel) = chan_entry.get_mut().as_funded_mut() {
+					let user_channel_id = funded_channel.context.get_user_id();
 					let tx_ack_rbf_res = funded_channel.tx_ack_rbf(
 						msg,
 						&self.entropy_source,
@@ -13627,12 +13639,22 @@ This indicates a bug inside LDK. Please report this error at https://github.com/
 						self.config.read().unwrap().channel_handshake_limits.min_funding_satoshis,
 						&self.logger,
 					);
-					let tx_msg_opt =
-						try_channel_entry!(self, peer_state, tx_ack_rbf_res, chan_entry);
-					if let Some(tx_msg) = tx_msg_opt {
-						peer_state
-							.pending_msg_events
-							.push(tx_msg.into_msg_send_event(counterparty_node_id.clone()));
+					match tx_ack_rbf_res {
+						Ok(tx_msg_opt) => {
+							if let Some(tx_msg) = tx_msg_opt {
+								peer_state
+									.pending_msg_events
+									.push(tx_msg.into_msg_send_event(counterparty_node_id.clone()));
+							}
+						},
+						Err(err) => {
+							return Err(self.handle_interactive_tx_msg_err(
+								err,
+								msg.channel_id,
+								counterparty_node_id,
+								user_channel_id,
+							))
+						},
 					}
 					Ok(())
 				} else {

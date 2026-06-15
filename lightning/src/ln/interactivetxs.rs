@@ -135,6 +135,10 @@ pub(crate) enum AbortReason {
 	InsufficientRbfFeerate,
 	/// A funding negotiation is already in progress.
 	NegotiationInProgress,
+	/// An RBF attempt can no longer replace the pending splice.
+	RbfUnavailable,
+	/// The splice contribution is not valid for the channel.
+	InvalidSpliceContribution,
 	/// The initiator's feerate exceeds our maximum.
 	FeeRateTooHigh,
 	/// The user manually intervened to abort the funding negotiation via
@@ -205,6 +209,10 @@ impl Display for AbortReason {
 			AbortReason::NegotiationInProgress => {
 				f.write_str("A funding negotiation is already in progress")
 			},
+			AbortReason::RbfUnavailable => {
+				f.write_str("RBF is no longer available for the pending splice")
+			},
+			AbortReason::InvalidSpliceContribution => f.write_str("Invalid splice contribution"),
 			AbortReason::FeeRateTooHigh => {
 				f.write_str("The initiator's feerate exceeds our maximum")
 			},

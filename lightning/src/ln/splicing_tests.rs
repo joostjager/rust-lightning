@@ -174,22 +174,14 @@ fn config_with_min_funding_satoshis(min_funding_satoshis: u64) -> UserConfig {
 }
 
 #[cfg(test)]
-fn assert_min_funding_error<'a, 'b, 'c>(node: &Node<'a, 'b, 'c>, min_funding_satoshis: u64) {
+fn assert_min_funding_error<'a, 'b, 'c>(node: &Node<'a, 'b, 'c>, _min_funding_satoshis: u64) {
 	let msg_events = node.node.get_and_clear_pending_msg_events();
 	assert_eq!(msg_events.len(), 1, "{msg_events:?}");
 	match &msg_events[0] {
-		MessageSendEvent::HandleError {
-			action: msgs::ErrorAction::DisconnectPeerWithWarning { msg },
-			..
-		} => {
-			assert!(
-				msg.data
-					.contains(&format!("configured min_funding_satoshis {min_funding_satoshis}")),
-				"unexpected warning: {}",
-				msg.data
-			);
+		MessageSendEvent::SendTxAbort { msg, .. } => {
+			assert_eq!(msg.data, b"Invalid splice contribution");
 		},
-		_ => panic!("Expected HandleError with warning, got {:?}", msg_events[0]),
+		_ => panic!("Expected SendTxAbort, got {:?}", msg_events[0]),
 	}
 }
 
@@ -1451,7 +1443,7 @@ fn test_min_funding_satoshis_rejects_splice_ack_with_negative_counterparty_contr
 
 	let added_value = Amount::from_sat(10_000);
 	provide_utxo_reserves(&nodes, 1, Amount::from_sat(100_000));
-	let _node_0_contribution = initiate_splice_in(&nodes[0], &nodes[1], channel_id, added_value);
+	let node_0_contribution = initiate_splice_in(&nodes[0], &nodes[1], channel_id, added_value);
 
 	let stfu_init = get_event_msg!(nodes[0], MessageSendEvent::SendStfu, node_id_1);
 	nodes[1].node.handle_stfu(node_id_0, &stfu_init);
@@ -1473,6 +1465,12 @@ fn test_min_funding_satoshis_rejects_splice_ack_with_negative_counterparty_contr
 	assert!(splice_ack.funding_contribution_satoshis < 0);
 	nodes[0].node.handle_splice_ack(node_id_1, &splice_ack);
 	assert_min_funding_error(&nodes[0], min_funding_satoshis);
+	expect_splice_failed_events(
+		&nodes[0],
+		&channel_id,
+		node_0_contribution,
+		NegotiationFailureReason::ContributionInvalid,
+	);
 }
 
 #[test]
@@ -1548,7 +1546,10 @@ fn test_min_funding_satoshis_rejects_tx_ack_rbf_with_negative_counterparty_contr
 	let rbf_feerate = funding_template_0.min_rbf_feerate().unwrap();
 	let node_0_contribution =
 		funding_template_0.with_prior_contribution(rbf_feerate, FeeRate::MAX).build().unwrap();
-	nodes[0].node.funding_contributed(&channel_id, &node_id_1, node_0_contribution, None).unwrap();
+	nodes[0]
+		.node
+		.funding_contributed(&channel_id, &node_id_1, node_0_contribution.clone(), None)
+		.unwrap();
 
 	let stfu_init = get_event_msg!(nodes[0], MessageSendEvent::SendStfu, node_id_1);
 	nodes[1].node.handle_stfu(node_id_0, &stfu_init);
@@ -1572,6 +1573,16 @@ fn test_min_funding_satoshis_rejects_tx_ack_rbf_with_negative_counterparty_contr
 	assert!(tx_ack_rbf.funding_output_contribution.unwrap() < 0);
 	nodes[0].node.handle_tx_ack_rbf(node_id_1, &tx_ack_rbf);
 	assert_min_funding_error(&nodes[0], min_funding_satoshis);
+	let events = nodes[0].node.get_and_clear_pending_events();
+	assert_eq!(events.len(), 1, "{events:?}");
+	match &events[0] {
+		Event::SpliceNegotiationFailed { channel_id: cid, reason, contribution, .. } => {
+			assert_eq!(*cid, channel_id);
+			assert_eq!(*reason, NegotiationFailureReason::ContributionInvalid);
+			assert_eq!(contribution.as_ref(), Some(&node_0_contribution));
+		},
+		other => panic!("Expected SpliceNegotiationFailed, got {:?}", other),
+	}
 }
 
 #[test]
@@ -3850,6 +3861,84 @@ fn fail_splice_on_tx_abort() {
 }
 
 #[test]
+fn fail_queued_splice_on_tx_abort() {
+	// Covers tx_abort while a splice is queued for quiescence but has not yet
+	// become a pending_splice.
+	let chanmon_cfgs = create_chanmon_cfgs(2);
+	let node_cfgs = create_node_cfgs(2, &chanmon_cfgs);
+	let node_chanmgrs = create_node_chanmgrs(2, &node_cfgs, &[None, None]);
+	let nodes = create_network(2, &node_cfgs, &node_chanmgrs);
+
+	let node_id_0 = nodes[0].node.get_our_node_id();
+	let node_id_1 = nodes[1].node.get_our_node_id();
+
+	let initial_channel_capacity = 100_000;
+	let (_, _, channel_id, _) = create_announced_chan_between_nodes_with_value(
+		&nodes,
+		0,
+		1,
+		initial_channel_capacity,
+		50_000_000,
+	);
+
+	provide_utxo_reserves(&nodes, 2, Amount::ONE_BTC);
+
+	let splice_in_amount = initial_channel_capacity / 2;
+	let _node_0_contribution =
+		initiate_splice_in(&nodes[0], &nodes[1], channel_id, Amount::from_sat(splice_in_amount));
+	let node_1_contribution =
+		initiate_splice_in(&nodes[1], &nodes[0], channel_id, Amount::from_sat(splice_in_amount));
+
+	// Leave node 1 with a queued splice action but no pending_splice.
+	let stfu_0 = get_event_msg!(nodes[0], MessageSendEvent::SendStfu, node_id_1);
+	let _stfu_1 = get_event_msg!(nodes[1], MessageSendEvent::SendStfu, node_id_0);
+	nodes[1].node.handle_stfu(node_id_0, &stfu_0);
+	assert!(nodes[1].node.get_and_clear_pending_msg_events().is_empty());
+
+	let payment_amount = 1_000_000;
+	let (route, payment_hash, _payment_preimage, payment_secret) =
+		get_route_and_payment_hash!(&nodes[1], &nodes[0], payment_amount);
+	let onion = RecipientOnionFields::secret_only(payment_secret, payment_amount);
+	let payment_id = PaymentId(payment_hash.0);
+	nodes[1].node.send_payment_with_route(route, payment_hash, onion, payment_id).unwrap();
+	assert!(nodes[1].node.get_and_clear_pending_msg_events().is_empty());
+
+	let abort_msg = "remote abort";
+	let tx_abort = msgs::TxAbort { channel_id, data: abort_msg.as_bytes().to_vec() };
+	nodes[1].node.handle_tx_abort(node_id_0, &tx_abort);
+
+	expect_splice_failed_events(
+		&nodes[1],
+		&channel_id,
+		node_1_contribution,
+		NegotiationFailureReason::CounterpartyAborted {
+			msg: UntrustedString(abort_msg.to_owned()),
+		},
+	);
+
+	let msg_events = nodes[1].node.get_and_clear_pending_msg_events();
+	assert_eq!(msg_events.len(), 2, "{msg_events:?}");
+	check_added_monitors(&nodes[1], 1);
+	match &msg_events[0] {
+		MessageSendEvent::SendTxAbort { node_id, msg } => {
+			assert_eq!(*node_id, node_id_0);
+			assert_eq!(msg.channel_id, channel_id);
+			assert_eq!(msg.data, b"Acknowledged tx_abort");
+		},
+		other => panic!("Expected SendTxAbort, got {:?}", other),
+	}
+	match &msg_events[1] {
+		MessageSendEvent::UpdateHTLCs { node_id, updates, .. } => {
+			// The held payment must be released once tx_abort exits quiescence.
+			assert_eq!(*node_id, node_id_0);
+			assert_eq!(updates.update_add_htlcs.len(), 1);
+			assert_eq!(updates.commitment_signed.len(), 1);
+		},
+		other => panic!("Expected UpdateHTLCs, got {:?}", other),
+	}
+}
+
+#[test]
 fn acceptor_with_local_contribution_can_cancel_funding_contributed_before_funding_transaction_signed(
 ) {
 	let chanmon_cfgs = create_chanmon_cfgs(2);
@@ -5808,25 +5897,27 @@ fn do_test_splice_pending_htlcs(config: UserConfig) {
 		splice_init.funding_contribution_satoshis -= 1;
 		acceptor.node.handle_splice_init(node_id_initiator, &splice_init);
 
-		let msg = get_warning_msg(acceptor, &node_id_initiator);
-		assert_eq!(msg.channel_id, channel_id);
+		let tx_abort = get_event_msg!(acceptor, MessageSendEvent::SendTxAbort, node_id_initiator);
+		assert_eq!(tx_abort.channel_id, channel_id);
+		assert_eq!(tx_abort.data, b"Invalid splice contribution");
 		let cannot_be_spliced_out = format!(
-			"Channel {} cannot be spliced out; their post-splice channel balance {} is smaller than our selected v2 reserve {}",
-			channel_id, post_splice_reserve - Amount::ONE_SAT, post_splice_reserve
+			"Aborting splice negotiation for channel {channel_id}: Channel {channel_id} cannot be spliced out; their post-splice channel balance {} is smaller than our selected v2 reserve {}",
+			post_splice_reserve - Amount::ONE_SAT, post_splice_reserve
 		);
-		assert_eq!(msg.data, cannot_be_spliced_out);
+		acceptor.logger.assert_log("lightning::ln::channel", cannot_be_spliced_out, 1);
 
-		acceptor.node.peer_disconnected(node_id_initiator);
-		initiator.node.peer_disconnected(node_id_acceptor);
-
-		let reconnect_args = ReconnectArgs::new(initiator, acceptor);
-		reconnect_nodes(reconnect_args);
+		initiator.node.handle_tx_abort(node_id_acceptor, &tx_abort);
+		let tx_abort_ack =
+			get_event_msg!(initiator, MessageSendEvent::SendTxAbort, node_id_acceptor);
+		acceptor.node.handle_tx_abort(node_id_initiator, &tx_abort_ack);
 
 		expect_splice_failed_events(
 			initiator,
 			&channel_id,
 			contribution,
-			NegotiationFailureReason::PeerDisconnected,
+			NegotiationFailureReason::CounterpartyAborted {
+				msg: UntrustedString("Invalid splice contribution".to_owned()),
+			},
 		);
 
 		// 4) Try again with the additional satoshi removed from the splice-out message, and check that it passes
@@ -6696,25 +6787,8 @@ fn test_splice_rbf_after_splice_locked() {
 
 	nodes[1].node.handle_tx_init_rbf(node_id_0, &tx_init_rbf);
 
-	let msg_events = nodes[1].node.get_and_clear_pending_msg_events();
-	assert_eq!(msg_events.len(), 1);
-	match &msg_events[0] {
-		MessageSendEvent::HandleError { action, .. } => {
-			assert_eq!(
-				*action,
-				msgs::ErrorAction::DisconnectPeerWithWarning {
-					msg: msgs::WarningMessage {
-						channel_id,
-						data: format!(
-							"Channel {} counterparty already sent splice_locked, cannot RBF",
-							channel_id,
-						),
-					},
-				}
-			);
-		},
-		_ => panic!("Expected HandleError, got {:?}", msg_events[0]),
-	}
+	let tx_abort = get_event_msg!(nodes[1], MessageSendEvent::SendTxAbort, node_id_0);
+	assert_eq!(tx_abort.channel_id, channel_id);
 }
 
 #[test]
@@ -6724,7 +6798,7 @@ fn test_splice_rbf_stfu_after_splice_locked() {
 	// Scenario: node 0 initiates an RBF and sends STFU, but before receiving the counterparty's
 	// STFU response, it mines enough blocks to send splice_locked (setting sent_funding_txid).
 	// When node 1's STFU arrives, the stfu() handler should detect that RBF is no longer valid
-	// and return WarnAndDisconnect instead of sending tx_init_rbf.
+	// and abort the negotiation instead of sending tx_init_rbf.
 	let chanmon_cfgs = create_chanmon_cfgs(2);
 	let node_cfgs = create_node_cfgs(2, &chanmon_cfgs);
 	let node_chanmgrs = create_node_chanmgrs(2, &node_cfgs, &[None, None]);
@@ -6743,10 +6817,6 @@ fn test_splice_rbf_stfu_after_splice_locked() {
 	// Complete a splice-in from node 0.
 	let funding_contribution = do_initiate_splice_in(&nodes[0], &nodes[1], channel_id, added_value);
 	let (splice_tx, _) = splice_channel(&nodes[0], &nodes[1], channel_id, funding_contribution);
-
-	// Mine the splice tx on both nodes (not enough for splice_locked yet).
-	mine_transaction(&nodes[0], &splice_tx);
-	mine_transaction(&nodes[1], &splice_tx);
 
 	// Provide more UTXOs for the RBF attempt.
 	provide_utxo_reserves(&nodes, 2, added_value * 2);
@@ -6768,7 +6838,7 @@ fn test_splice_rbf_stfu_after_splice_locked() {
 		.funding_contributed(&channel_id, &node_id_1, funding_contribution.clone(), None)
 		.unwrap();
 
-	// Node 0 sends STFU (can_initiate_rbf passes since no splice_locked yet).
+	// Node 0 sends STFU while the prior splice is still unconfirmed.
 	let stfu_init = get_event_msg!(nodes[0], MessageSendEvent::SendStfu, node_id_1);
 
 	// Deliver STFU to node 1; extract node 1's STFU response but don't deliver it yet.
@@ -6776,49 +6846,23 @@ fn test_splice_rbf_stfu_after_splice_locked() {
 	let stfu_ack = get_event_msg!(nodes[1], MessageSendEvent::SendStfu, node_id_0);
 
 	// Mine enough blocks on node 0 so it sends splice_locked (sets sent_funding_txid).
+	mine_transaction(&nodes[0], &splice_tx);
 	connect_blocks(&nodes[0], ANTI_REORG_DELAY - 1);
 	let _splice_locked = get_event_msg!(nodes[0], MessageSendEvent::SendSpliceLocked, node_id_1);
 
 	// Now deliver node 1's STFU to node 0. The stfu() handler should detect that RBF is no
-	// longer valid (we already sent splice_locked) and return WarnAndDisconnect.
+	// longer valid (we already sent splice_locked) and abort the negotiation.
 	nodes[0].node.handle_stfu(node_id_1, &stfu_ack);
 
-	let msg_events = nodes[0].node.get_and_clear_pending_msg_events();
-	assert_eq!(msg_events.len(), 1, "{msg_events:?}");
-	match &msg_events[0] {
-		MessageSendEvent::HandleError { action, .. } => {
-			assert_eq!(
-				*action,
-				msgs::ErrorAction::DisconnectPeerWithWarning {
-					msg: msgs::WarningMessage {
-						channel_id,
-						data: format!(
-							"Channel {} already sent splice_locked, cannot RBF",
-							channel_id,
-						),
-					},
-				}
-			);
-		},
-		_ => panic!("Expected HandleError, got {:?}", msg_events[0]),
-	}
+	let tx_abort = get_event_msg!(nodes[0], MessageSendEvent::SendTxAbort, node_id_1);
+	assert_eq!(tx_abort.channel_id, channel_id);
 
-	// Node 0 should emit DiscardFunding + SpliceNegotiationFailed for the RBF contribution.
-	// The change output is filtered (same script_pubkey as the first splice's change output),
-	// but the input survives because it's a different UTXO from the first splice.
+	// Node 0 should emit SpliceNegotiationFailed for the RBF contribution. The
+	// cleanup filters out inputs and outputs still committed to the prior
+	// splice, so there may be no DiscardFunding event.
 	let events = nodes[0].node.get_and_clear_pending_events();
-	assert_eq!(events.len(), 2, "{events:?}");
+	assert_eq!(events.len(), 1, "{events:?}");
 	match &events[0] {
-		Event::DiscardFunding {
-			funding_info: FundingInfo::Contribution { inputs, outputs },
-			..
-		} => {
-			assert!(!inputs.is_empty());
-			assert!(outputs.is_empty());
-		},
-		other => panic!("Expected DiscardFunding, got {:?}", other),
-	}
-	match &events[1] {
 		Event::SpliceNegotiationFailed { channel_id: cid, reason, .. } => {
 			assert_eq!(*cid, channel_id);
 			assert_eq!(*reason, NegotiationFailureReason::CannotInitiateRbf);
@@ -8925,16 +8969,14 @@ fn test_splice_revalidation_at_quiescence() {
 	nodes[1].node.handle_revoke_and_ack(node_id_0, &raa_0b);
 	check_added_monitors(&nodes[1], 1);
 
-	// Step 7: stfu exchange → quiescence → re-validation fails → disconnect.
+	// Step 7: stfu exchange -> quiescence -> re-validation fails -> abort.
 	nodes[1].node.handle_stfu(node_id_0, &stfu_0);
 	let stfu_1 = get_event_msg!(nodes[1], MessageSendEvent::SendStfu, node_id_0);
 	nodes[0].node.handle_stfu(node_id_1, &stfu_1);
 
-	// handle_stfu returns WarnAndDisconnect (triggering disconnect) alongside the
-	// QuiescentError containing the failed contribution's events.
-	let msg_events = nodes[0].node.get_and_clear_pending_msg_events();
-	assert_eq!(msg_events.len(), 1, "{msg_events:?}");
-	assert!(matches!(msg_events[0], MessageSendEvent::HandleError { .. }));
+	let tx_abort = get_event_msg!(nodes[0], MessageSendEvent::SendTxAbort, node_id_1);
+	assert_eq!(tx_abort.channel_id, channel_id);
+	assert_eq!(tx_abort.data, b"Invalid splice contribution");
 
 	expect_splice_failed_events(
 		&nodes[0],
@@ -9728,27 +9770,23 @@ fn do_test_0reserve_splice_counterparty_validation(
 			get_event_msg!(acceptor, MessageSendEvent::SendSpliceAck, node_id_initiator);
 	} else {
 		acceptor.node.handle_splice_init(node_id_initiator, &splice_init);
-		let msg_events = acceptor.node.get_and_clear_pending_msg_events();
-		assert_eq!(msg_events.len(), 1);
-		if let MessageSendEvent::HandleError { action, .. } = &msg_events[0] {
-			assert!(matches!(action, msgs::ErrorAction::DisconnectPeerWithWarning { .. }));
-		} else {
-			panic!("Expected MessageSendEvent::HandleError");
-		}
+		let tx_abort = get_event_msg!(acceptor, MessageSendEvent::SendTxAbort, node_id_initiator);
+		assert_eq!(tx_abort.channel_id, channel_id);
+		assert_eq!(tx_abort.data, b"Invalid splice contribution");
 		let cannot_splice_out = if u64::try_from(funding_contribution_sat.abs()).unwrap()
 			> initiator_value_to_self_sat
 		{
 			// They obviously can't afford their contribution, so we fail before even
 			// querying `TxBuilder`
 			format!(
-				"Got non-closing error: Channel {channel_id} cannot be spliced; \
+				"Aborting splice negotiation for channel {channel_id}: Channel {channel_id} cannot be spliced; \
 				Their contribution candidate {funding_contribution_sat}sat \
 				is greater than their total balance in the channel {initiator_value_to_self_sat}sat"
 			)
 		} else if post_channel_value_sat < MIN_CHANNEL_VALUE_SATOSHIS {
 			// We require all spliced channels to have a value of at least 1000 satoshis after the splice
 			format!(
-				"Got non-closing error: Channel {channel_id} cannot be spliced; \
+				"Aborting splice negotiation for channel {channel_id}: Channel {channel_id} cannot be spliced; \
 				Spliced channel value must be at least {MIN_CHANNEL_VALUE_SATOSHIS} satoshis. \
 				It would be {post_channel_value_sat}"
 			)
@@ -9757,11 +9795,11 @@ fn do_test_0reserve_splice_counterparty_validation(
 			// HTLCs, anchors, and transaction fees while retaining at least one
 			// output on the commitments
 			format!(
-				"Got non-closing error: Channel {channel_id} cannot \
+				"Aborting splice negotiation for channel {channel_id}: Channel {channel_id} cannot \
 				be spliced; Balance exhausted on local commitment"
 			)
 		};
-		acceptor.logger.assert_log("lightning::ln::channelmanager", cannot_splice_out, 1);
+		acceptor.logger.assert_log("lightning::ln::channel", cannot_splice_out, 1);
 	}
 
 	channel_type
@@ -10002,17 +10040,13 @@ fn do_test_splice_out_initiator_reserve_breach_zero_fee_commitments(
 		// balance, we previously would not complain.
 		splice_init.funding_contribution_satoshis = funding_contribution_sat;
 		acceptor.node.handle_splice_init(node_id_initiator, &splice_init);
-		let msg_events = acceptor.node.get_and_clear_pending_msg_events();
-		assert_eq!(msg_events.len(), 1);
-		if let MessageSendEvent::HandleError { action, .. } = &msg_events[0] {
-			assert!(matches!(action, msgs::ErrorAction::DisconnectPeerWithWarning { .. }));
-		} else {
-			panic!("Expected MessageSendEvent::HandleError");
-		}
+		let tx_abort = get_event_msg!(acceptor, MessageSendEvent::SendTxAbort, node_id_initiator);
+		assert_eq!(tx_abort.channel_id, channel_id);
+		assert_eq!(tx_abort.data, b"Invalid splice contribution");
 		let post_splice_channel_value_sat = node_0_balance_leftover_amount.to_sat();
 		let cannot_splice_out = if matches!(acceptor_balance, AcceptorBalance::NoBalance) {
 			format!(
-				"Got non-closing error: Channel {channel_id} cannot \
+				"Aborting splice negotiation for channel {channel_id}: Channel {channel_id} cannot \
 				be spliced; The post-splice channel value {post_splice_channel_value_sat} \
 				is smaller than their dust limit {high_dust_limit_satoshis}"
 			)
@@ -10026,13 +10060,13 @@ fn do_test_splice_out_initiator_reserve_breach_zero_fee_commitments(
 				high_dust_limit_satoshis
 			);
 			format!(
-				"Got non-closing error: Channel {channel_id} cannot \
+				"Aborting splice negotiation for channel {channel_id}: Channel {channel_id} cannot \
 				be spliced out; their post-splice channel balance \
 				{node_0_balance_leftover_amount} is smaller than our selected v2 reserve \
 				{v2_channel_reserve}"
 			)
 		};
-		acceptor.logger.assert_log("lightning::ln::channelmanager", cannot_splice_out, 1);
+		acceptor.logger.assert_log("lightning::ln::channel", cannot_splice_out, 1);
 	}
 }
 

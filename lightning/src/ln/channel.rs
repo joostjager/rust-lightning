@@ -2060,6 +2060,19 @@ where
 					debug_assert!(has_funding_negotiation);
 					let splice_funding_failed = funded_channel.reset_pending_splice_state();
 					(true, splice_funding_failed)
+				} else if let Some(splice_funding_failed) =
+					funded_channel.abandon_quiescent_action()
+				{
+					// A tx_abort may arrive while a splice is only queued behind
+					// quiescence, before there is a pending_splice to reset.
+					funded_channel.context.channel_state.clear_local_stfu_sent();
+					funded_channel.context.channel_state.clear_remote_stfu_sent();
+					if funded_channel.context.channel_state.is_quiescent() {
+						funded_channel.exit_quiescence();
+					} else {
+						funded_channel.mark_response_received();
+					}
+					(true, Some(splice_funding_failed))
 				} else {
 					// We were not tracking the pending funding negotiation state anymore, likely
 					// due to a disconnection or already having sent our own `tx_abort`.
@@ -7291,6 +7304,32 @@ where
 			},
 			#[cfg(any(test, fuzzing, feature = "_test_utils"))]
 			QuiescentAction::DoNothing => None,
+		}
+	}
+
+	fn fail_splice_negotiation<L: Logger>(
+		&mut self, err: ChannelError, logger: &L,
+	) -> InteractiveTxMsgError {
+		// InteractiveTxMsgError lets ChannelManager send tx_abort and emit
+		// funding-cleanup events for a failed splice negotiation.
+		if let ChannelError::Abort(ref reason) = err {
+			let logger = WithChannelContext::from(logger, self.context(), None);
+			log_info!(logger, "Aborting splice negotiation: {reason}");
+		}
+		let splice_funding_failed = if matches!(err, ChannelError::Abort(_))
+			&& self.should_reset_pending_splice_state(true)
+		{
+			// Reset only the failed round, preserving any prior negotiated
+			// splice candidate that this round may have been replacing.
+			self.reset_pending_splice_state()
+		} else {
+			None
+		};
+		let msg_err = InteractiveTxMsgError::new(err, splice_funding_failed);
+		if matches!(&msg_err.err, ChannelError::Abort(AbortReason::InvalidSpliceContribution)) {
+			msg_err.with_negotiation_failure_reason(NegotiationFailureReason::ContributionInvalid)
+		} else {
+			msg_err
 		}
 	}
 
@@ -12786,6 +12825,17 @@ where
 			));
 		}
 
+		if pending_splice
+			.negotiated_candidates
+			.iter()
+			.any(|funding| funding.funding_tx_confirmation_height != 0)
+		{
+			return Err(format!(
+				"Channel {} has a confirmed pending splice, cannot RBF",
+				self.context.channel_id(),
+			));
+		}
+
 		if pending_splice.negotiated_candidates.is_empty() {
 			return Err(format!(
 				"Channel {} has no negotiated splice candidates to RBF",
@@ -13338,7 +13388,17 @@ where
 				holder_pubkeys,
 				min_funding_satoshis,
 			)
-			.map_err(|e| self.quiescent_negotiation_err(ChannelError::WarnAndDisconnect(e)))?;
+			.map_err(|e| {
+				log_info!(
+					logger,
+					"Aborting splice negotiation for channel {}: {}",
+					self.context.channel_id(),
+					e,
+				);
+				self.quiescent_negotiation_err(ChannelError::Abort(
+					AbortReason::InvalidSpliceContribution,
+				))
+			})?;
 
 		// Adjust for the feerate and clone so we can store it for future RBF re-use.
 		let (adjusted_contribution, our_funding_inputs, our_funding_outputs) =
@@ -13424,18 +13484,22 @@ where
 			return Err(ChannelError::Abort(AbortReason::NegotiationInProgress));
 		}
 
+		// RBF is unavailable once a pending splice has locked or confirmed, but
+		// the channel itself can continue operating.
 		if pending_splice.received_funding_txid.is_some() {
-			return Err(ChannelError::WarnAndDisconnect(format!(
-				"Channel {} counterparty already sent splice_locked, cannot RBF",
-				self.context.channel_id(),
-			)));
+			return Err(ChannelError::Abort(AbortReason::RbfUnavailable));
 		}
 
 		if pending_splice.sent_funding_txid.is_some() {
-			return Err(ChannelError::WarnAndDisconnect(format!(
-				"Channel {} already sent splice_locked, cannot RBF",
-				self.context.channel_id(),
-			)));
+			return Err(ChannelError::Abort(AbortReason::RbfUnavailable));
+		}
+
+		if pending_splice
+			.negotiated_candidates
+			.iter()
+			.any(|funding| funding.funding_tx_confirmation_height != 0)
+		{
+			return Err(ChannelError::Abort(AbortReason::RbfUnavailable));
 		}
 
 		let last_candidate = match pending_splice.negotiated_candidates.last() {
@@ -13521,7 +13585,17 @@ where
 				holder_pubkeys,
 				min_funding_satoshis,
 			)
-			.map_err(|e| self.quiescent_negotiation_err(ChannelError::WarnAndDisconnect(e)))?;
+			.map_err(|e| {
+				log_info!(
+					logger,
+					"Aborting splice RBF for channel {}: {}",
+					self.context.channel_id(),
+					e,
+				);
+				self.quiescent_negotiation_err(ChannelError::Abort(
+					AbortReason::InvalidSpliceContribution,
+				))
+			})?;
 
 		// Consume the appropriate contribution source.
 		let (our_funding_inputs, our_funding_outputs) = if queued_net_value.is_some() {
@@ -13621,7 +13695,7 @@ where
 				holder_pubkeys,
 				min_funding_satoshis,
 			)
-			.map_err(|e| ChannelError::WarnAndDisconnect(e))?;
+			.map_err(|_| ChannelError::Abort(AbortReason::InvalidSpliceContribution))?;
 
 		Ok(new_funding)
 	}
@@ -13629,8 +13703,10 @@ where
 	pub(crate) fn tx_ack_rbf<ES: EntropySource, L: Logger>(
 		&mut self, msg: &msgs::TxAckRbf, entropy_source: &ES, holder_node_id: &PublicKey,
 		min_funding_satoshis: u64, logger: &L,
-	) -> Result<Option<InteractiveTxMessageSend>, ChannelError> {
-		let rbf_funding = self.validate_tx_ack_rbf(msg, min_funding_satoshis)?;
+	) -> Result<Option<InteractiveTxMessageSend>, InteractiveTxMsgError> {
+		let rbf_funding = self
+			.validate_tx_ack_rbf(msg, min_funding_satoshis)
+			.map_err(|e| self.fail_splice_negotiation(e, logger))?;
 
 		log_info!(
 			logger,
@@ -13662,8 +13738,10 @@ where
 	pub(crate) fn splice_ack<ES: EntropySource, L: Logger>(
 		&mut self, msg: &msgs::SpliceAck, entropy_source: &ES, holder_node_id: &PublicKey,
 		min_funding_satoshis: u64, logger: &L,
-	) -> Result<Option<InteractiveTxMessageSend>, ChannelError> {
-		let splice_funding = self.validate_splice_ack(msg, min_funding_satoshis)?;
+	) -> Result<Option<InteractiveTxMessageSend>, InteractiveTxMsgError> {
+		let splice_funding = self
+			.validate_splice_ack(msg, min_funding_satoshis)
+			.map_err(|e| self.fail_splice_negotiation(e, logger))?;
 
 		log_info!(
 			logger,
@@ -13722,7 +13800,7 @@ where
 				new_keys,
 				min_funding_satoshis,
 			)
-			.map_err(|e| ChannelError::WarnAndDisconnect(e))?;
+			.map_err(|_| ChannelError::Abort(AbortReason::InvalidSpliceContribution))?;
 
 		Ok(new_funding)
 	}
@@ -14647,8 +14725,8 @@ where
 					// Re-validate the contribution now that we're quiescent and
 					// balances are stable. Outbound HTLCs may have been sent between
 					// funding_contributed and quiescence, reducing the holder's
-					// balance. If invalid, disconnect and return the contribution so
-					// the user can reclaim their inputs.
+					// balance. If invalid, abort and return the contribution so the
+					// user can reclaim their inputs.
 					let our_funding_contribution = contribution.net_value();
 					let unsigned_contribution = our_funding_contribution.unsigned_abs();
 					if let Err(e) = self.get_next_splice_out_maximum(&self.funding)
@@ -14659,12 +14737,18 @@ where
 						)
 					{
 						let failed = self.splice_funding_failed_for(contribution);
+						log_info!(
+							logger,
+							"Aborting splice negotiation for channel {}: Channel {} contribution no longer valid at quiescence: {}",
+							self.context.channel_id(),
+							self.context.channel_id(),
+							e,
+						);
+						// Leave quiescence so held updates can resume after the
+						// splice attempt is aborted.
+						self.exit_quiescence();
 						return Err((
-							ChannelError::WarnAndDisconnect(format!(
-								"Channel {} contribution no longer valid at quiescence: {}",
-								self.context.channel_id(),
-								e,
-							)),
+							ChannelError::Abort(AbortReason::InvalidSpliceContribution),
 							QuiescentError::FailSplice(
 								failed,
 								NegotiationFailureReason::ContributionInvalid,
@@ -14681,17 +14765,25 @@ where
 						is_initiator: true,
 						our_funding_contribution,
 						funding_tx_locktime: locktime,
-						funding_feerate_sat_per_1000_weight: funding_feerate_per_kw,
-						shared_funding_input: Some(prev_funding_input),
-						our_funding_inputs,
-						our_funding_outputs,
-					};
+							funding_feerate_sat_per_1000_weight: funding_feerate_per_kw,
+							shared_funding_input: Some(prev_funding_input),
+							our_funding_inputs,
+							our_funding_outputs,
+						};
 
 					if self.pending_splice.is_some() {
 						if let Err(e) = self.can_initiate_rbf() {
 							let failed = self.splice_funding_failed_for(prior_contribution);
+							// RBF availability can change while STFU is in flight.
+							self.exit_quiescence();
+							log_info!(
+								logger,
+								"Aborting splice RBF for channel {} after reaching quiescence: {}",
+								self.context.channel_id(),
+								e,
+							);
 							return Err((
-								ChannelError::WarnAndDisconnect(e),
+								ChannelError::Abort(AbortReason::RbfUnavailable),
 								QuiescentError::FailSplice(
 									failed,
 									NegotiationFailureReason::CannotInitiateRbf,
