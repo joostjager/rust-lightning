@@ -2914,6 +2914,15 @@ impl<'a, Out: Output + MaybeSend + MaybeSync> Harness<'a, Out> {
 				MessageSendEvent::SendTxAbort { ref node_id, ref msg } => {
 					let dest_idx = log_peer_message(node_idx, node_id, nodes, out, "tx_abort");
 					nodes[dest_idx].handle_tx_abort(source_node_id, msg);
+					if let Err(APIError::APIMisuseError { ref err }) =
+						nodes[dest_idx].node.splice_channel(&msg.channel_id, &source_node_id)
+					{
+						assert!(
+							!err.contains("waiting to be negotiated")
+								&& !err.contains("currently being negotiated"),
+							"tx_abort left splice negotiation state behind"
+						);
+					}
 					None
 				},
 				MessageSendEvent::SendTxInitRbf { ref node_id, ref msg } => {
@@ -3105,7 +3114,19 @@ impl<'a, Out: Output + MaybeSend + MaybeSync> Harness<'a, Out> {
 					}
 				},
 				events::Event::SpliceNegotiated { .. } => {},
-				events::Event::SpliceNegotiationFailed { .. } => {},
+				events::Event::SpliceNegotiationFailed {
+					channel_id, counterparty_node_id, ..
+				} => {
+					if let Err(APIError::APIMisuseError { ref err }) =
+						nodes[node_idx].node.splice_channel(&channel_id, &counterparty_node_id)
+					{
+						assert!(
+							!err.contains("waiting to be negotiated")
+								&& !err.contains("currently being negotiated"),
+							"splice failure left negotiation state behind"
+						);
+					}
+				},
 				events::Event::DiscardFunding {
 					funding_info:
 						events::FundingInfo::Contribution { .. } | events::FundingInfo::Tx { .. },
