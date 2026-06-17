@@ -49,7 +49,7 @@ use lightning::chain::{
 };
 use lightning::events;
 use lightning::ln::channel::{
-	FEE_SPIKE_BUFFER_FEE_INCREASE_MULTIPLE, MAX_STD_OUTPUT_DUST_LIMIT_SATOSHIS,
+	SpliceProbeState, FEE_SPIKE_BUFFER_FEE_INCREASE_MULTIPLE, MAX_STD_OUTPUT_DUST_LIMIT_SATOSHIS,
 };
 use lightning::ln::channel_state::ChannelDetails;
 use lightning::ln::channelmanager::{
@@ -2220,6 +2220,18 @@ fn build_node_config(chan_type: ChanType) -> UserConfig {
 	config
 }
 
+fn assert_no_stale_splice_negotiation(
+	node: &HarnessNode<'_>, channel_id: &ChannelId, counterparty_node_id: &PublicKey, context: &str,
+) {
+	let state = node.node.splice_probe_state(channel_id, counterparty_node_id).unwrap();
+	assert!(
+		matches!(state, SpliceProbeState::None | SpliceProbeState::PendingWithoutNegotiation),
+		"{} left splice negotiation state behind: {:?}",
+		context,
+		state
+	);
+}
+
 fn assert_test_invariants(nodes: &[HarnessNode<'_>; 3]) {
 	assert_eq!(nodes[0].list_channels().len(), 3);
 	assert_eq!(nodes[1].list_channels().len(), 6);
@@ -2923,6 +2935,12 @@ impl<'a, Out: Output + MaybeSend + MaybeSync> Harness<'a, Out> {
 							"tx_abort left splice negotiation state behind"
 						);
 					}
+					assert_no_stale_splice_negotiation(
+						&nodes[dest_idx],
+						&msg.channel_id,
+						&source_node_id,
+						"tx_abort",
+					);
 					None
 				},
 				MessageSendEvent::SendTxInitRbf { ref node_id, ref msg } => {
@@ -3126,6 +3144,12 @@ impl<'a, Out: Output + MaybeSend + MaybeSync> Harness<'a, Out> {
 							"splice failure left negotiation state behind"
 						);
 					}
+					assert_no_stale_splice_negotiation(
+						&nodes[node_idx],
+						&channel_id,
+						&counterparty_node_id,
+						"splice failure",
+					);
 				},
 				events::Event::DiscardFunding {
 					funding_info:

@@ -1537,6 +1537,20 @@ enum ChannelPhase<SP: SignerProvider> {
 	Funded(FundedChannel<SP>),
 }
 
+/// Fuzz-only view of splice state used to validate cleanup paths.
+#[cfg(fuzzing)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SpliceProbeState {
+	/// No pending splice state is present.
+	None,
+	/// A splice action is queued to start once quiescence completes.
+	QueuedAction,
+	/// A splice negotiation is active.
+	ActiveNegotiation { is_initiator: bool },
+	/// Splice state remains, but no negotiation is currently active.
+	PendingWithoutNegotiation,
+}
+
 impl<SP: SignerProvider> Channel<SP>
 where
 	SP::EcdsaSigner: ChannelSigner,
@@ -1615,6 +1629,14 @@ where
 		} else {
 			None
 		}
+	}
+
+	/// Returns a read-only view of splice state for fuzz invariants.
+	#[cfg(fuzzing)]
+	pub fn splice_probe_state(&self) -> SpliceProbeState {
+		self.as_funded()
+			.map(|channel| channel.splice_probe_state())
+			.unwrap_or(SpliceProbeState::None)
 	}
 
 	pub fn as_funded_mut(&mut self) -> Option<&mut FundedChannel<SP>> {
@@ -7329,6 +7351,22 @@ where
 		} else {
 			&[]
 		}
+	}
+
+	#[cfg(fuzzing)]
+	fn splice_probe_state(&self) -> SpliceProbeState {
+		if self.quiescent_action.is_some() {
+			return SpliceProbeState::QueuedAction;
+		}
+		if let Some(pending_splice) = &self.pending_splice {
+			if let Some(funding_negotiation) = &pending_splice.funding_negotiation {
+				return SpliceProbeState::ActiveNegotiation {
+					is_initiator: funding_negotiation.is_initiator(),
+				};
+			}
+			return SpliceProbeState::PendingWithoutNegotiation;
+		}
+		SpliceProbeState::None
 	}
 
 	fn funding_and_pending_funding_iter_mut(&mut self) -> impl Iterator<Item = &mut FundingScope> {
