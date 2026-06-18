@@ -4976,6 +4976,28 @@ impl<
 		}
 	}
 
+	/// Returns a read-only view of channel splice state for fuzz invariants.
+	#[cfg(fuzzing)]
+	pub fn splice_probe_state(
+		&self, channel_id: &ChannelId, counterparty_node_id: &PublicKey,
+	) -> Result<channel::SpliceProbeState, APIError> {
+		let per_peer_state = self.per_peer_state.read().unwrap();
+
+		let peer_state_mutex = match per_peer_state
+			.get(counterparty_node_id)
+			.ok_or_else(|| APIError::no_such_peer(counterparty_node_id))
+		{
+			Ok(p) => p,
+			Err(e) => return Err(e),
+		};
+
+		let peer_state = peer_state_mutex.lock().unwrap();
+		match peer_state.channel_by_id.get(channel_id) {
+			Some(chan_phase) => Ok(chan_phase.splice_probe_state()),
+			None => Err(APIError::no_such_channel_for_peer(channel_id, counterparty_node_id)),
+		}
+	}
+
 	/// Cancels an in-flight [`FundingContribution`].
 	///
 	/// This is primarily useful after receiving an [`Event::FundingTransactionReadyForSigning`] for

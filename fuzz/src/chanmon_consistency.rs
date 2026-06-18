@@ -49,7 +49,7 @@ use lightning::chain::{
 };
 use lightning::events;
 use lightning::ln::channel::{
-	FEE_SPIKE_BUFFER_FEE_INCREASE_MULTIPLE, MAX_STD_OUTPUT_DUST_LIMIT_SATOSHIS,
+	SpliceProbeState, FEE_SPIKE_BUFFER_FEE_INCREASE_MULTIPLE, MAX_STD_OUTPUT_DUST_LIMIT_SATOSHIS,
 };
 use lightning::ln::channel_state::ChannelDetails;
 use lightning::ln::channelmanager::{
@@ -225,6 +225,10 @@ impl ChainState {
 
 	fn is_unspent(&self, outpoint: &BitcoinOutPoint) -> bool {
 		self.utxos.contains(outpoint)
+	}
+
+	fn is_confirmed_txid(&self, txid: &Txid) -> bool {
+		self.confirmed_txids.contains(txid)
 	}
 
 	fn confirmed_output(&self, outpoint: &BitcoinOutPoint) -> Option<&TxOut> {
@@ -2221,6 +2225,27 @@ fn build_node_config(chan_type: ChanType) -> UserConfig {
 	config
 }
 
+fn assert_no_stale_splice_negotiation(
+	node: &HarnessNode<'_>, channel_id: &ChannelId, counterparty_node_id: &PublicKey, context: &str,
+) {
+	let state = match node.node.splice_probe_state(channel_id, counterparty_node_id) {
+		Ok(state) => state,
+		Err(APIError::ChannelUnavailable { ref err })
+			if err.starts_with("No such channel_id") || err.starts_with("No such peer") =>
+		{
+			// The channel may already be removed when close-related cleanup events are handled.
+			return;
+		},
+		Err(e) => panic!("{:?}", e),
+	};
+	assert!(
+		matches!(state, SpliceProbeState::None | SpliceProbeState::PendingWithoutNegotiation),
+		"{} left splice negotiation state behind: {:?}",
+		context,
+		state
+	);
+}
+
 fn assert_test_invariants(nodes: &[HarnessNode<'_>; 3]) {
 	assert_eq!(nodes[0].list_channels().len(), 3);
 	assert_eq!(nodes[1].list_channels().len(), 6);
@@ -2852,7 +2877,7 @@ impl<'a, Out: Output + MaybeSend + MaybeSync> Harness<'a, Out> {
 		fn process_msg_event<Out: Output + MaybeSend + MaybeSync>(
 			node_idx: usize, source_node_id: PublicKey, event: MessageSendEvent,
 			corrupt_forward: bool, limit_events: ProcessMessages, nodes: &[HarnessNode<'_>; 3],
-			out: &Out,
+			chain_state: &ChainState, out: &Out,
 		) -> Option<MessageSendEvent> {
 			match event {
 				MessageSendEvent::UpdateHTLCs { node_id, channel_id, updates } => {
@@ -2915,6 +2940,12 @@ impl<'a, Out: Output + MaybeSend + MaybeSync> Harness<'a, Out> {
 				MessageSendEvent::SendTxAbort { ref node_id, ref msg } => {
 					let dest_idx = log_peer_message(node_idx, node_id, nodes, out, "tx_abort");
 					nodes[dest_idx].handle_tx_abort(source_node_id, msg);
+					assert_no_stale_splice_negotiation(
+						&nodes[dest_idx],
+						&msg.channel_id,
+						&source_node_id,
+						"tx_abort",
+					);
 					None
 				},
 				MessageSendEvent::SendTxInitRbf { ref node_id, ref msg } => {
@@ -2944,6 +2975,11 @@ impl<'a, Out: Output + MaybeSend + MaybeSync> Harness<'a, Out> {
 				},
 				MessageSendEvent::SendSpliceLocked { ref node_id, ref msg } => {
 					let dest_idx = log_peer_message(node_idx, node_id, nodes, out, "splice_locked");
+					assert!(
+						chain_state.is_confirmed_txid(&msg.splice_txid),
+						"splice_locked referenced unconfirmed txid {}",
+						msg.splice_txid
+					);
 					nodes[dest_idx].handle_splice_locked(source_node_id, msg);
 					None
 				},
@@ -2975,6 +3011,7 @@ impl<'a, Out: Output + MaybeSend + MaybeSync> Harness<'a, Out> {
 		}
 
 		let nodes = &self.nodes;
+		let chain_state = &self.chain_state;
 		let out = &self.out;
 		let queues = &mut self.queues;
 		let mut events = queues.take_for_node(node_idx);
@@ -2995,6 +3032,7 @@ impl<'a, Out: Output + MaybeSend + MaybeSync> Harness<'a, Out> {
 				corrupt_forward,
 				limit_events,
 				nodes,
+				chain_state,
 				out,
 			);
 			if limit_events != ProcessMessages::AllMessages {
@@ -3051,7 +3089,15 @@ impl<'a, Out: Output + MaybeSend + MaybeSync> Harness<'a, Out> {
 				events::Event::PaymentPathSuccessful { .. } => {},
 				events::Event::PaymentPathFailed { .. } => {},
 				events::Event::PaymentForwarded { .. } if node_idx == 1 => {},
-				events::Event::ChannelReady { .. } => {},
+				events::Event::ChannelReady { funding_txo, .. } => {
+					if let Some(funding_txo) = funding_txo {
+						assert!(
+							chain_state.is_confirmed_txid(&funding_txo.txid),
+							"ChannelReady referenced unconfirmed funding txid {}",
+							funding_txo.txid
+						);
+					}
+				},
 				events::Event::HTLCHandlingFailed { .. } => {},
 				events::Event::FundingTransactionReadyForSigning {
 					channel_id,
