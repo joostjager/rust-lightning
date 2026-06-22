@@ -48,82 +48,40 @@ use crate::ln::our_peer_storage::{DecryptedOurPeerStorage, PeerStorageMonitorHol
 use crate::ln::types::ChannelId;
 use crate::prelude::*;
 use crate::sign::ecdsa::EcdsaChannelSigner;
-use crate::sign::{EntropySource, PeerStorageKey, SignerProvider};
-use crate::sync::{Mutex, MutexGuard, RwLock, RwLockReadGuard};
+use crate::sign::{EntropySource, PeerStorageKey};
+use crate::sync::{Mutex, RwLock, RwLockReadGuard};
 use crate::types::features::{InitFeatures, NodeFeatures};
-use crate::util::errors::APIError;
 use crate::util::logger::{Logger, WithContext};
-use crate::util::native_async::{FutureSpawner, MaybeSend, MaybeSync};
-use crate::util::persist::{KVStore, MonitorName, MonitorUpdatingPersisterAsync};
+use crate::util::persist::MonitorName;
 #[cfg(peer_storage)]
 use crate::util::ser::{VecWriter, Writeable};
 use crate::util::wakers::{Future, Notifier};
 
-use alloc::collections::VecDeque;
 use alloc::sync::Arc;
 #[cfg(peer_storage)]
 use core::iter::Cycle;
 use core::ops::Deref;
 use core::sync::atomic::{AtomicUsize, Ordering};
 
-/// A pending operation queued for later execution when `ChainMonitor` is in deferred mode.
-enum PendingMonitorOp<ChannelSigner: EcdsaChannelSigner> {
-	/// A new monitor to insert and persist.
-	NewMonitor { channel_id: ChannelId, monitor: ChannelMonitor<ChannelSigner> },
-	/// An update to apply and persist.
-	Update { channel_id: ChannelId, update: ChannelMonitorUpdate },
-}
-
 /// `Persist` defines behavior for persisting channel monitors: this could mean
 /// writing once to disk, and/or uploading to one or more backup services.
 ///
-/// Persistence can happen in one of two ways - synchronously completing before the trait method
-/// calls return or asynchronously in the background.
-///
-/// # For those implementing synchronous persistence
+/// Persistence completes synchronously, before the trait method calls return. With atomic
+/// persistence the [`ChannelMonitor`] is durably committed before any message or event is
+/// released, so there is no asynchronous "in progress" state.
 ///
 ///  * If persistence completes fully (including any relevant `fsync()` calls), the implementation
 ///    should return [`ChannelMonitorUpdateStatus::Completed`], indicating normal channel operation
 ///    should continue.
 ///
-///  * If persistence fails for some reason, implementations should consider returning
-///    [`ChannelMonitorUpdateStatus::InProgress`] and retry all pending persistence operations in
-///    the background with [`ChainMonitor::list_pending_monitor_updates`] and
-///    [`ChainMonitor::get_monitor`].
-///
-///    Each pending update must be individually marked as complete by calling
-///    [`ChainMonitor::channel_monitor_updated`] with the corresponding update ID. Note that
-///    persisting a full [`ChannelMonitor`] covers all prior updates, but each update ID still
-///    needs to be marked complete separately.
-///
-///    If at some point no further progress can be made towards persisting the pending updates, the
-///    node should simply shut down.
-///
-///  * If the persistence has failed and cannot be retried further (e.g. because of an outage),
+///  * If the persistence has failed and cannot be retried (e.g. because of an outage),
 ///    [`ChannelMonitorUpdateStatus::UnrecoverableError`] can be used, though this will result in
 ///    an immediate panic and future operations in LDK generally failing.
 ///
-/// # For those implementing asynchronous persistence
-///
-///  All calls should generally spawn a background task and immediately return
-///  [`ChannelMonitorUpdateStatus::InProgress`]. Once the update completes,
-///  [`ChainMonitor::channel_monitor_updated`] should be called with the corresponding
-///  [`ChannelMonitor::get_latest_update_id`] or [`ChannelMonitorUpdate::update_id`].
-///
-///  Note that unlike the direct [`chain::Watch`] interface,
-///  [`ChainMonitor::channel_monitor_updated`] must be called once for *each* update which occurs.
-///
-///  If at some point no further progress can be made towards persisting a pending update, the node
-///  should simply shut down. Until then, the background task should either loop indefinitely, or
-///  persistence should be regularly retried with [`ChainMonitor::list_pending_monitor_updates`]
-///  and [`ChainMonitor::get_monitor`] (note that if a full monitor is persisted all pending
-///  monitor updates may be marked completed).
-///
 /// # Using remote watchtowers
 ///
-/// Watchtowers may be updated as a part of an implementation of this trait, utilizing the async
-/// update process described above while the watchtower is being updated. The following methods are
-/// provided for bulding transactions for a watchtower:
+/// Watchtowers may be updated as a part of an implementation of this trait. The following methods
+/// are provided for building transactions for a watchtower:
 /// [`ChannelMonitor::initial_counterparty_commitment_tx`],
 /// [`ChannelMonitor::counterparty_commitment_txs_from_update`],
 /// [`ChannelMonitor::sign_to_local_justice_tx`], [`TrustedCommitmentTransaction::revokeable_output_index`],
@@ -141,9 +99,8 @@ pub trait Persist<ChannelSigner: EcdsaChannelSigner> {
 	/// the same `monitor_name` must be applied to or overwrite this data). Note that you **must**
 	/// persist every new monitor to disk.
 	///
-	/// The [`ChannelMonitor::get_latest_update_id`] uniquely links this call to [`ChainMonitor::channel_monitor_updated`].
-	/// For [`Persist::persist_new_channel`], it is only necessary to call [`ChainMonitor::channel_monitor_updated`]
-	/// when you return [`ChannelMonitorUpdateStatus::InProgress`].
+	/// Persistence completes synchronously, so on success this should return
+	/// [`ChannelMonitorUpdateStatus::Completed`].
 	///
 	/// See [`Writeable::write`] on [`ChannelMonitor`] for writing out a `ChannelMonitor`
 	/// and [`ChannelMonitorUpdateStatus`] for requirements when returning errors.
@@ -181,10 +138,8 @@ pub trait Persist<ChannelSigner: EcdsaChannelSigner> {
 	/// them in batches. The size of each monitor grows `O(number of state updates)`
 	/// whereas updates are small and `O(1)`.
 	///
-	/// The [`ChannelMonitorUpdate::update_id`] or [`ChannelMonitor::get_latest_update_id`] uniquely
-	/// links this call to [`ChainMonitor::channel_monitor_updated`].
-	/// For [`Persist::update_persisted_channel`], it is only necessary to call [`ChainMonitor::channel_monitor_updated`]
-	/// when a [`ChannelMonitorUpdate`] is provided and when you return [`ChannelMonitorUpdateStatus::InProgress`].
+	/// Persistence completes synchronously, so on success this should return
+	/// [`ChannelMonitorUpdateStatus::Completed`].
 	///
 	/// See [`Writeable::write`] on [`ChannelMonitor`] for writing out a `ChannelMonitor`,
 	/// [`Writeable::write`] on [`ChannelMonitorUpdate`] for writing out an update, and
@@ -207,42 +162,10 @@ pub trait Persist<ChannelSigner: EcdsaChannelSigner> {
 	/// restart, this method must in that case be idempotent, ensuring it can handle scenarios where
 	/// the monitor already exists in the archive.
 	fn archive_persisted_channel(&self, monitor_name: MonitorName);
-
-	/// Fetches the set of [`ChannelMonitorUpdate`]s, previously persisted with
-	/// [`Self::update_persisted_channel`], which have completed.
-	///
-	/// Returning an update here is equivalent to calling
-	/// [`ChainMonitor::channel_monitor_updated`]. Because of this, this method is defaulted and
-	/// hidden in the docs.
-	#[doc(hidden)]
-	fn get_and_clear_completed_updates(&self) -> Vec<(ChannelId, u64)> {
-		Vec::new()
-	}
 }
 
 struct MonitorHolder<ChannelSigner: EcdsaChannelSigner> {
 	monitor: ChannelMonitor<ChannelSigner>,
-	/// The full set of pending monitor updates for this Channel.
-	///
-	/// Note that this lock must be held from [`ChannelMonitor::update_monitor`] through to
-	/// [`Persist::update_persisted_channel`] to prevent a race where we call
-	/// [`Persist::update_persisted_channel`], the user returns a
-	/// [`ChannelMonitorUpdateStatus::InProgress`], and then calls
-	/// [`ChainMonitor::channel_monitor_updated`] immediately, racing our insertion of the pending
-	/// update into the contained Vec.
-	///
-	/// This also avoids a race where we update a [`ChannelMonitor`], then while connecting a block
-	/// persist a full [`ChannelMonitor`] prior to persisting the [`ChannelMonitorUpdate`]. This
-	/// could cause users to have a full [`ChannelMonitor`] on disk as well as a
-	/// [`ChannelMonitorUpdate`] which was already applied. While this isn't an issue for the
-	/// LDK-provided update-based [`Persist`], it is somewhat surprising for users so we avoid it.
-	pending_monitor_updates: Mutex<Vec<u64>>,
-}
-
-impl<ChannelSigner: EcdsaChannelSigner> MonitorHolder<ChannelSigner> {
-	fn has_pending_updates(&self, pending_monitor_updates_lock: &MutexGuard<Vec<u64>>) -> bool {
-		!pending_monitor_updates_lock.is_empty()
-	}
 }
 
 /// A read-only reference to a current ChannelMonitor.
@@ -258,77 +181,6 @@ impl<ChannelSigner: EcdsaChannelSigner> Deref for LockedChannelMonitor<'_, Chann
 	type Target = ChannelMonitor<ChannelSigner>;
 	fn deref(&self) -> &ChannelMonitor<ChannelSigner> {
 		&self.lock.get(&self.channel_id).expect("Checked at construction").monitor
-	}
-}
-
-/// An unconstructable [`Persist`]er which is used under the hood when you call
-/// [`ChainMonitor::new_async_beta`].
-///
-/// This is not exported to bindings users as async is not supported outside of Rust.
-pub struct AsyncPersister<
-	K: KVStore + MaybeSend + MaybeSync + 'static,
-	S: FutureSpawner,
-	L: Logger + MaybeSend + MaybeSync + 'static,
-	ES: EntropySource + MaybeSend + MaybeSync + 'static,
-	SP: SignerProvider + MaybeSend + MaybeSync + 'static,
-	BI: BroadcasterInterface + MaybeSend + MaybeSync + 'static,
-	FE: FeeEstimator + MaybeSend + MaybeSync + 'static,
-> {
-	persister: MonitorUpdatingPersisterAsync<K, S, L, ES, SP, BI, FE>,
-	event_notifier: Arc<Notifier>,
-}
-
-impl<
-		K: KVStore + MaybeSend + MaybeSync + 'static,
-		S: FutureSpawner,
-		L: Logger + MaybeSend + MaybeSync + 'static,
-		ES: EntropySource + MaybeSend + MaybeSync + 'static,
-		SP: SignerProvider + MaybeSend + MaybeSync + 'static,
-		BI: BroadcasterInterface + MaybeSend + MaybeSync + 'static,
-		FE: FeeEstimator + MaybeSend + MaybeSync + 'static,
-	> Deref for AsyncPersister<K, S, L, ES, SP, BI, FE>
-{
-	type Target = Self;
-	fn deref(&self) -> &Self {
-		self
-	}
-}
-
-impl<
-		K: KVStore + MaybeSend + MaybeSync + 'static,
-		S: FutureSpawner,
-		L: Logger + MaybeSend + MaybeSync + 'static,
-		ES: EntropySource + MaybeSend + MaybeSync + 'static,
-		SP: SignerProvider + MaybeSend + MaybeSync + 'static,
-		BI: BroadcasterInterface + MaybeSend + MaybeSync + 'static,
-		FE: FeeEstimator + MaybeSend + MaybeSync + 'static,
-	> Persist<SP::EcdsaSigner> for AsyncPersister<K, S, L, ES, SP, BI, FE>
-where
-	SP::EcdsaSigner: MaybeSend + 'static,
-{
-	fn persist_new_channel(
-		&self, monitor_name: MonitorName, monitor: &ChannelMonitor<SP::EcdsaSigner>,
-	) -> ChannelMonitorUpdateStatus {
-		let notifier = Arc::clone(&self.event_notifier);
-		self.persister.spawn_async_persist_new_channel(monitor_name, monitor, notifier);
-		ChannelMonitorUpdateStatus::InProgress
-	}
-
-	fn update_persisted_channel(
-		&self, monitor_name: MonitorName, monitor_update: Option<&ChannelMonitorUpdate>,
-		monitor: &ChannelMonitor<SP::EcdsaSigner>,
-	) -> ChannelMonitorUpdateStatus {
-		let notifier = Arc::clone(&self.event_notifier);
-		self.persister.spawn_async_update_channel(monitor_name, monitor_update, monitor, notifier);
-		ChannelMonitorUpdateStatus::InProgress
-	}
-
-	fn archive_persisted_channel(&self, monitor_name: MonitorName) {
-		self.persister.spawn_async_archive_persisted_channel(monitor_name);
-	}
-
-	fn get_and_clear_completed_updates(&self) -> Vec<(ChannelId, u64)> {
-		self.persister.get_and_clear_completed_updates()
 	}
 }
 
@@ -381,73 +233,6 @@ pub struct ChainMonitor<
 
 	#[cfg(peer_storage)]
 	our_peerstorage_encryption_key: PeerStorageKey,
-
-	/// When `true`, [`chain::Watch`] operations are queued rather than executed immediately.
-	deferred: bool,
-	/// Queued monitor operations awaiting flush. Unused when `deferred` is `false`.
-	pending_ops: Mutex<VecDeque<PendingMonitorOp<ChannelSigner>>>,
-	/// Guards [`Self::flush`] so that concurrent calls are serialized.
-	flush_lock: Mutex<()>,
-}
-
-impl<
-		K: KVStore + MaybeSend + MaybeSync + 'static,
-		S: FutureSpawner,
-		SP: SignerProvider + MaybeSend + MaybeSync + 'static,
-		C: chain::Filter,
-		T: BroadcasterInterface + MaybeSend + MaybeSync + 'static,
-		F: FeeEstimator + MaybeSend + MaybeSync + 'static,
-		L: Logger + MaybeSend + MaybeSync + 'static,
-		ES: EntropySource + MaybeSend + MaybeSync + 'static,
-	> ChainMonitor<SP::EcdsaSigner, C, T, F, L, AsyncPersister<K, S, L, ES, SP, T, F>, ES>
-where
-	SP::EcdsaSigner: MaybeSend + 'static,
-{
-	/// Creates a new `ChainMonitor` used to watch on-chain activity pertaining to channels.
-	///
-	/// This behaves the same as [`ChainMonitor::new`] except that it relies on
-	/// [`MonitorUpdatingPersisterAsync`] and thus allows persistence to be completed async.
-	///
-	/// Note that async monitor updating is considered beta, and bugs may be triggered by its use.
-	///
-	/// When `deferred` is `true`, [`chain::Watch::watch_channel`] and
-	/// [`chain::Watch::update_channel`] calls are not executed immediately. Instead, they are
-	/// queued internally and must be flushed by the caller via [`Self::flush`]. Use
-	/// [`Self::pending_operation_count`] to check how many operations are queued, then call
-	/// [`Self::flush`] to process them. This allows the caller to ensure that the
-	/// [`ChannelManager`] is persisted before its associated monitors, avoiding the risk of
-	/// force closures from a crash between monitor and channel manager persistence.
-	///
-	/// When `deferred` is `false`, monitor operations are executed inline as usual.
-	///
-	/// [`ChannelManager`]: crate::ln::channelmanager::ChannelManager
-	///
-	/// This is not exported to bindings users as async is not supported outside of Rust.
-	pub fn new_async_beta(
-		chain_source: Option<C>, broadcaster: T, logger: L, feeest: F,
-		persister: MonitorUpdatingPersisterAsync<K, S, L, ES, SP, T, F>, _entropy_source: ES,
-		_our_peerstorage_encryption_key: PeerStorageKey, deferred: bool,
-	) -> Self {
-		let event_notifier = Arc::new(Notifier::new());
-		Self {
-			monitors: RwLock::new(new_hash_map()),
-			chain_source,
-			broadcaster,
-			logger,
-			fee_estimator: feeest,
-			_entropy_source,
-			pending_monitor_events: Mutex::new(Vec::new()),
-			highest_chain_height: AtomicUsize::new(0),
-			event_notifier: Arc::clone(&event_notifier),
-			persister: AsyncPersister { persister, event_notifier },
-			pending_send_only_events: Mutex::new(Vec::new()),
-			#[cfg(peer_storage)]
-			our_peerstorage_encryption_key: _our_peerstorage_encryption_key,
-			deferred,
-			pending_ops: Mutex::new(VecDeque::new()),
-			flush_lock: Mutex::new(()),
-		}
-	}
 }
 
 impl<
@@ -573,18 +358,10 @@ where
 			// updates per-channel to be well-ordered so that users don't see a
 			// `ChannelMonitorUpdate` after a channel persist for a channel with the same
 			// `latest_update_id`.
-			let _pending_monitor_updates = monitor_state.pending_monitor_updates.lock().unwrap();
 			match self.persister.update_persisted_channel(monitor.persistence_key(), None, monitor)
 			{
 				ChannelMonitorUpdateStatus::Completed => {
 					log_trace!(logger, "Finished syncing Channel Monitor for block-data")
-				},
-				ChannelMonitorUpdateStatus::InProgress => {
-					log_trace!(
-						logger,
-						"Channel Monitor sync for channel {} in progress.",
-						log_funding_info!(monitor)
-					);
 				},
 				ChannelMonitorUpdateStatus::UnrecoverableError => {
 					return Err(());
@@ -632,22 +409,12 @@ where
 	/// is obtained by the [`ChannelManager`] through [`NodeSigner`] to decrypt peer backups.
 	/// Using an inconsistent or incorrect key will result in the inability to decrypt previously encrypted backups.
 	///
-	/// When `deferred` is `true`, [`chain::Watch::watch_channel`] and
-	/// [`chain::Watch::update_channel`] calls are not executed immediately. Instead, they are
-	/// queued internally and must be flushed by the caller via [`Self::flush`]. Use
-	/// [`Self::pending_operation_count`] to check how many operations are queued, then call
-	/// [`Self::flush`] to process them. This allows the caller to ensure that the
-	/// [`ChannelManager`] is persisted before its associated monitors, avoiding the risk of
-	/// force closures from a crash between monitor and channel manager persistence.
-	///
-	/// When `deferred` is `false`, monitor operations are executed inline as usual.
-	///
 	/// [`NodeSigner`]: crate::sign::NodeSigner
 	/// [`NodeSigner::get_peer_storage_key`]: crate::sign::NodeSigner::get_peer_storage_key
 	/// [`ChannelManager`]: crate::ln::channelmanager::ChannelManager
 	pub fn new(
 		chain_source: Option<C>, broadcaster: T, logger: L, feeest: F, persister: P,
-		_entropy_source: ES, _our_peerstorage_encryption_key: PeerStorageKey, deferred: bool,
+		_entropy_source: ES, _our_peerstorage_encryption_key: PeerStorageKey,
 	) -> Self {
 		Self {
 			monitors: RwLock::new(new_hash_map()),
@@ -663,9 +430,6 @@ where
 			pending_send_only_events: Mutex::new(Vec::new()),
 			#[cfg(peer_storage)]
 			our_peerstorage_encryption_key: _our_peerstorage_encryption_key,
-			deferred,
-			pending_ops: Mutex::new(VecDeque::new()),
-			flush_lock: Mutex::new(()),
 		}
 	}
 
@@ -717,104 +481,9 @@ where
 		self.monitors.read().unwrap().keys().copied().collect()
 	}
 
-	#[cfg(not(c_bindings))]
-	/// Lists the pending updates for each [`ChannelMonitor`] (by `ChannelId` being monitored).
-	/// Each `Vec<u64>` contains `update_id`s from [`ChannelMonitor::get_latest_update_id`] for updates
-	/// that have not yet been fully persisted. Note that if a full monitor is persisted all the pending
-	/// monitor updates must be individually marked completed by calling [`ChainMonitor::channel_monitor_updated`].
-	pub fn list_pending_monitor_updates(&self) -> HashMap<ChannelId, Vec<u64>> {
-		hash_map_from_iter(self.monitors.read().unwrap().iter().map(|(channel_id, holder)| {
-			(*channel_id, holder.pending_monitor_updates.lock().unwrap().clone())
-		}))
-	}
-
-	#[cfg(c_bindings)]
-	/// Lists the pending updates for each [`ChannelMonitor`] (by `ChannelId` being monitored).
-	/// Each `Vec<u64>` contains `update_id`s from [`ChannelMonitor::get_latest_update_id`] for updates
-	/// that have not yet been fully persisted. Note that if a full monitor is persisted all the pending
-	/// monitor updates must be individually marked completed by calling [`ChainMonitor::channel_monitor_updated`].
-	pub fn list_pending_monitor_updates(&self) -> Vec<(ChannelId, Vec<u64>)> {
-		let monitors = self.monitors.read().unwrap();
-		monitors
-			.iter()
-			.map(|(channel_id, holder)| {
-				(*channel_id, holder.pending_monitor_updates.lock().unwrap().clone())
-			})
-			.collect()
-	}
-
 	#[cfg(any(test, feature = "_test_utils"))]
 	pub fn remove_monitor(&self, channel_id: &ChannelId) -> ChannelMonitor<ChannelSigner> {
 		self.monitors.write().unwrap().remove(channel_id).unwrap().monitor
-	}
-
-	/// Indicates the persistence of a [`ChannelMonitor`] has completed after
-	/// [`ChannelMonitorUpdateStatus::InProgress`] was returned from an update operation.
-	///
-	/// Thus, the anticipated use is, at a high level:
-	///  1) This [`ChainMonitor`] calls [`Persist::update_persisted_channel`] which stores the
-	///     update to disk and begins updating any remote (e.g. watchtower/backup) copies,
-	///     returning [`ChannelMonitorUpdateStatus::InProgress`],
-	///  2) once all remote copies are updated, you call this function with [`ChannelMonitor::get_latest_update_id`]
-	///     or [`ChannelMonitorUpdate::update_id`] as the `completed_update_id`, and once all pending
-	///     updates have completed the channel will be re-enabled.
-	///
-	/// It is only necessary to call [`ChainMonitor::channel_monitor_updated`] when you return [`ChannelMonitorUpdateStatus::InProgress`]
-	/// from [`Persist`] and either:
-	///   1. A new [`ChannelMonitor`] was added in [`Persist::persist_new_channel`], or
-	///   2. A [`ChannelMonitorUpdate`] was provided as part of [`Persist::update_persisted_channel`].
-	/// Note that we don't care about calls to [`Persist::update_persisted_channel`] where no
-	/// [`ChannelMonitorUpdate`] was provided.
-	///
-	/// Returns an [`APIError::APIMisuseError`] if `channel_id` does not match any currently
-	/// registered [`ChannelMonitor`]s.
-	pub fn channel_monitor_updated(
-		&self, channel_id: ChannelId, completed_update_id: u64,
-	) -> Result<(), APIError> {
-		let monitors = self.monitors.read().unwrap();
-		let monitor_data = if let Some(mon) = monitors.get(&channel_id) {
-			mon
-		} else {
-			return Err(APIError::APIMisuseError {
-				err: format!("No ChannelMonitor matching channel ID {} found", channel_id),
-			});
-		};
-		let mut pending_monitor_updates = monitor_data.pending_monitor_updates.lock().unwrap();
-		pending_monitor_updates.retain(|update_id| *update_id != completed_update_id);
-
-		// Note that we only check for pending non-chainsync monitor updates and we don't track monitor
-		// updates resulting from chainsync in `pending_monitor_updates`.
-		let monitor_is_pending_updates = monitor_data.has_pending_updates(&pending_monitor_updates);
-		log_debug!(
-			self.logger,
-			"Completed off-chain monitor update {} for channel with channel ID {}, {}",
-			completed_update_id,
-			channel_id,
-			if monitor_is_pending_updates {
-				"still have pending off-chain updates"
-			} else {
-				"all off-chain updates complete, returning a MonitorEvent"
-			}
-		);
-		if monitor_is_pending_updates {
-			// If there are still monitor updates pending, we cannot yet construct a
-			// Completed event.
-			return Ok(());
-		}
-		let funding_txo = monitor_data.monitor.get_funding_txo();
-		self.pending_monitor_events.lock().unwrap().push((
-			funding_txo,
-			channel_id,
-			vec![MonitorEvent::Completed {
-				funding_txo,
-				channel_id,
-				monitor_update_id: monitor_data.monitor.get_latest_update_id(),
-			}],
-			monitor_data.monitor.get_counterparty_node_id(),
-		));
-
-		self.event_notifier.notify();
-		Ok(())
 	}
 
 	/// This wrapper avoids having to update some of our tests for now as they assume the direct
@@ -1101,7 +770,7 @@ where
 		if let Some(ref chain_source) = self.chain_source {
 			monitor.load_outputs_to_watch(chain_source, &self.logger);
 		}
-		entry.insert(MonitorHolder { monitor, pending_monitor_updates: Mutex::new(Vec::new()) });
+		entry.insert(MonitorHolder { monitor });
 
 		Ok(ChannelMonitorUpdateStatus::Completed)
 	}
@@ -1119,14 +788,8 @@ where
 			hash_map::Entry::Vacant(e) => e,
 		};
 		log_trace!(logger, "Got new ChannelMonitor");
-		let update_id = monitor.get_latest_update_id();
-		let mut pending_monitor_updates = Vec::new();
 		let persist_res = self.persister.persist_new_channel(monitor.persistence_key(), &monitor);
 		match persist_res {
-			ChannelMonitorUpdateStatus::InProgress => {
-				log_info!(logger, "Persistence of new ChannelMonitor in progress",);
-				pending_monitor_updates.push(update_id);
-			},
 			ChannelMonitorUpdateStatus::Completed => {
 				log_info!(logger, "Persistence of new ChannelMonitor completed",);
 			},
@@ -1139,10 +802,7 @@ where
 		if let Some(ref chain_source) = self.chain_source {
 			monitor.load_outputs_to_watch(chain_source, &self.logger);
 		}
-		entry.insert(MonitorHolder {
-			monitor,
-			pending_monitor_updates: Mutex::new(pending_monitor_updates),
-		});
+		entry.insert(MonitorHolder { monitor });
 		Ok(persist_res)
 	}
 
@@ -1165,18 +825,13 @@ where
 				#[cfg(debug_assertions)]
 				panic!("ChannelManager generated a channel update for a channel that was not yet registered!");
 				#[cfg(not(debug_assertions))]
-				ChannelMonitorUpdateStatus::InProgress
+				ChannelMonitorUpdateStatus::Completed
 			},
 			Some(monitor_state) => {
 				let monitor = &monitor_state.monitor;
 				let logger = WithChannelMonitor::from(&self.logger, &monitor, None);
 				log_trace!(logger, "Updating ChannelMonitor to id {}", update.update_id,);
 
-				// We hold a `pending_monitor_updates` lock through `update_monitor` to ensure we
-				// have well-ordered updates from the users' point of view. See the
-				// `pending_monitor_updates` docs for more.
-				let mut pending_monitor_updates =
-					monitor_state.pending_monitor_updates.lock().unwrap();
 				let update_res = monitor.update_monitor(
 					update,
 					&self.broadcaster,
@@ -1205,14 +860,6 @@ where
 					)
 				};
 				match persist_res {
-					ChannelMonitorUpdateStatus::InProgress => {
-						pending_monitor_updates.push(update_id);
-						log_debug!(
-							logger,
-							"Persistence of ChannelMonitorUpdate id {:?} in progress",
-							update_id,
-						);
-					},
 					ChannelMonitorUpdateStatus::Completed => {
 						log_debug!(
 							logger,
@@ -1223,7 +870,6 @@ where
 					ChannelMonitorUpdateStatus::UnrecoverableError => {
 						// Take the monitors lock for writing so that we poison it and any future
 						// operations going forward fail immediately.
-						core::mem::drop(pending_monitor_updates);
 						core::mem::drop(monitors);
 						let _poison = self.monitors.write().unwrap();
 						let err_str = "ChannelMonitor[Update] persistence failed unrecoverably. This indicates we cannot continue normal operation and must shut down.";
@@ -1256,132 +902,9 @@ where
 					"update_monitor returned Err but channel is not post-close",
 				);
 
-				// We also check update_res.is_err() as a defensive measure: an
-				// error should only occur on a post-close monitor (validated by
-				// the debug_assert above), but we defer here regardless to avoid
-				// returning Completed for a failed update.
-				if (update_res.is_err() || monitor.no_further_updates_allowed())
-					&& persist_res == ChannelMonitorUpdateStatus::Completed
-				{
-					// The channel is post-close (funding spend seen, lockdown, or
-					// holder tx signed). Return InProgress so ChannelManager freezes
-					// the channel until the force-close MonitorEvents are processed.
-					// Push a Completed event into pending_monitor_events so it gets
-					// picked up after the per-monitor events in the next
-					// release_pending_monitor_events call.
-					let funding_txo = monitor.get_funding_txo();
-					let channel_id = monitor.channel_id();
-					self.pending_monitor_events.lock().unwrap().push((
-						funding_txo,
-						channel_id,
-						vec![MonitorEvent::Completed {
-							funding_txo,
-							channel_id,
-							monitor_update_id: monitor.get_latest_update_id(),
-						}],
-						monitor.get_counterparty_node_id(),
-					));
-					log_debug!(
-						logger,
-						"Deferring completion of ChannelMonitorUpdate id {:?} (channel is post-close)",
-						update_id,
-					);
-					ChannelMonitorUpdateStatus::InProgress
-				} else {
-					persist_res
-				}
+				persist_res
 			},
 		}
-	}
-
-	/// Returns the number of pending monitor operations queued for later execution.
-	///
-	/// When the `ChainMonitor` is constructed with `deferred` set to `true`,
-	/// [`chain::Watch::watch_channel`] and [`chain::Watch::update_channel`] calls are queued
-	/// instead of being executed immediately. Call this method to determine how many operations
-	/// are waiting, then pass the result to [`Self::flush`] to process them.
-	pub fn pending_operation_count(&self) -> usize {
-		self.pending_ops.lock().unwrap().len()
-	}
-
-	/// Flushes the first `count` pending monitor operations that were queued while the
-	/// `ChainMonitor` operates in deferred mode. `count` must not exceed the number of
-	/// pending operations returned by [`Self::pending_operation_count`].
-	///
-	/// A typical usage pattern is to call [`Self::pending_operation_count`], persist the
-	/// [`ChannelManager`], then pass the count to this method to flush the queued operations.
-	///
-	/// [`ChannelManager`]: crate::ln::channelmanager::ChannelManager
-	pub fn flush(&self, count: usize, logger: &L) {
-		let _guard = self.flush_lock.lock().unwrap();
-		if count == 0 {
-			return;
-		}
-		log_info!(logger, "Flushing up to {} monitor operations", count);
-		for _ in 0..count {
-			let mut queue = self.pending_ops.lock().unwrap();
-			let op = match queue.pop_front() {
-				Some(op) => op,
-				None => {
-					debug_assert!(false, "flush count exceeded queue length");
-					log_error!(logger, "flush count exceeded queue length");
-					return;
-				},
-			};
-
-			let (channel_id, update_id, status) = match op {
-				PendingMonitorOp::NewMonitor { channel_id, monitor } => {
-					let logger = WithChannelMonitor::from(logger, &monitor, None);
-					let update_id = monitor.get_latest_update_id();
-					log_trace!(logger, "Flushing new monitor");
-					// Hold `pending_ops` across the internal call so that
-					// `watch_channel` (which checks `monitors` + `pending_ops`
-					// atomically) cannot race with this insertion.
-					match self.watch_channel_internal(channel_id, monitor) {
-						Ok(status) => {
-							drop(queue);
-							(channel_id, update_id, status)
-						},
-						Err(()) => {
-							// `watch_channel` checks both `pending_ops` and `monitors`
-							// for duplicates before queueing, so this is unreachable.
-							unreachable!();
-						},
-					}
-				},
-				PendingMonitorOp::Update { channel_id, update } => {
-					let logger = WithContext::from(logger, None, Some(channel_id), None);
-					log_trace!(logger, "Flushing monitor update {}", update.update_id);
-					// Release `pending_ops` before the internal call so that
-					// concurrent `update_channel` queuing is not blocked.
-					drop(queue);
-					let update_id = update.update_id;
-					let status = self.update_channel_internal(channel_id, &update);
-					(channel_id, update_id, status)
-				},
-			};
-
-			match status {
-				ChannelMonitorUpdateStatus::Completed => {
-					let logger = WithContext::from(logger, None, Some(channel_id), None);
-					if let Err(e) = self.channel_monitor_updated(channel_id, update_id) {
-						debug_assert!(false, "channel_monitor_updated failed: {:?}", e);
-						log_error!(logger, "channel_monitor_updated failed: {:?}", e);
-					}
-				},
-				ChannelMonitorUpdateStatus::InProgress => {},
-				ChannelMonitorUpdateStatus::UnrecoverableError => {
-					// Neither watch_channel_internal nor update_channel_internal
-					// return UnrecoverableError; they panic on that variant
-					// before it can be returned.
-					unreachable!();
-				},
-			}
-		}
-
-		// A flushed monitor update may have generated new events, so assume we have
-		// some and wake the event processor.
-		self.event_notifier.notify();
 	}
 }
 
@@ -1597,58 +1120,18 @@ where
 	fn watch_channel(
 		&self, channel_id: ChannelId, monitor: ChannelMonitor<ChannelSigner>,
 	) -> Result<ChannelMonitorUpdateStatus, ()> {
-		if !self.deferred {
-			return self.watch_channel_internal(channel_id, monitor);
-		}
-
-		// Atomically check for duplicates in both the pending queue and the
-		// flushed monitor set.
-		let mut pending_ops = self.pending_ops.lock().unwrap();
-		let monitors = self.monitors.read().unwrap();
-		if monitors.contains_key(&channel_id) {
-			return Err(());
-		}
-		let already_pending = pending_ops.iter().any(|op| match op {
-			PendingMonitorOp::NewMonitor { channel_id: id, .. } => *id == channel_id,
-			_ => false,
-		});
-		if already_pending {
-			return Err(());
-		}
-		pending_ops.push_back(PendingMonitorOp::NewMonitor { channel_id, monitor });
-		Ok(ChannelMonitorUpdateStatus::InProgress)
+		self.watch_channel_internal(channel_id, monitor)
 	}
 
 	fn update_channel(
 		&self, channel_id: ChannelId, update: &ChannelMonitorUpdate,
 	) -> ChannelMonitorUpdateStatus {
-		if !self.deferred {
-			return self.update_channel_internal(channel_id, update);
-		}
-
-		let mut pending_ops = self.pending_ops.lock().unwrap();
-		debug_assert!(
-			{
-				let monitors = self.monitors.read().unwrap();
-				let in_monitors = monitors.contains_key(&channel_id);
-				let in_pending = pending_ops.iter().any(|op| match op {
-					PendingMonitorOp::NewMonitor { channel_id: id, .. } => *id == channel_id,
-					_ => false,
-				});
-				in_monitors || in_pending
-			},
-			"ChannelManager generated a channel update for a channel that was not yet registered!"
-		);
-		pending_ops.push_back(PendingMonitorOp::Update { channel_id, update: update.clone() });
-		ChannelMonitorUpdateStatus::InProgress
+		self.update_channel_internal(channel_id, update)
 	}
 
 	fn release_pending_monitor_events(
 		&self,
 	) -> Vec<(OutPoint, ChannelId, Vec<MonitorEvent>, PublicKey)> {
-		for (channel_id, update_id) in self.persister.get_and_clear_completed_updates() {
-			let _ = self.channel_monitor_updated(channel_id, update_id);
-		}
 		let monitors = self.monitors.read().unwrap();
 		let mut pending_monitor_events = Vec::new();
 		for monitor_state in monitors.values() {

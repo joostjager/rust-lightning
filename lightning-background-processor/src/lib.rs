@@ -766,16 +766,10 @@ use futures_util::{dummy_waker, Joiner, OptionalSelector, Selector, SelectorOutp
 /// The `fetch_time` parameter should return the current wall clock time, if one is available. If
 /// no time is available, some features may be disabled, however the node will still operate fine.
 ///
-/// Note that when deferred monitor writes are enabled on [`ChainMonitor`], this function flushes
-/// pending writes after persisting the [`ChannelManager`]. If the [`Persist`] implementation
-/// performs blocking I/O and returns [`Completed`] synchronously rather than returning
-/// [`InProgress`], this will block the async executor.
+/// Note that if the [`Persist`] implementation performs blocking I/O, this will block the async
+/// executor.
 ///
-/// [`ChainMonitor`]: lightning::chain::chainmonitor::ChainMonitor
 /// [`Persist`]: lightning::chain::chainmonitor::Persist
-/// [`ChannelManager`]: lightning::ln::channelmanager::ChannelManager
-/// [`Completed`]: lightning::chain::ChannelMonitorUpdateStatus::Completed
-/// [`InProgress`]: lightning::chain::ChannelMonitorUpdateStatus::InProgress
 ///
 /// For example, in order to process background events in a [Tokio](https://tokio.rs/) task, you
 /// could setup `process_events_async` like this:
@@ -1120,18 +1114,9 @@ where
 			None => {},
 		}
 
-		// We capture pending_operation_count inside the persistence branch to
-		// avoid a race: ChannelManager handlers queue deferred monitor ops
-		// before the persistence flag is set. Capturing outside would let us
-		// observe pending ops while the flag is still unset, causing us to
-		// flush monitor writes without persisting the ChannelManager.
-		// Declared before futures so it outlives the Joiner (drop order).
-		let pending_monitor_writes;
-
 		let mut futures = Joiner::new();
 
 		if channel_manager.get_cm().get_and_clear_needs_persistence() {
-			pending_monitor_writes = chain_monitor.get_cm().pending_operation_count();
 			log_trace!(logger, "Persisting ChannelManager...");
 
 			let fut = async {
@@ -1144,9 +1129,6 @@ where
 					)
 					.await?;
 
-				// Flush monitor operations that were pending before we persisted. New updates
-				// that arrived after are left for the next iteration.
-				chain_monitor.get_cm().flush(pending_monitor_writes, &logger);
 				Ok(())
 			};
 			// TODO: Once our MSRV is 1.68 we should be able to drop the Box
@@ -1389,7 +1371,6 @@ where
 	// After we exit, ensure we persist the ChannelManager one final time - this avoids
 	// some races where users quit while channel updates were in-flight, with
 	// ChannelMonitor update(s) persisted without a corresponding ChannelManager update.
-	let pending_monitor_writes = chain_monitor.get_cm().pending_operation_count();
 	kv_store
 		.write(
 			CHANNEL_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE,
@@ -1398,9 +1379,6 @@ where
 			channel_manager.get_cm().encode(),
 		)
 		.await?;
-
-	// Flush monitor operations that were pending before final persistence.
-	chain_monitor.get_cm().flush(pending_monitor_writes, &logger);
 
 	if let Some(ref scorer) = scorer {
 		kv_store
@@ -1707,13 +1685,6 @@ impl BackgroundProcessor {
 				}
 
 				if channel_manager.get_cm().get_and_clear_needs_persistence() {
-					// We capture pending_operation_count inside the persistence
-					// branch to avoid a race: ChannelManager handlers queue
-					// deferred monitor ops before the persistence flag is set.
-					// Capturing outside would let us observe pending ops while
-					// the flag is still unset, causing us to flush monitor
-					// writes without persisting the ChannelManager.
-					let pending_monitor_writes = chain_monitor.get_cm().pending_operation_count();
 					log_trace!(logger, "Persisting ChannelManager...");
 					(kv_store.write(
 						CHANNEL_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE,
@@ -1722,10 +1693,6 @@ impl BackgroundProcessor {
 						channel_manager.get_cm().encode(),
 					))?;
 					log_trace!(logger, "Done persisting ChannelManager.");
-
-					// Flush monitor operations that were pending before we persisted.
-					// New updates that arrived after are left for the next iteration.
-					chain_monitor.get_cm().flush(pending_monitor_writes, &logger);
 				}
 
 				if let Some(liquidity_manager) = liquidity_manager.as_ref() {
@@ -1842,16 +1809,12 @@ impl BackgroundProcessor {
 			// After we exit, ensure we persist the ChannelManager one final time - this avoids
 			// some races where users quit while channel updates were in-flight, with
 			// ChannelMonitor update(s) persisted without a corresponding ChannelManager update.
-			let pending_monitor_writes = chain_monitor.get_cm().pending_operation_count();
 			kv_store.write(
 				CHANNEL_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE,
 				CHANNEL_MANAGER_PERSISTENCE_SECONDARY_NAMESPACE,
 				CHANNEL_MANAGER_PERSISTENCE_KEY,
 				channel_manager.get_cm().encode(),
 			)?;
-
-			// Flush monitor operations that were pending before final persistence.
-			chain_monitor.get_cm().flush(pending_monitor_writes, &logger);
 
 			if let Some(ref scorer) = scorer {
 				kv_store.write(

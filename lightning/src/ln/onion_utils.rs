@@ -1015,6 +1015,7 @@ mod fuzzy_onion_utils {
 	}
 
 	/// Decodes the attribution data that we got back from upstream on a payment we sent.
+	#[cfg(any(test, fuzzing))]
 	pub fn decode_fulfill_attribution_data<T: secp256k1::Signing, L: Logger>(
 		secp_ctx: &Secp256k1<T>, logger: &L, path: &Path, outer_session_priv: &SecretKey,
 		mut attribution_data: AttributionData,

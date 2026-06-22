@@ -626,11 +626,6 @@ pub(crate) enum PaymentSendFailure {
 	///
 	/// The results here are ordered the same as the paths in the route object that was passed to
 	/// send_payment.
-	///
-	/// Any entries that contain `Err(APIError::MonitorUpdateInprogress)` will send once a
-	/// [`MonitorEvent::Completed`] is provided for the next-hop channel with the latest update_id.
-	///
-	/// [`MonitorEvent::Completed`]: crate::chain::channelmonitor::MonitorEvent::Completed
 	PartialFailure {
 		/// The errors themselves, in the same order as the paths from the route.
 		results: Vec<Result<(), APIError>>,
@@ -1813,10 +1808,7 @@ impl OutboundPayments {
 				let failed_paths = results.iter().zip(route.paths.iter().zip(onion_session_privs.iter()))
 					.filter_map(|(path_res, (path, session_priv))| {
 						match path_res {
-							// While a MonitorUpdateInProgress is an Err(_), the payment is still
-							// considered "in flight" and we shouldn't remove it from the
-							// PendingOutboundPayment set.
-							Ok(_) | Err(APIError::MonitorUpdateInProgress) => None,
+							Ok(_) => None,
 							_ => Some((path, session_priv))
 						}
 					});
@@ -1860,9 +1852,6 @@ impl OutboundPayments {
 		debug_assert_eq!(paths.len(), path_results.len());
 		for (path, path_res) in paths.into_iter().zip(path_results) {
 			if let Err(e) = path_res {
-				if let APIError::MonitorUpdateInProgress = e {
-					continue;
-				}
 				log_error!(logger, "Failed to send along path due to error: {:?}", e);
 				let mut failed_scid = None;
 				if let APIError::ChannelUnavailable { .. } = e {
@@ -2188,14 +2177,7 @@ impl OutboundPayments {
 				total_ok_amt_sent_msat += path.final_value_msat();
 			}
 			if res.is_err() { has_err = true; }
-			if let &Err(APIError::MonitorUpdateInProgress) = res {
-				// MonitorUpdateInProgress is inherently unsafe to retry, so we call it a
-				// PartialFailure.
-				has_err = true;
-				has_ok = true;
-				total_ok_fees_msat += path.fee_msat();
-				total_ok_amt_sent_msat += path.final_value_msat();
-			} else if res.is_err() {
+			if res.is_err() {
 				has_unsent = true;
 			}
 		}
@@ -2309,13 +2291,13 @@ impl OutboundPayments {
 		}
 	}
 
-	#[rustfmt::skip]
-	pub(super) fn finalize_claims<I: Iterator<Item = (HTLCSource, Vec<u32>)>>(&self, sources: I,
-		pending_events: &Mutex<VecDeque<(events::Event, Option<EventCompletionAction>)>>)
-	{
+	pub(super) fn finalize_claims<I: Iterator<Item = HTLCSource>>(
+		&self, sources: I,
+		pending_events: &Mutex<VecDeque<(events::Event, Option<EventCompletionAction>)>>,
+	) {
 		let mut outbounds = self.pending_outbound_payments.lock().unwrap();
 		let mut pending_events = pending_events.lock().unwrap();
-		for (source, hold_times) in sources {
+		for source in sources {
 			if let HTLCSource::OutboundRoute { session_priv, payment_id, path, .. } = source {
 				let mut session_priv_bytes = [0; 32];
 				session_priv_bytes.copy_from_slice(&session_priv[..]);
@@ -2324,12 +2306,15 @@ impl OutboundPayments {
 					if payment.get_mut().remove(&session_priv_bytes, None) {
 						let payment_hash = payment.get().payment_hash();
 						debug_assert!(payment_hash.is_some());
-						pending_events.push_back((events::Event::PaymentPathSuccessful {
-							payment_id,
-							payment_hash,
-							path,
-							hold_times
-						}, None));
+						pending_events.push_back((
+							events::Event::PaymentPathSuccessful {
+								payment_id,
+								payment_hash,
+								path,
+								hold_times: Vec::new(),
+							},
+							None,
+						));
 					}
 				}
 			}

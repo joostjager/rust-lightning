@@ -96,15 +96,12 @@ pub struct ChannelMonitorUpdate {
 	/// sequence number (and updates may panic if they are not). The update_id values are strictly
 	/// increasing and increase by one for each new update, with two exceptions specified below.
 	///
-	/// This sequence number is also used to track up to which points updates which returned
-	/// [`ChannelMonitorUpdateStatus::InProgress`] have been applied to all copies of a given
-	/// ChannelMonitor when ChannelManager::channel_monitor_updated is called.
+	/// This sequence number also identifies the latest update applied to all copies of a given
+	/// [`ChannelMonitor`].
 	///
 	/// Note that for [`ChannelMonitorUpdate`]s generated on LDK versions prior to 0.1 after the
 	/// channel was closed, this value may be [`u64::MAX`]. In that case, multiple updates may
 	/// appear with the same ID, and all should be replayed.
-	///
-	/// [`ChannelMonitorUpdateStatus::InProgress`]: super::ChannelMonitorUpdateStatus::InProgress
 	pub update_id: u64,
 	/// The channel ID associated with these updates.
 	///
@@ -208,32 +205,8 @@ pub enum MonitorEvent {
 	/// Indicates that we've detected a commitment transaction (either holder's or counterparty's)
 	/// be included in a block and should consider the channel closed.
 	CommitmentTxConfirmed(()),
-
-	/// Indicates a [`ChannelMonitor`] update has completed. See
-	/// [`ChannelMonitorUpdateStatus::InProgress`] for more information on how this is used.
-	///
-	/// [`ChannelMonitorUpdateStatus::InProgress`]: super::ChannelMonitorUpdateStatus::InProgress
-	Completed {
-		/// The funding outpoint of the [`ChannelMonitor`] that was updated
-		funding_txo: OutPoint,
-		/// The channel ID of the channel associated with the [`ChannelMonitor`]
-		channel_id: ChannelId,
-		/// The Update ID from [`ChannelMonitorUpdate::update_id`] which was applied or
-		/// [`ChannelMonitor::get_latest_update_id`].
-		///
-		/// Note that this should only be set to a given update's ID if all previous updates for the
-		/// same [`ChannelMonitor`] have been applied and persisted.
-		monitor_update_id: u64,
-	},
 }
 impl_writeable_tlv_based_enum_upgradable_legacy!(MonitorEvent,
-	// Note that Completed is currently never serialized to disk as it is generated only in
-	// ChainMonitor.
-	(0, Completed) => {
-		(0, funding_txo, required),
-		(2, monitor_update_id, required),
-		(4, channel_id, required),
-	},
 	(5, HolderForceClosedWithInfo) => {
 		(0, reason, upgradable_required),
 		(2, outpoint, required),
@@ -2290,16 +2263,9 @@ impl<Signer: EcdsaChannelSigner> ChannelMonitor<Signer> {
 		self.inner.lock().unwrap().sign_to_local_justice_tx(justice_tx, input_idx, value, commitment_number)
 	}
 
+	#[cfg(peer_storage)]
 	pub(crate) fn get_min_seen_secret(&self) -> u64 {
 		self.inner.lock().unwrap().get_min_seen_secret()
-	}
-
-	pub(crate) fn get_cur_counterparty_commitment_number(&self) -> u64 {
-		self.inner.lock().unwrap().get_cur_counterparty_commitment_number()
-	}
-
-	pub(crate) fn get_cur_holder_commitment_number(&self) -> u64 {
-		self.inner.lock().unwrap().get_cur_holder_commitment_number()
 	}
 
 	/// Fetches whether this monitor has marked the channel as closed and will refuse any further
@@ -4791,14 +4757,6 @@ impl<Signer: EcdsaChannelSigner> ChannelMonitorImpl<Signer> {
 
 	fn get_min_seen_secret(&self) -> u64 {
 		self.commitment_secrets.get_min_seen_secret()
-	}
-
-	fn get_cur_counterparty_commitment_number(&self) -> u64 {
-		self.current_counterparty_commitment_number
-	}
-
-	fn get_cur_holder_commitment_number(&self) -> u64 {
-		self.current_holder_commitment_number
 	}
 
 	/// Attempts to claim a counterparty commitment transaction's outputs using the revocation key and

@@ -19,7 +19,6 @@ use bitcoin::Txid;
 use core::convert::Infallible;
 use core::fmt;
 use core::future::Future;
-use core::mem;
 use core::ops::Deref;
 use core::pin::{pin, Pin};
 use core::str::FromStr;
@@ -36,14 +35,12 @@ use crate::chain::transaction::OutPoint;
 use crate::chain::BlockLocator;
 use crate::ln::types::ChannelId;
 use crate::sign::{ecdsa::EcdsaChannelSigner, EntropySource, SignerProvider};
-use crate::sync::Mutex;
 use crate::util::async_poll::{
 	dummy_waker, MultiResultFuturePoller, ResultFuture, TwoFutureJoiner,
 };
 use crate::util::logger::Logger;
 use crate::util::native_async::{FutureSpawner, MaybeSend, MaybeSync};
 use crate::util::ser::{Readable, ReadableArgs, Writeable};
-use crate::util::wakers::Notifier;
 
 /// The alphabet of characters allowed for namespaces and keys.
 pub const KVSTORE_NAMESPACE_KEY_ALPHABET: &str =
@@ -726,9 +723,7 @@ pub async fn migrate_kv_store_data_async<S: MigratableKVStore, T: MigratableKVSt
 
 impl<ChannelSigner: EcdsaChannelSigner, K: KVStoreSync + ?Sized> Persist<ChannelSigner> for K {
 	// TODO: We really need a way for the persister to inform the user that its time to crash/shut
-	// down once these start returning failure.
-	// Then we should return InProgress rather than UnrecoverableError, implying we should probably
-	// just shut down the node since we're not retrying persistence!
+	// down once these start returning failure, rather than relying on UnrecoverableError.
 
 	fn persist_new_channel(
 		&self, monitor_name: MonitorName, monitor: &ChannelMonitor<ChannelSigner>,
@@ -1103,13 +1098,10 @@ where
 ///
 /// Note that async monitor updating is considered beta, and bugs may be triggered by its use.
 ///
-/// Unlike [`MonitorUpdatingPersister`], this does not implement [`Persist`], but is instead used
-/// directly by the [`ChainMonitor`] via [`ChainMonitor::new_async_beta`].
+/// Unlike [`MonitorUpdatingPersister`], this does not implement [`Persist`]; it backs the sync
+/// [`MonitorUpdatingPersister`] and offers async versions of the public accessors.
 ///
 /// This is not exported to bindings users as async is only supported in Rust.
-///
-/// [`ChainMonitor`]: crate::chain::chainmonitor::ChainMonitor
-/// [`ChainMonitor::new_async_beta`]: crate::chain::chainmonitor::ChainMonitor::new_async_beta
 pub struct MonitorUpdatingPersisterAsync<
 	K: KVStore,
 	S: FutureSpawner,
@@ -1130,7 +1122,6 @@ struct MonitorUpdatingPersisterAsyncInner<
 	FE: FeeEstimator,
 > {
 	kv_store: K,
-	async_completed_updates: Mutex<Vec<(ChannelId, u64)>>,
 	future_spawner: S,
 	logger: L,
 	maximum_pending_updates: u64,
@@ -1159,7 +1150,6 @@ impl<
 	) -> Self {
 		MonitorUpdatingPersisterAsync(Arc::new(MonitorUpdatingPersisterAsyncInner {
 			kv_store,
-			async_completed_updates: Mutex::new(Vec::new()),
 			future_spawner,
 			logger,
 			maximum_pending_updates,
@@ -1274,87 +1264,6 @@ impl<
 	/// be passed to [`KVStoreSync::remove`].
 	pub async fn cleanup_stale_updates(&self, lazy: bool) -> Result<(), io::Error> {
 		self.0.cleanup_stale_updates(lazy).await
-	}
-}
-
-impl<
-		K: KVStore + MaybeSend + MaybeSync + 'static,
-		S: FutureSpawner,
-		L: Logger + MaybeSend + MaybeSync + 'static,
-		ES: EntropySource + MaybeSend + MaybeSync + 'static,
-		SP: SignerProvider + MaybeSend + MaybeSync + 'static,
-		BI: BroadcasterInterface + MaybeSend + MaybeSync + 'static,
-		FE: FeeEstimator + MaybeSend + MaybeSync + 'static,
-	> MonitorUpdatingPersisterAsync<K, S, L, ES, SP, BI, FE>
-where
-	SP::EcdsaSigner: MaybeSend + 'static,
-{
-	pub(crate) fn spawn_async_persist_new_channel(
-		&self, monitor_name: MonitorName, monitor: &ChannelMonitor<SP::EcdsaSigner>,
-		notifier: Arc<Notifier>,
-	) {
-		let inner = Arc::clone(&self.0);
-		// Note that `persist_new_channel` is a sync method which calls all the way through to the
-		// sync KVStore::write method (which returns a future) to ensure writes are well-ordered.
-		let future = inner.persist_new_channel(monitor_name, monitor);
-		let channel_id = monitor.channel_id();
-		let completion = (monitor.channel_id(), monitor.get_latest_update_id());
-		let _runs_free = self.0.future_spawner.spawn(async move {
-			match future.await {
-				Ok(()) => {
-					inner.async_completed_updates.lock().unwrap().push(completion);
-					notifier.notify();
-				},
-				Err(e) => {
-					log_error!(
-						inner.logger,
-						"Failed to persist new ChannelMonitor {channel_id}: {e}. The node will now likely stall as this channel will not be able to make progress. You should restart as soon as possible.",
-					);
-				},
-			}
-		});
-	}
-
-	pub(crate) fn spawn_async_update_channel(
-		&self, monitor_name: MonitorName, update: Option<&ChannelMonitorUpdate>,
-		monitor: &ChannelMonitor<SP::EcdsaSigner>, notifier: Arc<Notifier>,
-	) {
-		let inner = Arc::clone(&self.0);
-		// Note that `update_persisted_channel` is a sync method which calls all the way through to
-		// the sync KVStore::write method (which returns a future) to ensure writes are well-ordered
-		let future = inner.update_persisted_channel(monitor_name, update, monitor);
-		let channel_id = monitor.channel_id();
-		let completion = if let Some(update) = update {
-			Some((monitor.channel_id(), update.update_id))
-		} else {
-			None
-		};
-		let inner = Arc::clone(&self.0);
-		let _runs_free = self.0.future_spawner.spawn(async move {
-			match future.await {
-				Ok(()) => if let Some(completion) = completion {
-					inner.async_completed_updates.lock().unwrap().push(completion);
-					notifier.notify();
-				},
-				Err(e) => {
-					log_error!(
-						inner.logger,
-						"Failed to persist new ChannelMonitor {channel_id}: {e}. The node will now likely stall as this channel will not be able to make progress. You should restart as soon as possible.",
-					);
-				},
-			}
-		});
-	}
-
-	pub(crate) fn spawn_async_archive_persisted_channel(&self, monitor_name: MonitorName) {
-		let inner = Arc::clone(&self.0);
-		let _runs_free = self.0.future_spawner.spawn(async move {
-			inner.archive_persisted_channel(monitor_name).await;
-		});
-	}
-
-	pub(crate) fn get_and_clear_completed_updates(&self) -> Vec<(ChannelId, u64)> {
-		mem::take(&mut *self.0.async_completed_updates.lock().unwrap())
 	}
 }
 

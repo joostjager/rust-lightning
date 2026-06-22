@@ -52,8 +52,8 @@ use crate::ln::channel_state::{
 };
 use crate::ln::channelmanager::{
 	self, BlindedFailure, ChannelReadyOrder, FundingConfirmedMessage, HTLCFailureMsg,
-	HTLCPreviousHopData, HTLCSource, OpenChannelMessage, PaymentClaimDetails, PendingHTLCInfo,
-	PendingHTLCStatus, RAACommitmentOrder, SentHTLCId, TrustedChannelFeatures, BREAKDOWN_TIMEOUT,
+	HTLCPreviousHopData, HTLCSource, OpenChannelMessage, PaymentClaimDetails, PendingHTLCStatus,
+	RAACommitmentOrder, SentHTLCId, TrustedChannelFeatures, BREAKDOWN_TIMEOUT,
 	MAX_LOCAL_BREAKDOWN_TIMEOUT, MIN_CLTV_EXPIRY_DELTA,
 };
 use crate::ln::funding::{FeeRateAdjustmentError, FundingContribution, FundingTemplate};
@@ -643,8 +643,6 @@ macro_rules! define_state_flags {
 
 		define_state_flags!($flag_type, FundedStateFlags::PEER_DISCONNECTED,
 			is_peer_disconnected, set_peer_disconnected, clear_peer_disconnected);
-		define_state_flags!($flag_type, FundedStateFlags::MONITOR_UPDATE_IN_PROGRESS,
-			is_monitor_update_in_progress, set_monitor_update_in_progress, clear_monitor_update_in_progress);
 		define_state_flags!($flag_type, FundedStateFlags::REMOTE_SHUTDOWN_SENT,
 			is_remote_shutdown_sent, set_remote_shutdown_sent, clear_remote_shutdown_sent);
 		define_state_flags!($flag_type, FundedStateFlags::LOCAL_SHUTDOWN_SENT,
@@ -684,7 +682,7 @@ mod state_flags {
 	pub const OUR_CHANNEL_READY: u32 = 1 << 5;
 	pub const CHANNEL_READY: u32 = 1 << 6;
 	pub const PEER_DISCONNECTED: u32 = 1 << 7;
-	pub const MONITOR_UPDATE_IN_PROGRESS: u32 = 1 << 8;
+	// Bit 1 << 8 was MONITOR_UPDATE_IN_PROGRESS, removed with atomic persistence.
 	pub const AWAITING_REMOTE_REVOKE: u32 = 1 << 9;
 	pub const REMOTE_SHUTDOWN_SENT: u32 = 1 << 10;
 	pub const LOCAL_SHUTDOWN_SENT: u32 = 1 << 11;
@@ -701,10 +699,6 @@ define_state_flags!(
 		("Indicates the remote side is considered \"disconnected\" and no updates are allowed \
 			until after we've done a `channel_reestablish` dance.", PEER_DISCONNECTED, state_flags::PEER_DISCONNECTED,
 			is_peer_disconnected, set_peer_disconnected, clear_peer_disconnected),
-		("Indicates the user has told us a `ChannelMonitor` update is pending async persistence \
-			somewhere and we should pause sending any outbound messages until they've managed to \
-			complete it.", MONITOR_UPDATE_IN_PROGRESS, state_flags::MONITOR_UPDATE_IN_PROGRESS,
-			is_monitor_update_in_progress, set_monitor_update_in_progress, clear_monitor_update_in_progress),
 		("Indicates we received a `shutdown` message from the remote end. If set, they may not add \
 			any new HTLCs to the channel, and we are expected to respond with our own `shutdown` \
 			message when possible.", REMOTE_SHUTDOWN_SENT, state_flags::REMOTE_SHUTDOWN_SENT,
@@ -898,7 +892,6 @@ impl ChannelState {
 				!flags.is_set(ChannelReadyFlags::AWAITING_REMOTE_REVOKE) &&
 					!flags.is_set(ChannelReadyFlags::LOCAL_STFU_SENT) &&
 					!flags.is_set(ChannelReadyFlags::QUIESCENT) &&
-					!flags.is_set(FundedStateFlags::MONITOR_UPDATE_IN_PROGRESS.into()) &&
 					!flags.is_set(FundedStateFlags::PEER_DISCONNECTED.into()),
 			_ => {
 				debug_assert!(false, "Can only generate new commitment within ChannelReady");
@@ -911,12 +904,6 @@ impl ChannelState {
 		is_peer_disconnected,
 		set_peer_disconnected,
 		clear_peer_disconnected,
-		FUNDED_STATES
-	);
-	impl_state_flag!(
-		is_monitor_update_in_progress,
-		set_monitor_update_in_progress,
-		clear_monitor_update_in_progress,
 		FUNDED_STATES
 	);
 	impl_state_flag!(
@@ -1215,32 +1202,6 @@ impl InteractiveTxMsgError {
 	}
 }
 
-/// The return value of `monitor_updating_restored`
-pub(super) struct MonitorRestoreUpdates {
-	pub raa: Option<msgs::RevokeAndACK>,
-	/// A `CommitmentUpdate` to be sent to our channel peer.
-	pub commitment_update: Option<msgs::CommitmentUpdate>,
-	pub commitment_order: RAACommitmentOrder,
-	pub accepted_htlcs: Vec<(PendingHTLCInfo, u64)>,
-	pub failed_htlcs: Vec<(HTLCSource, PaymentHash, HTLCFailReason)>,
-	pub finalized_claimed_htlcs: Vec<(HTLCSource, Option<AttributionData>)>,
-	/// Inbound update_adds that are now irrevocably committed to this channel and are ready for the
-	/// onion to be processed in order to forward or receive the HTLC.
-	pub pending_update_adds: Vec<msgs::UpdateAddHTLC>,
-	pub funding_broadcastable: Option<Transaction>,
-	pub channel_ready: Option<msgs::ChannelReady>,
-	pub channel_ready_order: ChannelReadyOrder,
-	pub announcement_sigs: Option<msgs::AnnouncementSignatures>,
-	pub funding_tx_signed: Option<FundingTxSigned>,
-	/// The sources of outbound HTLCs that were forwarded and irrevocably committed on this channel
-	/// (the outbound edge), along with their outbound amounts. Useful to store in the inbound HTLC
-	/// to ensure it gets resolved.
-	pub committed_outbound_htlc_sources: Vec<(HTLCPreviousHopData, u64)>,
-	/// Whether the restoration changed serialized channel state that needs ChannelManager
-	/// persistence.
-	pub requires_channel_manager_persistence: bool,
-}
-
 /// The return value of `signer_maybe_unblocked`
 pub(super) struct SignerResumeUpdates {
 	pub commitment_update: Option<msgs::CommitmentUpdate>,
@@ -1511,15 +1472,6 @@ pub(crate) const CHANNEL_ANNOUNCEMENT_PROPAGATION_DELAY: u32 = 14 * 24 * 6 * 4;
 /// correctly even if this constant is reduced and an HTLC can outlive the original channel's SCID.
 #[cfg(test)]
 pub(crate) const CHANNEL_ANNOUNCEMENT_PROPAGATION_DELAY: u32 = 144;
-
-#[derive(Debug)]
-struct PendingChannelMonitorUpdate {
-	update: ChannelMonitorUpdate,
-}
-
-impl_ser_tlv_based!(PendingChannelMonitorUpdate, {
-	(0, update, required),
-});
 
 /// A payment channel with a counterparty throughout its life-cycle, encapsulating negotiation and
 /// funding phases.
@@ -3381,20 +3333,6 @@ pub(super) struct ChannelContext<SP: SignerProvider> {
 	/// send it first.
 	resend_order: RAACommitmentOrder,
 
-	monitor_pending_tx_signatures: bool,
-	monitor_pending_channel_ready: bool,
-	monitor_pending_revoke_and_ack: bool,
-	monitor_pending_commitment_signed: bool,
-
-	// TODO: If a channel is drop'd, we don't know whether the `ChannelMonitor` is ultimately
-	// responsible for some of the HTLCs here or not - we don't know whether the update in question
-	// completed or not. We currently ignore these fields entirely when force-closing a channel,
-	// but need to handle this somehow or we run the risk of losing HTLCs!
-	monitor_pending_forwards: Vec<(PendingHTLCInfo, u64)>,
-	monitor_pending_failures: Vec<(HTLCSource, PaymentHash, HTLCFailReason)>,
-	monitor_pending_finalized_fulfills: Vec<(HTLCSource, Option<AttributionData>)>,
-	monitor_pending_update_adds: Vec<msgs::UpdateAddHTLC>,
-
 	/// If we went to send a revoke_and_ack but our signer was unable to give us a signature,
 	/// we should retry at some point in the future when the signer indicates it may have a
 	/// signature for us.
@@ -3608,10 +3546,6 @@ pub(super) struct ChannelContext<SP: SignerProvider> {
 	#[cfg(any(test, feature = "_test_utils"))]
 	pub channel_keys_id: [u8; 32],
 
-	/// If we can't release a [`ChannelMonitorUpdate`] until some external action completes, we
-	/// store it here and only release it to the `ChannelManager` once it asks for it.
-	blocked_monitor_updates: Vec<PendingChannelMonitorUpdate>,
-
 	/// The signing session for the current interactive tx construction, if any.
 	///
 	/// This is populated when the interactive tx construction phase completes (i.e., upon receiving
@@ -3714,7 +3648,6 @@ trait InitialRemoteCommitmentReceiver<SP: SignerProvider> {
 		let context = self.context_mut();
 		context.channel_id = channel_id;
 
-		assert!(!context.channel_state.is_monitor_update_in_progress()); // We have not had any monitor(s) yet to fail update!
 		if !is_v2_established {
 			if context.is_batch_funding() {
 				context.channel_state = ChannelState::AwaitingChannelReady(AwaitingChannelReadyFlags::WAITING_FOR_BATCH);
@@ -4207,15 +4140,6 @@ impl<SP: SignerProvider> ChannelContext<SP> {
 
 			resend_order: RAACommitmentOrder::CommitmentFirst,
 
-			monitor_pending_tx_signatures: false,
-			monitor_pending_channel_ready: false,
-			monitor_pending_revoke_and_ack: false,
-			monitor_pending_commitment_signed: false,
-			monitor_pending_forwards: Vec::new(),
-			monitor_pending_failures: Vec::new(),
-			monitor_pending_finalized_fulfills: Vec::new(),
-			monitor_pending_update_adds: Vec::new(),
-
 			signer_pending_revoke_and_ack: false,
 			signer_pending_commitment_update: false,
 			signer_pending_funding: false,
@@ -4292,8 +4216,6 @@ impl<SP: SignerProvider> ChannelContext<SP> {
 			channel_keys_id,
 
 			local_initiated_shutdown: None,
-
-			blocked_monitor_updates: Vec::new(),
 
 			is_manual_broadcast: false,
 
@@ -4522,15 +4444,6 @@ impl<SP: SignerProvider> ChannelContext<SP> {
 
 			resend_order: RAACommitmentOrder::CommitmentFirst,
 
-			monitor_pending_tx_signatures: false,
-			monitor_pending_channel_ready: false,
-			monitor_pending_revoke_and_ack: false,
-			monitor_pending_commitment_signed: false,
-			monitor_pending_forwards: Vec::new(),
-			monitor_pending_failures: Vec::new(),
-			monitor_pending_finalized_fulfills: Vec::new(),
-			monitor_pending_update_adds: Vec::new(),
-
 			signer_pending_revoke_and_ack: false,
 			signer_pending_commitment_update: false,
 			signer_pending_funding: false,
@@ -4603,7 +4516,6 @@ impl<SP: SignerProvider> ChannelContext<SP> {
 
 			channel_keys_id,
 
-			blocked_monitor_updates: Vec::new(),
 			local_initiated_shutdown: None,
 			is_manual_broadcast: false,
 
@@ -4644,13 +4556,6 @@ impl<SP: SignerProvider> ChannelContext<SP> {
 		self.latest_monitor_update_id
 	}
 
-	pub fn get_latest_unblocked_monitor_update_id(&self) -> u64 {
-		if self.blocked_monitor_updates.is_empty() {
-			return self.get_latest_monitor_update_id();
-		}
-		self.blocked_monitor_updates[0].update.update_id - 1
-	}
-
 	pub fn should_announce(&self) -> bool {
 		self.config.announce_for_forwarding
 	}
@@ -4673,7 +4578,6 @@ impl<SP: SignerProvider> ChannelContext<SP> {
 		matches!(self.channel_state, ChannelState::ChannelReady(_))
 			&& !self.channel_state.is_local_shutdown_sent()
 			&& !self.channel_state.is_remote_shutdown_sent()
-			&& !self.monitor_pending_channel_ready
 	}
 
 	/// shutdown state returns the state of the channel in its various stages of shutdown
@@ -4749,9 +4653,7 @@ impl<SP: SignerProvider> ChannelContext<SP> {
 	/// been sent by either side but not yet irrevocably committed on both commitments because we're
 	/// waiting on a pending monitor update or signer request.
 	pub fn is_monitor_or_signer_pending_channel_update(&self) -> bool {
-		self.channel_state.is_monitor_update_in_progress()
-			|| self.signer_pending_revoke_and_ack
-			|| self.signer_pending_commitment_update
+		self.signer_pending_revoke_and_ack || self.signer_pending_commitment_update
 	}
 
 	/// Checks whether the channel has any HTLC additions, HTLC removals, or fee updates that have
@@ -6413,9 +6315,7 @@ impl<SP: SignerProvider> ChannelContext<SP> {
 		match self.channel_state {
 			ChannelState::FundingNegotiated(_) => f(),
 			ChannelState::AwaitingChannelReady(flags) =>
-				if flags.is_set(AwaitingChannelReadyFlags::WAITING_FOR_BATCH) ||
-					flags.is_set(FundedStateFlags::MONITOR_UPDATE_IN_PROGRESS.into())
-				{
+				if flags.is_set(AwaitingChannelReadyFlags::WAITING_FOR_BATCH) {
 					f()
 				} else {
 					None
@@ -6484,47 +6384,9 @@ impl<SP: SignerProvider> ChannelContext<SP> {
 		}
 
 		// Once we're closed, the `ChannelMonitor` is responsible for resolving any remaining
-		// HTLCs. However, in the specific case of us pushing new HTLC(s) to the counterparty in
-		// the latest commitment transaction that we haven't actually sent due to a block
-		// `ChannelMonitorUpdate`, we may have some HTLCs that the `ChannelMonitor` won't know
-		// about and thus really need to be included in `dropped_outbound_htlcs`.
-		'htlc_iter: for htlc in self.pending_outbound_htlcs.iter() {
-			if let OutboundHTLCState::LocalAnnounced(_) = htlc.state {
-				for update in self.blocked_monitor_updates.iter() {
-					for update in update.update.updates.iter() {
-						let have_htlc = match update {
-							ChannelMonitorUpdateStep::LatestCounterpartyCommitment {
-								htlc_data,
-								..
-							} => {
-								let dust =
-									htlc_data.dust_htlcs.iter().map(|(_, source)| source.as_ref());
-								let nondust =
-									htlc_data.nondust_htlc_sources.iter().map(|s| Some(s));
-								dust.chain(nondust).any(|source| source == Some(&htlc.source))
-							},
-							ChannelMonitorUpdateStep::LatestCounterpartyCommitmentTXInfo {
-								htlc_outputs,
-								..
-							} => htlc_outputs.iter().any(|(_, source)| {
-								source.as_ref().map(|s| &**s) == Some(&htlc.source)
-							}),
-							_ => continue,
-						};
-						debug_assert!(have_htlc);
-						if have_htlc {
-							dropped_outbound_htlcs.push((
-								htlc.source.clone(),
-								htlc.payment_hash,
-								counterparty_node_id,
-								self.channel_id,
-							));
-						}
-						continue 'htlc_iter;
-					}
-				}
-			}
-		}
+		// HTLCs. With atomic persistence there are never any blocked/held monitor updates with
+		// HTLCs the `ChannelMonitor` doesn't yet know about, so there is nothing extra to add to
+		// `dropped_outbound_htlcs` here.
 
 		let monitor_update = if let Some(funding_txo) = funding.get_funding_txo() {
 			// We should only generate a closing `ChannelMonitorUpdate` if we already have a
@@ -6533,7 +6395,7 @@ impl<SP: SignerProvider> ChannelContext<SP> {
 			// `ChannelMonitor`).  Otherwise, that would imply a channel monitor update before we
 			// even registered the channel monitor to begin with, which is invalid.
 			if self.counterparty_next_commitment_transaction_number != INITIAL_COMMITMENT_NUMBER {
-				self.latest_monitor_update_id = self.get_latest_unblocked_monitor_update_id() + 1;
+				self.latest_monitor_update_id = self.get_latest_monitor_update_id() + 1;
 
 				let update = ChannelMonitorUpdate {
 					update_id: self.latest_monitor_update_id,
@@ -7816,7 +7678,6 @@ where
 		payment_info: Option<PaymentClaimDetails>, attribution_data: Option<AttributionData>,
 		logger: &L,
 	) -> UpdateFulfillCommitFetch {
-		let release_cs_monitor = self.context.blocked_monitor_updates.is_empty();
 		match self.get_update_fulfill_htlc(
 			htlc_id,
 			payment_preimage,
@@ -7827,46 +7688,16 @@ where
 			UpdateFulfillFetch::NewClaim {
 				mut monitor_update,
 				htlc_value_msat,
-				update_blocked,
+				update_blocked: _,
 			} => {
-				// Even if we aren't supposed to let new monitor updates with commitment state
-				// updates run, we still need to push the preimage ChannelMonitorUpdateStep no
-				// matter what. Sadly, to push a new monitor update which flies before others
-				// already queued, we have to insert it into the pending queue and update the
-				// update_ids of all the following monitors.
-				if release_cs_monitor && !update_blocked {
-					let mut additional_update = self.build_commitment_no_status_check(logger);
-					// build_commitment_no_status_check may bump latest_monitor_id but we want them
-					// to be strictly increasing by one, so decrement it here.
-					self.context.latest_monitor_update_id = monitor_update.update_id;
-					monitor_update.updates.append(&mut additional_update.updates);
-				} else {
-					let blocked_upd = self.context.blocked_monitor_updates.get(0);
-					let new_mon_id = blocked_upd
-						.map(|upd| upd.update.update_id)
-						.unwrap_or(monitor_update.update_id);
-					monitor_update.update_id = new_mon_id;
-					for held_update in self.context.blocked_monitor_updates.iter_mut() {
-						held_update.update.update_id += 1;
-					}
-					if !update_blocked {
-						debug_assert!(false, "If there is a pending blocked monitor we should have MonitorUpdateInProgress set");
-						let update = self.build_commitment_no_status_check(logger);
-						self.context
-							.blocked_monitor_updates
-							.push(PendingChannelMonitorUpdate { update });
-					}
-				}
+				// With atomic persistence monitor updates are never held/blocked, so the preimage
+				// update always flies immediately alongside the commitment update.
+				let mut additional_update = self.build_commitment_no_status_check(logger);
+				// build_commitment_no_status_check may bump latest_monitor_id but we want them
+				// to be strictly increasing by one, so decrement it here.
+				self.context.latest_monitor_update_id = monitor_update.update_id;
+				monitor_update.updates.append(&mut additional_update.updates);
 
-				self.monitor_updating_paused(
-					false,
-					!update_blocked,
-					false,
-					Vec::new(),
-					Vec::new(),
-					Vec::new(),
-					logger,
-				);
 				UpdateFulfillCommitFetch::NewClaim { monitor_update, htlc_value_msat }
 			},
 			UpdateFulfillFetch::DuplicateClaim {} => UpdateFulfillCommitFetch::DuplicateClaim {},
@@ -7972,6 +7803,7 @@ where
 	/// funding_signed and persisted their monitors.
 	/// The funding transaction is consequently allowed to be broadcast, and the channel can be
 	/// treated as a non-batch channel going forward.
+	#[cfg(test)]
 	pub fn set_batch_ready(&mut self) {
 		self.context.is_batch_funding = None;
 		self.context.channel_state.clear_waiting_for_batch();
@@ -8256,41 +8088,12 @@ where
 			.count()
 	}
 
-	/// This inbound HTLC was irrevocably forwarded to the outbound edge, so we no longer need to
-	/// persist its onion.
-	pub(super) fn prune_inbound_htlc_onion(
-		&mut self, htlc_id: u64, prev_hop_data: &HTLCPreviousHopData,
-		outbound_hop_data: OutboundHop,
-	) {
-		for htlc in self.context.pending_inbound_htlcs.iter_mut() {
-			if htlc.htlc_id == htlc_id {
-				if let InboundHTLCState::Committed { ref mut update_add_htlc } = htlc.state {
-					*update_add_htlc = InboundUpdateAdd::Forwarded {
-						incoming_packet_shared_secret: prev_hop_data.incoming_packet_shared_secret,
-						phantom_shared_secret: prev_hop_data.phantom_shared_secret,
-						trampoline_shared_secret: prev_hop_data.trampoline_shared_secret,
-						blinded_failure: prev_hop_data.blinded_failure,
-						outbound_hop: outbound_hop_data,
-					};
-					return;
-				}
-			}
-		}
-		debug_assert!(false, "If we go to prune an inbound HTLC it should be present")
-	}
-
 	/// Clears the `hold_htlc` flag for a pending inbound HTLC, returning `true` if the HTLC was
 	/// successfully released. Useful when a [`ReleaseHeldHtlc`] onion message arrives before the
 	/// HTLC has been fully committed.
 	///
 	/// [`ReleaseHeldHtlc`]: crate::onion_message::async_payments::ReleaseHeldHtlc
 	pub(super) fn release_pending_inbound_held_htlc(&mut self, htlc_id: u64) -> bool {
-		for update_add in self.context.monitor_pending_update_adds.iter_mut() {
-			if update_add.htlc_id == htlc_id {
-				update_add.hold_htlc.take();
-				return true;
-			}
-		}
 		for htlc in self.context.pending_inbound_htlcs.iter_mut() {
 			if htlc.htlc_id != htlc_id {
 				continue;
@@ -8453,15 +8256,6 @@ where
 			&self.context.channel_id()
 		);
 
-		self.monitor_updating_paused(
-			false,
-			false,
-			false,
-			Vec::new(),
-			Vec::new(),
-			Vec::new(),
-			logger,
-		);
 		self.context
 			.interactive_tx_signing_session
 			.as_mut()
@@ -8572,18 +8366,8 @@ where
 			.as_mut()
 			.expect("Signing session must exist for negotiated pending splice")
 			.received_commitment_signed();
-		self.monitor_updating_paused(
-			false,
-			false,
-			false,
-			Vec::new(),
-			Vec::new(),
-			Vec::new(),
-			logger,
-		);
-		self.context.monitor_pending_tx_signatures = true;
 
-		Ok(self.push_ret_blockable_mon_update(monitor_update))
+		Ok(Some(monitor_update))
 	}
 
 	fn get_commitment_htlc_data<'a>(
@@ -8838,26 +8622,6 @@ where
 		// build_commitment_no_status_check() next which will reset this to RAAFirst.
 		self.context.resend_order = RAACommitmentOrder::CommitmentFirst;
 
-		if self.context.channel_state.is_monitor_update_in_progress() {
-			// In case we initially failed monitor updating without requiring a response, we need
-			// to make sure the RAA gets sent first.
-			self.context.monitor_pending_revoke_and_ack = true;
-			if need_commitment && !self.context.channel_state.is_awaiting_remote_revoke() {
-				// If we were going to send a commitment_signed after the RAA, go ahead and do all
-				// the corresponding HTLC status updates so that
-				// get_last_commitment_update_for_send includes the right HTLCs.
-				self.context.monitor_pending_commitment_signed = true;
-				let mut additional_update = self.build_commitment_no_status_check(logger);
-				// build_commitment_no_status_check may bump latest_monitor_id but we want them to be
-				// strictly increasing by one, so decrement it here.
-				self.context.latest_monitor_update_id = monitor_update.update_id;
-				monitor_update.updates.append(&mut additional_update.updates);
-			}
-			log_debug!(logger, "Received valid commitment_signed from peer, updated HTLC state but awaiting a monitor update resolution to reply.",
-				);
-			return Ok(self.push_ret_blockable_mon_update(monitor_update));
-		}
-
 		let need_commitment_signed =
 			if need_commitment && !self.context.channel_state.is_awaiting_remote_revoke() {
 				// If we're AwaitingRemoteRevoke we can't send a new commitment here, but that's ok -
@@ -8875,16 +8639,7 @@ where
 
 		log_debug!(logger, "Received valid commitment_signed from peer in channel {}, updating HTLC state and responding with{} a revoke_and_ack.",
 			&self.context.channel_id(), if need_commitment_signed { " our own commitment_signed and" } else { "" });
-		self.monitor_updating_paused(
-			true,
-			need_commitment_signed,
-			false,
-			Vec::new(),
-			Vec::new(),
-			Vec::new(),
-			logger,
-		);
-		return Ok(self.push_ret_blockable_mon_update(monitor_update));
+		return Ok(Some(monitor_update));
 	}
 
 	/// Public version of the below, checking relevant preconditions first.
@@ -8908,7 +8663,6 @@ where
 		&mut self, fee_estimator: &LowerBoundedFeeEstimator<F>, logger: &L,
 	) -> (Option<ChannelMonitorUpdate>, Vec<(HTLCSource, PaymentHash)>) {
 		assert!(matches!(self.context.channel_state, ChannelState::ChannelReady(_)));
-		assert!(!self.context.channel_state.is_monitor_update_in_progress());
 		assert!(!self.context.channel_state.is_quiescent());
 		if self.context.holding_cell_htlc_updates.len() != 0
 			|| self.context.holding_cell_update_fee.is_some()
@@ -9081,16 +8835,7 @@ where
 				if update_fee.is_some() { "a fee update, " } else { "" },
 				update_add_count, update_fulfill_count, update_fail_count);
 
-			self.monitor_updating_paused(
-				false,
-				true,
-				false,
-				Vec::new(),
-				Vec::new(),
-				Vec::new(),
-				logger,
-			);
-			(self.push_ret_blockable_mon_update(monitor_update), htlcs_to_fail)
+			(Some(monitor_update), htlcs_to_fail)
 		} else {
 			(None, Vec::new())
 		}
@@ -9111,11 +8856,12 @@ where
 	/// [`ReleaseHeldHtlc`]: crate::onion_message::async_payments::ReleaseHeldHtlc
 	pub fn revoke_and_ack<F: FeeEstimator, L: Logger>(
 		&mut self, msg: &msgs::RevokeAndACK, fee_estimator: &LowerBoundedFeeEstimator<F>,
-		logger: &L, hold_mon_update: bool,
+		logger: &L,
 	) -> Result<
 		(
 			Vec<(HTLCSource, PaymentHash)>,
 			Vec<(StaticInvoice, BlindedMessagePath)>,
+			Vec<HTLCSource>,
 			Option<ChannelMonitorUpdate>,
 		),
 		ChannelError,
@@ -9215,11 +8961,10 @@ where
 
 		log_trace!(logger, "Updating HTLCs on receipt of RAA...");
 		let mut to_forward_infos = Vec::new();
-		let mut pending_update_adds = Vec::new();
 		let mut revoked_htlcs = Vec::new();
-		let mut finalized_claimed_htlcs = Vec::new();
 		let mut update_fail_htlcs = Vec::new();
 		let mut update_fail_malformed_htlcs = Vec::new();
+		let mut finalized_claimed_htlcs = Vec::new();
 		let mut static_invoices = Vec::new();
 		let mut require_commitment = false;
 		let mut value_to_self_msat_diff: i64 = 0;
@@ -9259,11 +9004,8 @@ where
 							});
 							revoked_htlcs.push((htlc.source.clone(), htlc.payment_hash, reason));
 						},
-						OutboundHTLCOutcome::Success { attribution_data, .. } => {
-							// Even though a fast track was taken for fulfilled HTLCs to the incoming side, we still
-							// pass along attribution data here so that we can include hold time information in the
-							// final PaymentPathSuccessful events.
-							finalized_claimed_htlcs.push((htlc.source.clone(), attribution_data));
+						OutboundHTLCOutcome::Success { .. } => {
+							finalized_claimed_htlcs.push(htlc.source.clone());
 							// They fulfilled, so we sent them money
 							value_to_self_msat_diff -= htlc.amount_msat as i64;
 						},
@@ -9333,7 +9075,6 @@ where
 							},
 							InboundHTLCResolution::Pending { update_add_htlc } => {
 								log_trace!(logger, " ...promoting inbound AwaitingAnnouncedRemoteRevoke {} to Committed", &htlc.payment_hash);
-								pending_update_adds.push(update_add_htlc.clone());
 								htlc.state = InboundHTLCState::Committed {
 									update_add_htlc: InboundUpdateAdd::WithOnion {
 										update_add_htlc,
@@ -9419,28 +9160,17 @@ where
 			}
 		}
 
-		let release_monitor = self.context.blocked_monitor_updates.is_empty() && !hold_mon_update;
-		let release_state_str = if hold_mon_update {
-			"Holding"
-		} else if release_monitor {
-			"Releasing"
-		} else {
-			"Blocked"
-		};
+		let release_state_str = "Releasing";
 		macro_rules! return_with_htlcs_to_fail {
 			($htlcs_to_fail: expr) => {
-				if !release_monitor {
-					self.context
-						.blocked_monitor_updates
-						.push(PendingChannelMonitorUpdate { update: monitor_update });
-					return Ok(($htlcs_to_fail, static_invoices, None));
-				} else {
-					return Ok(($htlcs_to_fail, static_invoices, Some(monitor_update)));
-				}
+				return Ok((
+					$htlcs_to_fail,
+					static_invoices,
+					finalized_claimed_htlcs,
+					Some(monitor_update),
+				));
 			};
 		}
-
-		self.context.monitor_pending_update_adds.append(&mut pending_update_adds);
 
 		match self.maybe_free_holding_cell_htlcs(fee_estimator, logger) {
 			(Some(mut additional_update), htlcs_to_fail) => {
@@ -9452,24 +9182,14 @@ where
 				log_debug!(logger, "Received a valid revoke_and_ack with holding cell HTLCs freed. {} monitor update.",
 					release_state_str);
 
-				self.monitor_updating_paused(
-					false,
-					true,
-					false,
-					to_forward_infos,
-					revoked_htlcs,
-					finalized_claimed_htlcs,
-					logger,
-				);
 				return_with_htlcs_to_fail!(htlcs_to_fail);
 			},
 			(None, htlcs_to_fail) => {
 				if require_commitment {
-					// We can't generate a new commitment transaction yet so we just return what we
-					// have. When the monitor updating is restored we'll call
-					// get_last_commitment_update_for_send(), which does not update state, but we're
-					// definitely now awaiting a remote revoke before we can step forward any more,
-					// so set it here.
+					// Build the next commitment update into state now, even if it cannot be sent
+					// yet. Once the channel can continue, get_last_commitment_update_for_send()
+					// will fetch it without updating state. We are now awaiting a remote revoke
+					// before we can step forward any more, so set that state here.
 					let mut additional_update = self.build_commitment_no_status_check(logger);
 
 					// build_commitment_no_status_check may bump latest_monitor_id but we want them to be
@@ -9489,37 +9209,17 @@ where
 					} else {
 						let reason = if self.context.channel_state.is_local_stfu_sent() {
 							"exits quiescence"
-						} else if self.context.channel_state.is_monitor_update_in_progress() {
-							"completes pending monitor update"
 						} else {
 							"can continue progress"
 						};
 						log_debug!(logger, "Holding back commitment update until {}", reason);
 					}
 
-					self.monitor_updating_paused(
-						false,
-						true,
-						false,
-						to_forward_infos,
-						revoked_htlcs,
-						finalized_claimed_htlcs,
-						logger,
-					);
 					return_with_htlcs_to_fail!(htlcs_to_fail);
 				} else {
 					log_debug!(logger, "Received a valid revoke_and_ack with no reply necessary. {} monitor update {}.",
 						release_state_str, monitor_update.update_id);
 
-					self.monitor_updating_paused(
-						false,
-						false,
-						false,
-						to_forward_infos,
-						revoked_htlcs,
-						finalized_claimed_htlcs,
-						logger,
-					);
 					return_with_htlcs_to_fail!(htlcs_to_fail);
 				}
 			},
@@ -9530,7 +9230,6 @@ where
 		&mut self, funding_tx_signed: &mut FundingTxSigned, funding_tx: Transaction,
 		best_block_height: u32, logger: &WithChannelContext<'a, L>,
 	) {
-		debug_assert!(!self.context.channel_state.is_monitor_update_in_progress());
 		debug_assert!(!self.context.channel_state.is_awaiting_remote_revoke());
 
 		if let Some(pending_splice) = self.pending_splice.as_mut() {
@@ -9684,18 +9383,6 @@ where
 			splice_negotiated: None,
 			splice_locked: None,
 		};
-		if self.is_awaiting_monitor_update() {
-			// Although the user may have already provided our `tx_signatures`, we must not send
-			// them if we're waiting for the monitor to durably persist the counterparty's signature
-			// for our initial commitment post-splice.
-			debug_assert!(self.context.monitor_pending_tx_signatures);
-			log_debug!(
-				logger,
-				"Waiting for async monitor update to complete prior to releasing our tx_signatures"
-			);
-			return Ok(funding_tx_signed);
-		}
-
 		funding_tx_signed.tx_signatures = holder_tx_signatures;
 		if let Some(funding_tx) = funding_tx {
 			self.on_tx_signatures_exchange(
@@ -9864,204 +9551,6 @@ where
 		Ok(())
 	}
 
-	/// Indicates that a ChannelMonitor update is in progress and has not yet been fully persisted.
-	/// This must be called before we return the [`ChannelMonitorUpdate`] back to the
-	/// [`ChannelManager`], which will call [`Self::monitor_updating_restored`] once the monitor
-	/// update completes (potentially immediately).
-	/// The messages which were generated with the monitor update must *not* have been sent to the
-	/// remote end, and must instead have been dropped. They will be regenerated when
-	/// [`Self::monitor_updating_restored`] is called.
-	///
-	/// [`ChannelManager`]: super::channelmanager::ChannelManager
-	/// [`chain::Watch`]: crate::chain::Watch
-	/// [`ChannelMonitorUpdateStatus::InProgress`]: crate::chain::ChannelMonitorUpdateStatus::InProgress
-	fn monitor_updating_paused<L: Logger>(
-		&mut self, resend_raa: bool, resend_commitment: bool, resend_channel_ready: bool,
-		pending_forwards: Vec<(PendingHTLCInfo, u64)>,
-		pending_fails: Vec<(HTLCSource, PaymentHash, HTLCFailReason)>,
-		pending_finalized_claimed_htlcs: Vec<(HTLCSource, Option<AttributionData>)>, logger: &L,
-	) {
-		log_trace!(logger, "Pausing channel monitor updates");
-
-		self.context.monitor_pending_revoke_and_ack |= resend_raa;
-		self.context.monitor_pending_commitment_signed |= resend_commitment;
-		self.context.monitor_pending_channel_ready |= resend_channel_ready;
-		self.context.monitor_pending_forwards.extend(pending_forwards);
-		self.context.monitor_pending_failures.extend(pending_fails);
-		self.context.monitor_pending_finalized_fulfills.extend(pending_finalized_claimed_htlcs);
-		self.context.channel_state.set_monitor_update_in_progress();
-	}
-
-	/// Indicates that the latest ChannelMonitor update has been committed by the client
-	/// successfully and we should restore normal operation. Returns messages which should be sent
-	/// to the remote side.
-	#[rustfmt::skip]
-	pub fn monitor_updating_restored<'a, L: Logger, NS: NodeSigner, CBP>(
-		&mut self, logger: &WithChannelContext<'a, L>, node_signer: &NS, chain_hash: ChainHash,
-		user_config: &UserConfig, best_block_height: u32, path_for_release_htlc: CBP
-	) -> MonitorRestoreUpdates
-	where
-		CBP: Fn(u64) -> BlindedMessagePath
-	{
-		assert!(self.context.channel_state.is_monitor_update_in_progress());
-		self.context.channel_state.clear_monitor_update_in_progress();
-		assert_eq!(self.blocked_monitor_updates_pending(), 0);
-		// Some cases below may not strictly require ChannelManager persistence, but we err on
-		// the conservative side to avoid missing state changes.
-		let mut requires_channel_manager_persistence = false;
-
-		// We want to clear that the monitor update for our `tx_signatures` has completed, but
-		// we may still need to hold back the message until it's ready to be sent.
-		let mut tx_signatures = self
-			.context
-			.monitor_pending_tx_signatures
-			.then(|| ())
-			.and_then(|_| self.context.interactive_tx_signing_session.as_ref())
-			.and_then(|signing_session| signing_session.holder_tx_signatures());
-		self.context.monitor_pending_tx_signatures = false;
-
-		let mut funding_tx_signed = None;
-		if tx_signatures.is_some() {
-			let signing_session = self.context.interactive_tx_signing_session.as_ref()
-				.expect("We have a tx_signatures message so we must have a valid signing session");
-			if self.context.signer_pending_funding {
-				tx_signatures.take();
-			} else {
-				debug_assert!(tx_signatures.is_some());
-				funding_tx_signed = Some(FundingTxSigned {
-					commitment_signed: None,
-					counterparty_initial_commitment_signed_result: None,
-					tx_signatures,
-					funding_tx: None,
-					splice_negotiated: None,
-					splice_locked: None,
-				});
-				requires_channel_manager_persistence = true;
-				if let Some(funding_tx) = signing_session.signed_tx() {
-					self.on_tx_signatures_exchange(
-						funding_tx_signed.as_mut().unwrap(),
-						funding_tx,
-						best_block_height,
-						logger,
-					);
-				} else if signing_session.has_received_tx_signatures() {
-					debug_assert!(false, "Signed funding transaction should be available upon tx_signatures exchange");
-				}
-			}
-		}
-
-		// If we're past (or at) the AwaitingChannelReady stage on an outbound (or V2-established) channel,
-		// try to (re-)broadcast the funding transaction as we may have declined to broadcast it when we
-		// first received the funding_signed.
-		let mut funding_broadcastable = None;
-		if let Some(funding_transaction) = &self.funding.funding_transaction {
-			if (self.funding.is_outbound() || self.is_v2_established()) &&
-				(matches!(self.context.channel_state, ChannelState::AwaitingChannelReady(flags) if !flags.is_set(AwaitingChannelReadyFlags::WAITING_FOR_BATCH)) ||
-				matches!(self.context.channel_state, ChannelState::ChannelReady(_)))
-			{
-				// Broadcast only if not yet confirmed
-				if self.funding.get_funding_tx_confirmation_height().is_none() {
-					funding_broadcastable = Some(funding_transaction.clone());
-					requires_channel_manager_persistence = true;
-				}
-			}
-		}
-
-		// An active interactive signing session or an awaiting channel_ready state implies that a
-		// commitment_signed retransmission is an initial one for funding negotiation. Thus, the
-		// signatures should be sent before channel_ready.
-		let channel_ready_order = if self.context.interactive_tx_signing_session.is_some() {
-			ChannelReadyOrder::SignaturesFirst
-		} else if matches!(self.context.channel_state, ChannelState::AwaitingChannelReady(_)) {
-			ChannelReadyOrder::SignaturesFirst
-		} else {
-			ChannelReadyOrder::ChannelReadyFirst
-		};
-
-		// We will never broadcast the funding transaction when we're in MonitorUpdateInProgress
-		// (and we assume the user never directly broadcasts the funding transaction and waits for
-		// us to do it). Thus, we can only ever hit monitor_pending_channel_ready when we're
-		// * an inbound channel that failed to persist the monitor on funding_created and we got
-		//   the funding transaction confirmed before the monitor was persisted, or
-		// * a 0-conf channel and intended to send the channel_ready before any broadcast at all.
-		let channel_ready = if self.context.monitor_pending_channel_ready {
-			assert!(!self.funding.is_outbound() || self.context.minimum_depth == Some(0),
-				"Funding transaction broadcast by the local client before it should have - LDK didn't do it!");
-			self.context.monitor_pending_channel_ready = false;
-			let channel_ready = self.get_channel_ready(logger);
-			requires_channel_manager_persistence |= channel_ready.is_some();
-			channel_ready
-		} else { None };
-
-		let announcement_sigs = self.get_announcement_sigs(node_signer, chain_hash, user_config, best_block_height, logger);
-		requires_channel_manager_persistence |= announcement_sigs.is_some();
-
-		let mut accepted_htlcs = Vec::new();
-		mem::swap(&mut accepted_htlcs, &mut self.context.monitor_pending_forwards);
-		requires_channel_manager_persistence |= !accepted_htlcs.is_empty();
-		let mut failed_htlcs = Vec::new();
-		mem::swap(&mut failed_htlcs, &mut self.context.monitor_pending_failures);
-		requires_channel_manager_persistence |= !failed_htlcs.is_empty();
-		let mut finalized_claimed_htlcs = Vec::new();
-		mem::swap(&mut finalized_claimed_htlcs, &mut self.context.monitor_pending_finalized_fulfills);
-		requires_channel_manager_persistence |= !finalized_claimed_htlcs.is_empty();
-		let mut pending_update_adds = Vec::new();
-		mem::swap(&mut pending_update_adds, &mut self.context.monitor_pending_update_adds);
-		requires_channel_manager_persistence |= !pending_update_adds.is_empty();
-		let committed_outbound_htlc_sources: Vec<(HTLCPreviousHopData, u64)> = self.context.pending_outbound_htlcs.iter().filter_map(|htlc| {
-			if let &OutboundHTLCState::LocalAnnounced(_) = &htlc.state {
-				if let HTLCSource::PreviousHopData(prev_hop_data) = &htlc.source {
-					return Some((prev_hop_data.clone(), htlc.amount_msat))
-				}
-			}
-			None
-		}).collect();
-		requires_channel_manager_persistence |= !committed_outbound_htlc_sources.is_empty();
-
-		if self.context.channel_state.is_peer_disconnected() {
-			self.context.monitor_pending_revoke_and_ack = false;
-			self.context.monitor_pending_commitment_signed = false;
-			return MonitorRestoreUpdates {
-				raa: None, commitment_update: None, commitment_order: RAACommitmentOrder::RevokeAndACKFirst,
-				accepted_htlcs, failed_htlcs, finalized_claimed_htlcs, pending_update_adds,
-				funding_broadcastable, channel_ready, channel_ready_order, announcement_sigs,
-				funding_tx_signed, committed_outbound_htlc_sources,
-				requires_channel_manager_persistence,
-			};
-		}
-
-		let mut raa = if self.context.monitor_pending_revoke_and_ack {
-			self.get_last_revoke_and_ack(path_for_release_htlc, logger)
-		} else { None };
-		let mut commitment_update = if self.context.monitor_pending_commitment_signed {
-			self.get_last_commitment_update_for_send(logger).ok()
-		} else { None };
-		if self.context.resend_order == RAACommitmentOrder::CommitmentFirst
-			&& self.context.signer_pending_commitment_update && raa.is_some() {
-			self.context.signer_pending_revoke_and_ack = true;
-			raa = None;
-		}
-		if self.context.resend_order == RAACommitmentOrder::RevokeAndACKFirst
-			&& self.context.signer_pending_revoke_and_ack && commitment_update.is_some() {
-			self.context.signer_pending_commitment_update = true;
-			commitment_update = None;
-		}
-
-		self.context.monitor_pending_revoke_and_ack = false;
-		self.context.monitor_pending_commitment_signed = false;
-		let commitment_order = self.context.resend_order.clone();
-		log_debug!(logger, "Restored monitor updating in channel {} resulting in {}{} commitment update and {} RAA, with {} first",
-			&self.context.channel_id(), if funding_broadcastable.is_some() { "a funding broadcastable, " } else { "" },
-			if commitment_update.is_some() { "a" } else { "no" }, if raa.is_some() { "an" } else { "no" },
-			match commitment_order { RAACommitmentOrder::CommitmentFirst => "commitment", RAACommitmentOrder::RevokeAndACKFirst => "RAA"});
-		MonitorRestoreUpdates {
-			raa, commitment_update, commitment_order, accepted_htlcs, failed_htlcs, finalized_claimed_htlcs,
-			pending_update_adds, funding_broadcastable, channel_ready, channel_ready_order,
-			announcement_sigs, funding_tx_signed, committed_outbound_htlc_sources,
-			requires_channel_manager_persistence,
-		}
-	}
-
 	pub fn check_for_stale_feerate<L: Logger>(
 		&mut self, logger: &L, min_feerate: u32,
 	) -> Result<(), ClosureReason> {
@@ -10202,7 +9691,7 @@ where
 		let mut funding_tx = None;
 		if funding_commit_sig.is_some() || shared_input_signature_unblocked {
 			if let Some(signing_session) = self.context.interactive_tx_signing_session.as_ref() {
-				if !self.is_awaiting_monitor_update() && !self.context.signer_pending_funding {
+				if !self.context.signer_pending_funding {
 					tx_signatures = signing_session.holder_tx_signatures();
 					funding_tx = tx_signatures.as_ref().and_then(|_| signing_session.signed_tx());
 				}
@@ -10267,7 +9756,6 @@ where
 			// already persisted before we set `signer_pending_revoke_and_ack`. Thus, if reconnect
 			// also marked the same RAA monitor-pending while another monitor update was in flight,
 			// the RAA we're returning here satisfies that monitor-pending resend.
-			self.context.monitor_pending_revoke_and_ack = false;
 		}
 
 		let (closing_signed, signed_closing_tx, shutdown_result) = if self.context.signer_pending_closing {
@@ -10667,9 +10155,7 @@ where
 					// - if it has already received `tx_signatures` for that funding transaction:
 					//   - MUST send its `tx_signatures` for that funding transaction.
 					if let Some(holder_tx_signatures) = session.holder_tx_signatures() {
-						if self.is_awaiting_monitor_update() {
-							log_debug!(logger, "Waiting for monitor update before providing funding transaction signatures");
-						} else if self.context.signer_pending_funding {
+						if self.context.signer_pending_funding {
 							log_debug!(logger, "Waiting for signer to provide counterparty commitment_signed before releasing funding transaction signatures");
 						} else {
 							tx_signatures = Some(holder_tx_signatures);
@@ -10729,9 +10215,7 @@ where
 		}
 
 		if matches!(self.context.channel_state, ChannelState::AwaitingChannelReady(_)) {
-			// If we're waiting on a monitor update, we shouldn't re-send any channel_ready's.
-			if !self.context.channel_state.is_our_channel_ready() ||
-					self.context.channel_state.is_monitor_update_in_progress() {
+			if !self.context.channel_state.is_our_channel_ready() {
 				if msg.next_remote_commitment_number != 0 {
 					return Err(ChannelError::close("Peer claimed they saw a revoke_and_ack but we haven't sent channel_ready yet".to_owned()));
 				}
@@ -10766,17 +10250,10 @@ where
 		let required_revoke = if msg.next_remote_commitment_number == our_commitment_transaction {
 			// Remote isn't waiting on any RevokeAndACK from us!
 			// Note that if we need to repeat our ChannelReady we'll do that in the next if block.
-			// If a stale ChannelManager replayed a completed update, the monitor-pending state may
-			// still think we owe one; the reestablish proof is authoritative here.
-			self.context.monitor_pending_revoke_and_ack = false;
+			// The reestablish proof is authoritative here.
 			None
 		} else if msg.next_remote_commitment_number + 1 == our_commitment_transaction {
-			if self.context.channel_state.is_monitor_update_in_progress() {
-				self.context.monitor_pending_revoke_and_ack = true;
-				None
-			} else {
-				self.get_last_revoke_and_ack(path_for_release_htlc, logger)
-			}
+			self.get_last_revoke_and_ack(path_for_release_htlc, logger)
 		} else {
 			debug_assert!(false, "All values should have been handled in the four cases above");
 			return Err(ChannelError::close(format!(
@@ -10807,7 +10284,6 @@ where
 			&& self.pending_splice.is_none()
 			&& self.funding.channel_transaction_parameters.splice_parent_funding_txid.is_none()
 		{
-			// We should never have to worry about MonitorUpdateInProgress resending ChannelReady
 			self.get_channel_ready(logger)
 		} else { None };
 
@@ -10857,7 +10333,6 @@ where
 		if msg.next_local_commitment_number == next_counterparty_commitment_number {
 			// If a stale ChannelManager replayed a completed update, the monitor-pending state may
 			// still think we owe one.
-			self.context.monitor_pending_commitment_signed = false;
 			if required_revoke.is_some() || self.context.signer_pending_revoke_and_ack {
 				log_debug!(logger, "Reconnected with only lost outbound RAA");
 			} else {
@@ -10890,48 +10365,33 @@ where
 				log_debug!(logger, "Reconnected channel with only lost remote commitment tx");
 			}
 
-			if self.context.channel_state.is_monitor_update_in_progress() {
-				self.context.monitor_pending_commitment_signed = true;
-				Ok(ReestablishResponses {
-					channel_ready,
-					channel_ready_order: ChannelReadyOrder::ChannelReadyFirst,
-					shutdown_msg, announcement_sigs,
-					commitment_update: None, raa: None,
-					commitment_order: self.context.resend_order.clone(),
-					tx_signatures: None,
-					tx_abort,
-					splice_locked,
-					inferred_splice_locked,
-				})
+			let commitment_update = if self.context.resend_order == RAACommitmentOrder::RevokeAndACKFirst
+				&& self.context.signer_pending_revoke_and_ack {
+				log_trace!(logger, "Reconnected channel with lost outbound RAA and lost remote commitment tx, but unable to send due to resend order, waiting on signer for revoke and ack");
+				self.context.signer_pending_commitment_update = true;
+				None
 			} else {
-				let commitment_update = if self.context.resend_order == RAACommitmentOrder::RevokeAndACKFirst
-					&& self.context.signer_pending_revoke_and_ack {
-					log_trace!(logger, "Reconnected channel with lost outbound RAA and lost remote commitment tx, but unable to send due to resend order, waiting on signer for revoke and ack");
-					self.context.signer_pending_commitment_update = true;
-					None
-				} else {
-					self.get_last_commitment_update_for_send(logger).ok()
-				};
-				let raa = if self.context.resend_order == RAACommitmentOrder::CommitmentFirst
-					&& self.context.signer_pending_commitment_update && required_revoke.is_some() {
-					log_trace!(logger, "Reconnected channel with lost outbound RAA and lost remote commitment tx, but unable to send due to resend order, waiting on signer for commitment update");
-					self.context.signer_pending_revoke_and_ack = true;
-					None
-				} else {
-					required_revoke
-				};
-				Ok(ReestablishResponses {
-					channel_ready,
-					channel_ready_order: ChannelReadyOrder::ChannelReadyFirst,
-					shutdown_msg, announcement_sigs,
-					raa, commitment_update,
-					commitment_order: self.context.resend_order.clone(),
-					tx_signatures: None,
-					tx_abort,
-					splice_locked,
-					inferred_splice_locked,
-				})
-			}
+				self.get_last_commitment_update_for_send(logger).ok()
+			};
+			let raa = if self.context.resend_order == RAACommitmentOrder::CommitmentFirst
+				&& self.context.signer_pending_commitment_update && required_revoke.is_some() {
+				log_trace!(logger, "Reconnected channel with lost outbound RAA and lost remote commitment tx, but unable to send due to resend order, waiting on signer for commitment update");
+				self.context.signer_pending_revoke_and_ack = true;
+				None
+			} else {
+				required_revoke
+			};
+			Ok(ReestablishResponses {
+				channel_ready,
+				channel_ready_order: ChannelReadyOrder::ChannelReadyFirst,
+				shutdown_msg, announcement_sigs,
+				raa, commitment_update,
+				commitment_order: self.context.resend_order.clone(),
+				tx_signatures: None,
+				tx_abort,
+				splice_locked,
+				inferred_splice_locked,
+			})
 		} else if msg.next_local_commitment_number < next_counterparty_commitment_number {
 			Err(ChannelError::close(format!(
 				"Peer attempted to reestablish channel with a very old remote commitment transaction: {} (received) vs {} (expected)",
@@ -11122,7 +10582,7 @@ where
 	}
 
 	pub fn shutdown<L: Logger>(
-		&mut self, logger: &L, signer_provider: &SP, their_features: &InitFeatures,
+		&mut self, _logger: &L, signer_provider: &SP, their_features: &InitFeatures,
 		msg: &msgs::Shutdown,
 	) -> Result<
 		(
@@ -11232,16 +10692,7 @@ where
 				}],
 				channel_id: Some(self.context.channel_id()),
 			};
-			self.monitor_updating_paused(
-				false,
-				false,
-				false,
-				Vec::new(),
-				Vec::new(),
-				Vec::new(),
-				logger,
-			);
-			self.push_ret_blockable_mon_update(monitor_update)
+			Some(monitor_update)
 		} else {
 			None
 		};
@@ -11392,11 +10843,6 @@ where
 
 		if self.funding.is_outbound() && self.context.last_sent_closing_fee.is_none() {
 			return Err(ChannelError::close("Remote tried to send a closing_signed when we were supposed to propose the first one".to_owned()));
-		}
-
-		if self.context.channel_state.is_monitor_update_in_progress() {
-			self.context.pending_counterparty_closing_signed = Some(msg.clone());
-			return Ok((None, None));
 		}
 
 		let funding_redeemscript = self.funding.get_funding_redeemscript();
@@ -11619,15 +11065,6 @@ where
 			.try_for_each(|funding| self.context.can_accept_incoming_htlc(funding, dust_exposure_limiting_feerate, &logger))
 	}
 
-	pub fn get_cur_holder_commitment_transaction_number(&self) -> u64 {
-		self.holder_commitment_point.current_transaction_number()
-	}
-
-	pub fn get_cur_counterparty_commitment_transaction_number(&self) -> u64 {
-		self.context.counterparty_next_commitment_transaction_number + 1
-			- if self.context.channel_state.is_awaiting_remote_revoke() { 1 } else { 0 }
-	}
-
 	pub fn get_revoked_counterparty_commitment_transaction_number(&self) -> u64 {
 		let ret = self.context.counterparty_next_commitment_transaction_number + 2;
 		debug_assert_eq!(self.context.commitment_secrets.get_min_seen_secret(), ret);
@@ -11663,107 +11100,6 @@ where
 			counterparty_max_htlc_value_in_flight_msat: self.context.counterparty_max_htlc_value_in_flight_msat,
 			counterparty_dust_limit_msat: self.context.counterparty_dust_limit_satoshis * 1000,
 		}
-	}
-
-	/// Returns true if this channel has been marked as awaiting a monitor update to move forward.
-	/// Allowed in any state (including after shutdown)
-	pub fn is_awaiting_monitor_update(&self) -> bool {
-		self.context.channel_state.is_monitor_update_in_progress()
-	}
-
-	/// Gets the latest [`ChannelMonitorUpdate`] ID which has been released and is in-flight.
-	pub fn get_latest_unblocked_monitor_update_id(&self) -> u64 {
-		self.context.get_latest_unblocked_monitor_update_id()
-	}
-
-	/// Returns the next blocked monitor update, if one exists, and a bool which indicates a
-	/// further blocked monitor update exists after the next.
-	pub fn unblock_next_blocked_monitor_update(&mut self) -> Option<(ChannelMonitorUpdate, bool)> {
-		if self.context.blocked_monitor_updates.is_empty() {
-			return None;
-		}
-		Some((
-			self.context.blocked_monitor_updates.remove(0).update,
-			!self.context.blocked_monitor_updates.is_empty(),
-		))
-	}
-
-	/// Pushes a new monitor update into our monitor update queue, returning it if it should be
-	/// immediately given to the user for persisting or `None` if it should be held as blocked.
-	#[rustfmt::skip]
-	fn push_ret_blockable_mon_update(&mut self, update: ChannelMonitorUpdate)
-	-> Option<ChannelMonitorUpdate> {
-		let release_monitor = self.context.blocked_monitor_updates.is_empty();
-		if !release_monitor {
-			self.context.blocked_monitor_updates.push(PendingChannelMonitorUpdate {
-				update,
-			});
-			None
-		} else {
-			Some(update)
-		}
-	}
-
-	/// On startup, its possible we detect some monitor updates have actually completed (and the
-	/// ChannelManager was simply stale). In that case, we should simply drop them, which we do
-	/// here after logging them.
-	pub fn on_startup_drop_completed_blocked_mon_updates_through<L: Logger>(
-		&mut self, logger: &L, loaded_mon_update_id: u64,
-	) {
-		self.context.blocked_monitor_updates.retain(|update| {
-			if update.update.update_id <= loaded_mon_update_id {
-				log_info!(
-					logger,
-					"Dropping completed ChannelMonitorUpdate id {} due to a stale ChannelManager",
-					update.update.update_id,
-				);
-				false
-			} else {
-				true
-			}
-		});
-	}
-
-	pub fn blocked_monitor_updates_pending(&self) -> usize {
-		self.context.blocked_monitor_updates.len()
-	}
-
-	/// Returns true if the channel is awaiting the persistence of the initial ChannelMonitor.
-	/// If the channel is outbound, this implies we have not yet broadcasted the funding
-	/// transaction. If the channel is inbound, this implies simply that the channel has not
-	/// advanced state.
-	#[rustfmt::skip]
-	pub fn is_awaiting_initial_mon_persist(&self) -> bool {
-		if !self.is_awaiting_monitor_update() { return false; }
-		if matches!(
-			self.context.channel_state, ChannelState::AwaitingChannelReady(flags)
-			if flags.clone().clear(AwaitingChannelReadyFlags::THEIR_CHANNEL_READY | FundedStateFlags::PEER_DISCONNECTED | FundedStateFlags::MONITOR_UPDATE_IN_PROGRESS | AwaitingChannelReadyFlags::WAITING_FOR_BATCH).is_empty()
-		) {
-			// If we're not a 0conf channel, we'll be waiting on a monitor update with only
-			// AwaitingChannelReady set, though our peer could have sent their channel_ready.
-			debug_assert!(self.context.minimum_depth.unwrap_or(1) > 0);
-			return true;
-		}
-		if self.holder_commitment_point.next_transaction_number() == INITIAL_COMMITMENT_NUMBER - 1 &&
-			self.context.counterparty_next_commitment_transaction_number == INITIAL_COMMITMENT_NUMBER - 1 {
-			// If we're a 0-conf channel, we'll move beyond AwaitingChannelReady immediately even while
-			// waiting for the initial monitor persistence. Thus, we check if our commitment
-			// transaction numbers have both been iterated only exactly once (for the
-			// funding_signed), and we're awaiting monitor update.
-			//
-			// If we got here, we shouldn't have yet broadcasted the funding transaction (as the
-			// only way to get an awaiting-monitor-update state during initial funding is if the
-			// initial monitor persistence is still pending).
-			//
-			// Because deciding we're awaiting initial broadcast spuriously could result in
-			// funds-loss (as we don't have a monitor, but have the funding transaction confirmed),
-			// we hard-assert here, even in production builds.
-			if self.funding.is_outbound() { assert!(self.funding.funding_transaction.is_some()); }
-			assert!(self.context.monitor_pending_channel_ready);
-			assert_eq!(self.context.latest_monitor_update_id, 0);
-			return true;
-		}
-		false
 	}
 
 	/// Gets the latest inbound SCID alias from our peer, or if none exists, the channel's real
@@ -11855,12 +11191,6 @@ where
 
 		if !need_commitment_update {
 			log_debug!(logger, "Not producing channel_ready: we do not need a commitment update");
-			return None;
-		}
-
-		if self.context.channel_state.is_monitor_update_in_progress() {
-			log_debug!(logger, "Not producing channel_ready: a monitor update is in progress. Setting monitor_pending_channel_ready.");
-			self.context.monitor_pending_channel_ready = true;
 			return None;
 		}
 
@@ -11978,16 +11308,7 @@ where
 			}],
 			channel_id: Some(self.context.channel_id()),
 		};
-		self.monitor_updating_paused(
-			false,
-			false,
-			false,
-			Vec::new(),
-			Vec::new(),
-			Vec::new(),
-			logger,
-		);
-		let monitor_update = self.push_ret_blockable_mon_update(monitor_update);
+		let monitor_update = Some(monitor_update);
 
 		let announcement_sigs =
 			self.get_announcement_sigs(node_signer, chain_hash, user_config, block_height, logger);
@@ -13951,10 +13272,6 @@ where
 	/// * In cases where we're waiting on the remote peer to send us a revoke_and_ack, we
 	///   wouldn't be able to determine what they actually ACK'ed if we have two sets of updates
 	///   awaiting ACK.
-	/// * In cases where we're marked MonitorUpdateInProgress, we cannot commit to a new state as
-	///   we may not yet have sent the previous commitment update messages and will need to
-	///   regenerate them.
-	///
 	/// You MUST call [`Self::send_commitment_no_state_update`] prior to calling any other methods
 	/// on this [`FundedChannel`] if `force_holding_cell` is false.
 	///
@@ -14327,16 +13644,7 @@ where
 		let can_add_htlc = send_res.map_err(|(_, msg)| ChannelError::Ignore(msg))?;
 		if can_add_htlc {
 			let monitor_update = self.build_commitment_no_status_check(logger);
-			self.monitor_updating_paused(
-				false,
-				true,
-				false,
-				Vec::new(),
-				Vec::new(),
-				Vec::new(),
-				logger,
-			);
-			Ok(self.push_ret_blockable_mon_update(monitor_update))
+			Ok(Some(monitor_update))
 		} else {
 			Ok(None)
 		}
@@ -14364,7 +13672,7 @@ where
 	pub fn get_shutdown<L: Logger>(
 		&mut self, signer_provider: &SP, their_features: &InitFeatures,
 		target_feerate_sats_per_kw: Option<u32>, override_shutdown_script: Option<ShutdownScript>,
-		logger: &L,
+		_logger: &L,
 	) -> Result<
 		(
 			msgs::Shutdown,
@@ -14374,8 +13682,6 @@ where
 		),
 		APIError,
 	> {
-		let logger = WithChannelContext::from(logger, &self.context, None);
-
 		if self.context.channel_state.is_local_stfu_sent()
 			|| self.context.channel_state.is_remote_stfu_sent()
 			|| self.context.channel_state.is_quiescent()
@@ -14408,10 +13714,11 @@ where
 			});
 		}
 		assert!(!matches!(self.context.channel_state, ChannelState::ShutdownComplete));
-		if self.context.channel_state.is_peer_disconnected()
-			|| self.context.channel_state.is_monitor_update_in_progress()
-		{
-			return Err(APIError::ChannelUnavailable{err: "Cannot begin shutdown while peer is disconnected or we're waiting on a monitor update, maybe force-close instead?".to_owned()});
+		if self.context.channel_state.is_peer_disconnected() {
+			return Err(APIError::ChannelUnavailable {
+				err: "Cannot begin shutdown while peer is disconnected, maybe force-close instead?"
+					.to_owned(),
+			});
 		}
 
 		let update_shutdown_script = match self.context.shutdown_scriptpubkey {
@@ -14457,16 +13764,7 @@ where
 				}],
 				channel_id: Some(self.context.channel_id()),
 			};
-			self.monitor_updating_paused(
-				false,
-				false,
-				false,
-				Vec::new(),
-				Vec::new(),
-				Vec::new(),
-				&&logger,
-			);
-			self.push_ret_blockable_mon_update(monitor_update)
+			Some(monitor_update)
 		} else {
 			None
 		};
@@ -15178,17 +14476,7 @@ impl<SP: SignerProvider> OutboundV1Channel<SP> {
 			quiescent_action: None,
 		};
 
-		let need_channel_ready = channel.check_get_channel_ready(0, logger).is_some()
-			|| channel.context.signer_pending_channel_ready;
-		channel.monitor_updating_paused(
-			false,
-			false,
-			need_channel_ready,
-			Vec::new(),
-			Vec::new(),
-			Vec::new(),
-			logger,
-		);
+		let _ = channel.check_get_channel_ready(0, logger);
 		Ok((channel, channel_monitor))
 	}
 
@@ -15499,17 +14787,7 @@ impl<SP: SignerProvider> InboundV1Channel<SP> {
 			pending_splice: None,
 			quiescent_action: None,
 		};
-		let need_channel_ready = channel.check_get_channel_ready(0, logger).is_some()
-			|| channel.context.signer_pending_channel_ready;
-		channel.monitor_updating_paused(
-			false,
-			false,
-			need_channel_ready,
-			Vec::new(),
-			Vec::new(),
-			Vec::new(),
-			logger,
-		);
+		let _ = channel.check_get_channel_ready(0, logger);
 
 		Ok((channel, funding_signed, channel_monitor))
 	}
@@ -16220,25 +15498,6 @@ impl<SP: SignerProvider> Writeable for FundedChannel<SP> {
 			RAACommitmentOrder::RevokeAndACKFirst => 1u8.write(writer)?,
 		}
 
-		self.context.monitor_pending_channel_ready.write(writer)?;
-		self.context.monitor_pending_revoke_and_ack.write(writer)?;
-		self.context.monitor_pending_commitment_signed.write(writer)?;
-
-		(self.context.monitor_pending_forwards.len() as u64).write(writer)?;
-		for &(ref pending_forward, ref htlc_id) in self.context.monitor_pending_forwards.iter() {
-			pending_forward.write(writer)?;
-			htlc_id.write(writer)?;
-		}
-
-		(self.context.monitor_pending_failures.len() as u64).write(writer)?;
-		for &(ref htlc_source, ref payment_hash, ref fail_reason) in
-			self.context.monitor_pending_failures.iter()
-		{
-			htlc_source.write(writer)?;
-			payment_hash.write(writer)?;
-			fail_reason.write(writer)?;
-		}
-
 		if self.funding.is_outbound() {
 			self.context.pending_update_fee.map(|(a, _)| a).write(writer)?;
 		} else if let Some((feerate, FeeUpdateState::AwaitingRemoteRevokeToAnnounce)) =
@@ -16357,10 +15616,6 @@ impl<SP: SignerProvider> Writeable for FundedChannel<SP> {
 				Some(self.context.holder_max_accepted_htlcs)
 			};
 
-		let mut monitor_pending_update_adds = None;
-		if !self.context.monitor_pending_update_adds.is_empty() {
-			monitor_pending_update_adds = Some(&self.context.monitor_pending_update_adds);
-		}
 		let is_manual_broadcast = Some(self.context.is_manual_broadcast);
 
 		// We prevent downgrades from 0.3 only in the case where the holder-selected reserve
@@ -16389,9 +15644,6 @@ impl<SP: SignerProvider> Writeable for FundedChannel<SP> {
 				reset_funding_negotiation,
 			});
 
-		let monitor_pending_tx_signatures =
-			self.context.monitor_pending_tx_signatures.then_some(());
-
 		write_tlv_fields!(writer, {
 			(0, self.context.announcement_sigs, option),
 			// minimum_depth and counterparty_selected_channel_reserve_satoshis used to have a
@@ -16407,11 +15659,7 @@ impl<SP: SignerProvider> Writeable for FundedChannel<SP> {
 			(5, self.context.config, required),
 			(6, serialized_holder_htlc_max_in_flight, option),
 			(7, self.context.shutdown_scriptpubkey, option),
-			(8, self.context.blocked_monitor_updates, optional_vec),
 			(9, self.context.target_closing_feerate_sats_per_kw, option),
-			(10, monitor_pending_update_adds, option), // Added in 0.0.122
-			(11, self.context.monitor_pending_finalized_fulfills, required_vec),
-			(12, monitor_pending_tx_signatures, option), // Added in 0.3
 			(13, self.context.channel_creation_height, required),
 			(15, preimages, required_vec),
 			(17, self.context.announcement_sigs_state, required),
@@ -16659,32 +15907,6 @@ impl<'a, 'b, 'c, ES: EntropySource, SP: SignerProvider>
 			_ => return Err(DecodeError::InvalidValue),
 		};
 
-		let monitor_pending_channel_ready = Readable::read(reader)?;
-		let monitor_pending_revoke_and_ack = Readable::read(reader)?;
-		let monitor_pending_commitment_signed = Readable::read(reader)?;
-
-		let monitor_pending_forwards_count: u64 = Readable::read(reader)?;
-		let mut monitor_pending_forwards = Vec::with_capacity(cmp::min(
-			monitor_pending_forwards_count as usize,
-			DEFAULT_MAX_HTLCS as usize,
-		));
-		for _ in 0..monitor_pending_forwards_count {
-			monitor_pending_forwards.push((Readable::read(reader)?, Readable::read(reader)?));
-		}
-
-		let monitor_pending_failures_count: u64 = Readable::read(reader)?;
-		let mut monitor_pending_failures = Vec::with_capacity(cmp::min(
-			monitor_pending_failures_count as usize,
-			DEFAULT_MAX_HTLCS as usize,
-		));
-		for _ in 0..monitor_pending_failures_count {
-			monitor_pending_failures.push((
-				Readable::read(reader)?,
-				Readable::read(reader)?,
-				Readable::read(reader)?,
-			));
-		}
-
 		let pending_update_fee_value: Option<u32> = Readable::read(reader)?;
 
 		let holding_cell_update_fee = Readable::read(reader)?;
@@ -16769,7 +15991,6 @@ impl<'a, 'b, 'c, ES: EntropySource, SP: SignerProvider>
 
 		let mut announcement_sigs = None;
 		let mut target_closing_feerate_sats_per_kw = None;
-		let mut monitor_pending_finalized_fulfills = Some(Vec::new());
 		let mut holder_selected_channel_reserve_satoshis = Some(
 			get_legacy_default_holder_selected_channel_reserve_satoshis(channel_value_satoshis),
 		);
@@ -16799,8 +16020,6 @@ impl<'a, 'b, 'c, ES: EntropySource, SP: SignerProvider>
 		let mut temporary_channel_id: Option<ChannelId> = None;
 		let mut holder_max_accepted_htlcs: Option<u16> = None;
 
-		let mut blocked_monitor_updates = Some(Vec::new());
-
 		let mut pending_outbound_skimmed_fees_opt: Option<Vec<Option<u64>>> = None;
 		let mut holding_cell_skimmed_fees_opt: Option<Vec<Option<u64>>> = None;
 
@@ -16815,8 +16034,6 @@ impl<'a, 'b, 'c, ES: EntropySource, SP: SignerProvider>
 		let mut holding_cell_attribution_data: Option<Vec<Option<AttributionData>>> = None;
 
 		let mut malformed_htlcs: Option<Vec<(u64, u16, [u8; 32])>> = None;
-		let mut monitor_pending_update_adds: Option<Vec<msgs::UpdateAddHTLC>> = None;
-
 		let mut _has_0reserve: Option<()> = None;
 		let mut holder_commitment_point_previous_revoked_opt: Option<PublicKey> = None;
 		let mut holder_commitment_point_last_revoked_opt: Option<PublicKey> = None;
@@ -16839,8 +16056,6 @@ impl<'a, 'b, 'c, ES: EntropySource, SP: SignerProvider>
 		let mut holding_cell_accountable: Option<Vec<bool>> = None;
 		let mut pending_outbound_accountable: Option<Vec<bool>> = None;
 
-		let mut monitor_pending_tx_signatures: Option<()> = None;
-
 		read_tlv_fields!(reader, {
 			(0, announcement_sigs, option),
 			(1, minimum_depth, option),
@@ -16850,11 +16065,7 @@ impl<'a, 'b, 'c, ES: EntropySource, SP: SignerProvider>
 			(5, config, required),
 			(6, holder_max_htlc_value_in_flight_msat, option),
 			(7, shutdown_scriptpubkey, option),
-			(8, blocked_monitor_updates, optional_vec),
 			(9, target_closing_feerate_sats_per_kw, option),
-			(10, monitor_pending_update_adds, option), // Added in 0.0.122
-			(11, monitor_pending_finalized_fulfills, optional_vec),
-			(12, monitor_pending_tx_signatures, option), // Added in 0.3
 			(13, channel_creation_height, required),
 			(15, preimages, required_vec), // The preimages transitioned from optional to required in 0.2
 			(17, announcement_sigs_state, required),
@@ -17268,15 +16479,6 @@ impl<'a, 'b, 'c, ES: EntropySource, SP: SignerProvider>
 
 				resend_order,
 
-				monitor_pending_tx_signatures: monitor_pending_tx_signatures.is_some(),
-				monitor_pending_channel_ready,
-				monitor_pending_revoke_and_ack,
-				monitor_pending_commitment_signed,
-				monitor_pending_forwards,
-				monitor_pending_failures,
-				monitor_pending_finalized_fulfills: monitor_pending_finalized_fulfills.unwrap(),
-				monitor_pending_update_adds: monitor_pending_update_adds.unwrap_or_default(),
-
 				signer_pending_revoke_and_ack: false,
 				signer_pending_commitment_update: false,
 				signer_pending_funding: false,
@@ -17345,7 +16547,6 @@ impl<'a, 'b, 'c, ES: EntropySource, SP: SignerProvider>
 
 				local_initiated_shutdown,
 
-				blocked_monitor_updates: blocked_monitor_updates.unwrap(),
 				is_manual_broadcast: is_manual_broadcast.unwrap_or(false),
 
 				interactive_tx_signing_session,

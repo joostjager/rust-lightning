@@ -298,9 +298,11 @@ pub trait Confirm {
 /// explanation of how to handle different cases.
 ///
 /// While `UnrecoverableError` is provided as a failure variant, it is not truly "handled" on the
-/// calling side, and generally results in an immediate panic. For those who prefer to avoid
-/// panics, `InProgress` can be used and you can retry the update operation in the background or
-/// shut down cleanly.
+/// calling side, and generally results in an immediate panic.
+///
+/// With atomic persistence the [`ChannelMonitor`] is durably committed before any message or event
+/// is released, so updates always complete synchronously and there is no asynchronous "in progress"
+/// state.
 ///
 /// Note that channels should generally *not* be force-closed after a persistence failure.
 /// Force-closing with the latest [`ChannelMonitorUpdate`] applied may result in a transaction
@@ -318,49 +320,12 @@ pub enum ChannelMonitorUpdateStatus {
 	///
 	/// This includes performing any `fsync()` calls required to ensure the update is guaranteed to
 	/// be available on restart even if the application crashes.
-	///
-	/// You cannot switch from [`InProgress`] to this variant for the same channel without first
-	/// restarting. However, switching from this variant to [`InProgress`] is always allowed.
-	///
-	/// [`InProgress`]: ChannelMonitorUpdateStatus::InProgress
 	Completed,
-	/// Indicates that the update will happen asynchronously in the background or that a transient
-	/// failure occurred which is being retried in the background and will eventually complete.
-	///
-	/// This will "freeze" a channel, preventing us from revoking old states or submitting a new
-	/// commitment transaction to the counterparty. Once the update(s) which are `InProgress` have
-	/// been completed, a [`MonitorEvent::Completed`] can be used to restore the channel to an
-	/// operational state.
-	///
-	/// Even when a channel has been "frozen", updates to the [`ChannelMonitor`] can continue to
-	/// occur (e.g. if an inbound HTLC which we forwarded was claimed upstream, resulting in us
-	/// attempting to claim it on this channel) and those updates must still be persisted.
-	///
-	/// No updates to the channel will be made which could invalidate other [`ChannelMonitor`]s
-	/// until a [`MonitorEvent::Completed`] is provided, even if you return no error on a later
-	/// monitor update for the same channel.
-	///
-	/// For deployments where a copy of [`ChannelMonitor`]s and other local state are backed up in
-	/// a remote location (with local copies persisted immediately), it is anticipated that all
-	/// updates will return [`InProgress`] until the remote copies could be updated.
-	///
-	/// Note that while fully asynchronous persistence of [`ChannelMonitor`] data is generally
-	/// reliable, this feature is considered beta, and a handful of edge-cases remain. Until the
-	/// remaining cases are fixed, in rare cases, *using this feature may lead to funds loss*.
-	///
-	/// [`InProgress`]: ChannelMonitorUpdateStatus::InProgress
-	InProgress,
 	/// Indicates that an update has failed and will not complete at any point in the future.
 	///
 	/// Currently returning this variant will cause LDK to immediately panic to encourage immediate
 	/// shutdown. In the future this may be updated to disconnect peers and refuse to continue
 	/// normal operation without a panic.
-	///
-	/// Applications which wish to perform an orderly shutdown after failure should consider
-	/// returning [`InProgress`] instead and simply shut down without ever marking the update
-	/// complete.
-	///
-	/// [`InProgress`]: ChannelMonitorUpdateStatus::InProgress
 	UnrecoverableError,
 }
 
@@ -397,16 +362,14 @@ pub trait Watch<ChannelSigner: EcdsaChannelSigner> {
 	/// Updates a channel identified by `channel_id` by applying `update` to its monitor.
 	///
 	/// Implementations must call [`ChannelMonitor::update_monitor`] with the given update. This
-	/// may fail (returning an `Err(())`), in which case this should return
-	/// [`ChannelMonitorUpdateStatus::InProgress`] (and the update should never complete). This
-	/// generally implies the channel has been closed (either by the funding outpoint being spent
-	/// on-chain or the [`ChannelMonitor`] having decided to do so and broadcasted a transaction),
-	/// and the [`ChannelManager`] state will be updated once it sees the funding spend on-chain.
+	/// may fail (returning an `Err(())`), which generally implies the channel has been closed
+	/// (either by the funding outpoint being spent on-chain or the [`ChannelMonitor`] having
+	/// decided to do so and broadcasted a transaction), and the [`ChannelManager`] state will be
+	/// updated once it sees the funding spend on-chain.
 	///
-	/// In general, persistence failures should be retried after returning
-	/// [`ChannelMonitorUpdateStatus::InProgress`] and eventually complete. If a failure truly
-	/// cannot be retried, the node should shut down immediately after returning
-	/// [`ChannelMonitorUpdateStatus::UnrecoverableError`], see its documentation for more info.
+	/// If a persistence failure truly cannot be recovered from, the node should shut down
+	/// immediately after returning [`ChannelMonitorUpdateStatus::UnrecoverableError`], see its
+	/// documentation for more info.
 	///
 	/// See [`ChannelMonitorUpdateStatus`] for requirements on when each variant may be returned.
 	///
@@ -421,9 +384,6 @@ pub trait Watch<ChannelSigner: EcdsaChannelSigner> {
 	/// Note that after any block- or transaction-connection calls to a [`ChannelMonitor`], no
 	/// further events may be returned here until the [`ChannelMonitor`] has been fully persisted
 	/// to disk.
-	///
-	/// For details on asynchronous [`ChannelMonitor`] updating and returning
-	/// [`MonitorEvent::Completed`] here, see [`ChannelMonitorUpdateStatus::InProgress`].
 	fn release_pending_monitor_events(
 		&self,
 	) -> Vec<(OutPoint, ChannelId, Vec<MonitorEvent>, PublicKey)>;
@@ -465,10 +425,8 @@ impl<ChannelSigner: EcdsaChannelSigner, T: Watch<ChannelSigner> + ?Sized, W: Der
 ///
 /// Note that use as part of a [`Watch`] implementation involves reentrancy. Therefore, the `Filter`
 /// should not block on I/O. Implementations should instead queue the newly monitored data to be
-/// processed later. Then, in order to block until the data has been processed, any [`Watch`]
-/// invocation that has called the `Filter` must return [`InProgress`].
+/// processed later.
 ///
-/// [`InProgress`]: ChannelMonitorUpdateStatus::InProgress
 /// [BIP 157]: https://github.com/bitcoin/bips/blob/master/bip-0157.mediawiki
 /// [BIP 158]: https://github.com/bitcoin/bips/blob/master/bip-0158.mediawiki
 pub trait Filter {
