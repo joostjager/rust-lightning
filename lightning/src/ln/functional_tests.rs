@@ -79,6 +79,33 @@ use lightning_macros::xtest;
 
 use crate::ln::functional_test_utils::*;
 
+#[test]
+fn effect_gate_releases_events_only_after_persistence() {
+	let chanmon_cfgs = create_chanmon_cfgs(1);
+	let node_cfgs = create_node_cfgs(1, &chanmon_cfgs);
+	let node_chanmgrs = create_node_chanmgrs(1, &node_cfgs, &[None]);
+	let nodes = create_network(1, &node_cfgs, &node_chanmgrs);
+	let payment_id = PaymentId([42; 32]);
+
+	nodes[0].node.enable_effect_gate();
+	nodes[0].node.push_pending_event(Event::PaymentFailed {
+		payment_id,
+		payment_hash: None,
+		reason: Some(PaymentFailureReason::UserAbandoned),
+	});
+	assert!(nodes[0].node.get_and_clear_pending_events().is_empty());
+
+	let prepared = nodes[0].node.prepare_persistence().unwrap();
+	assert!(!prepared.manager_bytes().is_empty());
+	assert!(nodes[0].node.get_and_clear_pending_events().is_empty());
+
+	nodes[0].node.release_persisted_effects(prepared);
+	assert!(matches!(
+		nodes[0].node.get_and_clear_pending_events().as_slice(),
+		[Event::PaymentFailed { payment_id: persisted_id, .. }] if persisted_id == &payment_id
+	));
+}
+
 #[xtest(feature = "_externalize_tests")]
 pub fn fake_network_test() {
 	// Simple test which builds a network of ChannelManagers, connects them to each other, and

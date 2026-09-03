@@ -337,6 +337,20 @@ pub trait KVStore {
 	fn list(
 		&self, primary_namespace: &str, secondary_namespace: &str,
 	) -> impl Future<Output = Result<Vec<String>, io::Error>> + 'static + MaybeSend;
+
+	/// Atomically commits all writes staged by this store since its previous commit.
+	///
+	/// Stores which persist each operation immediately may retain the default no-op implementation.
+	fn commit(&self) -> impl Future<Output = Result<(), io::Error>> + 'static + MaybeSend {
+		async { Ok(()) }
+	}
+
+	/// Prevents new foreground operations from entering while an atomic batch is prepared and
+	/// committed.
+	fn begin_atomic_commit(&self) {}
+
+	/// Allows foreground operations to enter after an atomic batch has been committed.
+	fn end_atomic_commit(&self) {}
 }
 
 impl<K> KVStore for K
@@ -366,6 +380,18 @@ where
 		&self, primary_namespace: &str, secondary_namespace: &str,
 	) -> impl Future<Output = Result<Vec<String>, io::Error>> + 'static + MaybeSend {
 		self.deref().list(primary_namespace, secondary_namespace)
+	}
+
+	fn commit(&self) -> impl Future<Output = Result<(), io::Error>> + 'static + MaybeSend {
+		self.deref().commit()
+	}
+
+	fn begin_atomic_commit(&self) {
+		self.deref().begin_atomic_commit()
+	}
+
+	fn end_atomic_commit(&self) {
+		self.deref().end_atomic_commit()
 	}
 }
 

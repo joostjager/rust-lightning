@@ -663,9 +663,6 @@ pub(crate) mod futures_util {
 		pub(crate) fn set_a(&mut self, fut: A) {
 			self.a = JoinerResult::Pending(Some(fut));
 		}
-		pub(crate) fn set_a_res(&mut self, res: Result<(), ERR>) {
-			self.a = JoinerResult::Ready(res);
-		}
 		pub(crate) fn set_b(&mut self, fut: B) {
 			self.b = JoinerResult::Pending(Some(fut));
 		}
@@ -747,6 +744,23 @@ pub(crate) mod futures_util {
 use core::task;
 use futures_util::{dummy_waker, Joiner, OptionalSelector, Selector, SelectorOutput};
 
+struct AtomicCommitScope<'a, K: KVStore> {
+	kv_store: &'a K,
+}
+
+impl<'a, K: KVStore> AtomicCommitScope<'a, K> {
+	fn new(kv_store: &'a K) -> Self {
+		kv_store.begin_atomic_commit();
+		Self { kv_store }
+	}
+}
+
+impl<K: KVStore> Drop for AtomicCommitScope<'_, K> {
+	fn drop(&mut self) {
+		self.kv_store.end_atomic_commit();
+	}
+}
+
 /// Processes background events in a future.
 ///
 /// `sleeper` should return a future which completes in the given amount of time and returns a
@@ -767,9 +781,9 @@ use futures_util::{dummy_waker, Joiner, OptionalSelector, Selector, SelectorOutp
 /// no time is available, some features may be disabled, however the node will still operate fine.
 ///
 /// Note that when deferred monitor writes are enabled on [`ChainMonitor`], this function flushes
-/// pending writes after persisting the [`ChannelManager`]. If the [`Persist`] implementation
-/// performs blocking I/O and returns [`Completed`] synchronously rather than returning
-/// [`InProgress`], this will block the async executor.
+/// pending writes before committing the batch containing the [`ChannelManager`]. If the [`Persist`]
+/// implementation performs blocking I/O and returns [`Completed`] synchronously rather than
+/// returning [`InProgress`], this will block the async executor.
 ///
 /// [`ChainMonitor`]: lightning::chain::chainmonitor::ChainMonitor
 /// [`Persist`]: lightning::chain::chainmonitor::Persist
@@ -1029,8 +1043,32 @@ where
 	let mut have_archived = false;
 
 	let mut last_forwards_processing_call = sleeper(batch_delay.get());
+	channel_manager.get_cm().enable_effect_gate();
 
 	loop {
+		let commit_scope = AtomicCommitScope::new(&kv_store);
+		let prepared = channel_manager.get_cm().prepare_persistence();
+		let pending_monitor_writes = chain_monitor.get_cm().pending_operation_count();
+		chain_monitor.get_cm().flush(pending_monitor_writes, &logger);
+		async {
+			if let Some(prepared) = prepared.as_ref() {
+				kv_store
+					.write(
+						CHANNEL_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE,
+						CHANNEL_MANAGER_PERSISTENCE_SECONDARY_NAMESPACE,
+						CHANNEL_MANAGER_PERSISTENCE_KEY,
+						prepared.manager_bytes().to_vec(),
+					)
+					.await?;
+			}
+			kv_store.commit().await
+		}
+		.await?;
+		if let Some(prepared) = prepared {
+			channel_manager.get_cm().release_persisted_effects(prepared);
+		}
+		drop(commit_scope);
+
 		channel_manager.get_cm().process_pending_events_async(async_event_handler).await;
 		chain_monitor.get_cm().process_pending_events_async(async_event_handler).await;
 		if let Some(om) = &onion_messenger {
@@ -1120,53 +1158,8 @@ where
 			None => {},
 		}
 
-		// We capture pending_operation_count inside the persistence branch to
-		// avoid a race: ChannelManager handlers queue deferred monitor ops
-		// before the persistence flag is set. Capturing outside would let us
-		// observe pending ops while the flag is still unset, causing us to
-		// flush monitor writes without persisting the ChannelManager.
-		// Declared before futures so it outlives the Joiner (drop order).
-		let pending_monitor_writes;
-
 		let mut futures = Joiner::new();
-
-		if channel_manager.get_cm().get_and_clear_needs_persistence() {
-			pending_monitor_writes = chain_monitor.get_cm().pending_operation_count();
-			log_trace!(logger, "Persisting ChannelManager...");
-
-			let fut = async {
-				kv_store
-					.write(
-						CHANNEL_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE,
-						CHANNEL_MANAGER_PERSISTENCE_SECONDARY_NAMESPACE,
-						CHANNEL_MANAGER_PERSISTENCE_KEY,
-						channel_manager.get_cm().encode(),
-					)
-					.await?;
-
-				// Flush monitor operations that were pending before we persisted. New updates
-				// that arrived after are left for the next iteration.
-				chain_monitor.get_cm().flush(pending_monitor_writes, &logger);
-				Ok(())
-			};
-			// TODO: Once our MSRV is 1.68 we should be able to drop the Box
-			let mut fut = Box::pin(fut);
-
-			// Because persisting the ChannelManager is important to avoid accidental
-			// force-closures, go ahead and poll the future once before we do slightly more
-			// CPU-intensive tasks in the form of NetworkGraph pruning or scorer time-stepping
-			// below. This will get it moving but won't block us for too long if the underlying
-			// future is actually async.
-			use core::future::Future;
-			let mut waker = dummy_waker();
-			let mut ctx = task::Context::from_waker(&mut waker);
-			match core::pin::Pin::new(&mut fut).poll(&mut ctx) {
-				task::Poll::Ready(res) => futures.set_a_res(res),
-				task::Poll::Pending => futures.set_a(fut),
-			}
-
-			log_trace!(logger, "Done persisting ChannelManager.");
-		}
+		futures.set_a(core::future::ready(Ok::<(), lightning::io::Error>(())));
 
 		// Note that we want to archive stale ChannelMonitors and run a network graph prune once
 		// not long after startup before falling back to their usual infrequent runs. This avoids
@@ -1389,39 +1382,51 @@ where
 	// After we exit, ensure we persist the ChannelManager one final time - this avoids
 	// some races where users quit while channel updates were in-flight, with
 	// ChannelMonitor update(s) persisted without a corresponding ChannelManager update.
+	let commit_scope = AtomicCommitScope::new(&kv_store);
+	let prepared = channel_manager.get_cm().prepare_persistence();
 	let pending_monitor_writes = chain_monitor.get_cm().pending_operation_count();
-	kv_store
-		.write(
-			CHANNEL_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE,
-			CHANNEL_MANAGER_PERSISTENCE_SECONDARY_NAMESPACE,
-			CHANNEL_MANAGER_PERSISTENCE_KEY,
-			channel_manager.get_cm().encode(),
-		)
-		.await?;
-
-	// Flush monitor operations that were pending before final persistence.
 	chain_monitor.get_cm().flush(pending_monitor_writes, &logger);
+	let manager_bytes = prepared
+		.as_ref()
+		.map(|prepared| prepared.manager_bytes().to_vec())
+		.unwrap_or_else(|| channel_manager.get_cm().encode());
+	async {
+		kv_store
+			.write(
+				CHANNEL_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE,
+				CHANNEL_MANAGER_PERSISTENCE_SECONDARY_NAMESPACE,
+				CHANNEL_MANAGER_PERSISTENCE_KEY,
+				manager_bytes,
+			)
+			.await?;
 
-	if let Some(ref scorer) = scorer {
-		kv_store
-			.write(
-				SCORER_PERSISTENCE_PRIMARY_NAMESPACE,
-				SCORER_PERSISTENCE_SECONDARY_NAMESPACE,
-				SCORER_PERSISTENCE_KEY,
-				scorer.encode(),
-			)
-			.await?;
+		if let Some(ref scorer) = scorer {
+			kv_store
+				.write(
+					SCORER_PERSISTENCE_PRIMARY_NAMESPACE,
+					SCORER_PERSISTENCE_SECONDARY_NAMESPACE,
+					SCORER_PERSISTENCE_KEY,
+					scorer.encode(),
+				)
+				.await?;
+		}
+		if let Some(network_graph) = gossip_sync.network_graph() {
+			kv_store
+				.write(
+					NETWORK_GRAPH_PERSISTENCE_PRIMARY_NAMESPACE,
+					NETWORK_GRAPH_PERSISTENCE_SECONDARY_NAMESPACE,
+					NETWORK_GRAPH_PERSISTENCE_KEY,
+					network_graph.encode(),
+				)
+				.await?;
+		}
+		kv_store.commit().await
 	}
-	if let Some(network_graph) = gossip_sync.network_graph() {
-		kv_store
-			.write(
-				NETWORK_GRAPH_PERSISTENCE_PRIMARY_NAMESPACE,
-				NETWORK_GRAPH_PERSISTENCE_SECONDARY_NAMESPACE,
-				NETWORK_GRAPH_PERSISTENCE_KEY,
-				network_graph.encode(),
-			)
-			.await?;
+	.await?;
+	if let Some(prepared) = prepared {
+		channel_manager.get_cm().release_persisted_effects(prepared);
 	}
+	drop(commit_scope);
 	Ok(())
 }
 

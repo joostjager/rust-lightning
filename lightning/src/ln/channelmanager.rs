@@ -2065,6 +2065,26 @@ impl<
 	}
 }
 
+/// A prepared [`ChannelManager`] snapshot whose effects remain gated until the snapshot is
+/// durably committed.
+pub struct PreparedChannelManagerPersistence {
+	manager_bytes: Vec<u8>,
+	effects: PendingEffects,
+}
+
+struct PendingEffects {
+	events: VecDeque<(events::Event, Option<EventCompletionAction>)>,
+	msg_events: Vec<MessageSendEvent>,
+}
+
+impl PreparedChannelManagerPersistence {
+	/// Returns the current, unpartitioned [`ChannelManager`] snapshot to include in the atomic
+	/// persistence batch.
+	pub fn manager_bytes(&self) -> &[u8] {
+		&self.manager_bytes
+	}
+}
+
 /// A lightning node's channel state machine and payment management logic, which facilitates
 /// sending, forwarding, and receiving payments through lightning channels.
 ///
@@ -2960,6 +2980,12 @@ pub struct ChannelManager<
 
 	/// A simple atomic flag to ensure only one task at a time can be processing events asynchronously.
 	pending_events_processor: AtomicBool,
+	/// Whether effects must pass through [`Self::prepare_persistence`] before they may be handled.
+	effect_gate_enabled: AtomicBool,
+	/// User events that are durable and ready to be handled.
+	staged_events: Mutex<VecDeque<(events::Event, Option<EventCompletionAction>)>>,
+	/// Peer messages that are durable and ready to be sent.
+	staged_msg_events: Mutex<Vec<MessageSendEvent>>,
 
 	/// A simple atomic flag to ensure only one task at a time can be processing HTLC forwards via
 	/// [`Self::process_pending_htlc_forwards`].
@@ -3504,6 +3530,46 @@ macro_rules! try_channel_entry {
 #[rustfmt::skip]
 macro_rules! process_events_body {
 	($self: expr, $event_to_handle: expr, $handle_event: expr) => {
+		if $self.effect_gate_enabled.load(Ordering::Acquire) {
+			if $self.pending_events_processor.compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed).is_err() {
+				return;
+			}
+
+			let mut staged_events = core::mem::take(&mut *$self.staged_events.lock().unwrap());
+			let mut post_event_actions = Vec::new();
+			let mut num_handled_events = 0;
+			for (event, action_opt) in staged_events.iter() {
+				log_trace!($self.logger, "Handling staged event {:?}...", event);
+				$event_to_handle = event.clone();
+				let event_handling_result = $handle_event;
+				log_trace!($self.logger, "Done handling staged event, result: {:?}", event_handling_result);
+				match event_handling_result {
+					Ok(()) => {
+						if let Some(action) = action_opt {
+							post_event_actions.push(action.clone());
+						}
+						num_handled_events += 1;
+					},
+					Err(_e) => break,
+				}
+			}
+
+			staged_events.drain(..num_handled_events);
+			if !staged_events.is_empty() {
+				let mut staged = $self.staged_events.lock().unwrap();
+				for event in staged_events.into_iter().rev() {
+					staged.push_front(event);
+				}
+			}
+			$self.pending_events_processor.store(false, Ordering::Release);
+
+			if !post_event_actions.is_empty() {
+				let _read_guard = $self.total_consistency_lock.read().unwrap();
+				$self.handle_post_event_actions(post_event_actions);
+			}
+			return;
+		}
+
 		let mut handling_failed = false;
 		let mut processed_all_events = false;
 		while !handling_failed && !processed_all_events {
@@ -3746,6 +3812,9 @@ impl<
 
 			pending_events: Mutex::new(VecDeque::new()),
 			pending_events_processor: AtomicBool::new(false),
+			effect_gate_enabled: AtomicBool::new(false),
+			staged_events: Mutex::new(VecDeque::new()),
+			staged_msg_events: Mutex::new(Vec::new()),
 			pending_htlc_forwards_processor: AtomicBool::new(false),
 			pending_background_events: Mutex::new(Vec::new()),
 			total_consistency_lock: RwLock::new(()),
@@ -15508,7 +15577,7 @@ impl<
 		collected_events
 	}
 
-	#[cfg(feature = "_test_utils")]
+	#[cfg(any(test, feature = "_test_utils"))]
 	pub fn push_pending_event(&self, event: events::Event) {
 		let mut events = self.pending_events.lock().unwrap();
 		events.push_back((event, None));
@@ -16052,6 +16121,10 @@ impl<
 	/// `MessageSendEvent`s  for both `node_a` and `node_b`, the `MessageSendEvent`s for `node_a`
 	/// will randomly be placed first or last in the returned array.
 	fn get_and_clear_pending_msg_events(&self) -> Vec<MessageSendEvent> {
+		if self.effect_gate_enabled.load(Ordering::Acquire) {
+			return core::mem::take(&mut *self.staged_msg_events.lock().unwrap());
+		}
+
 		let events = RefCell::new(Vec::new());
 		PersistenceNotifierGuard::optionally_notify(self, || {
 			// This method is quite performance-sensitive. Not only is it called very often, but it
@@ -16060,51 +16133,10 @@ impl<
 			// need, especially anything that might end up causing I/O (like a
 			// `ChannelMonitorUpdate`)!
 
-			// TODO: This behavior should be documented. It's unintuitive that we query
-			// ChannelMonitors when clearing other events.
-			let mut result = self.process_pending_monitor_events();
-
-			if self.maybe_generate_initial_closing_signed() {
-				result = NotifyOption::DoPersist;
-			}
-
-			#[cfg(test)]
-			if self.check_free_holding_cells() {
-				// In tests, we want to ensure that we never forget to free holding cells
-				// immediately, so we check it here.
-				// Note that we can't turn this on for `debug_assertions` because there's a race in
-				// (at least) the fee-update logic in `timer_tick_occurred` which can lead to us
-				// freeing holding cells here while its running.
-				debug_assert!(false, "Holding cells should always be auto-free'd");
-			}
-
-			// Quiescence is an in-memory protocol, so we don't have to persist because of it.
-			self.maybe_send_stfu();
-
-			let mut is_any_peer_connected = false;
-			let mut pending_events = Vec::new();
-			let per_peer_state = self.per_peer_state.read().unwrap();
-			for (_cp_id, peer_state_mutex) in per_peer_state.iter() {
-				let mut peer_state_lock = peer_state_mutex.lock().unwrap();
-				let peer_state = &mut *peer_state_lock;
-				if peer_state.pending_msg_events.len() > 0 {
-					pending_events.append(&mut peer_state.pending_msg_events);
-				}
-				if peer_state.is_connected {
-					is_any_peer_connected = true
-				}
-			}
-
-			// Ensure that we are connected to some peers before getting broadcast messages.
-			if is_any_peer_connected {
-				let mut broadcast_msgs = self.pending_broadcast_messages.lock().unwrap();
-				pending_events.append(&mut broadcast_msgs);
-			}
-
+			let (pending_events, result) = self.take_pending_msg_events();
 			if !pending_events.is_empty() {
 				events.replace(pending_events);
 			}
-
 			result
 		});
 		events.into_inner()
@@ -16631,6 +16663,48 @@ impl<
 		}
 	}
 
+	/// Collects pending peer messages and returns whether doing so changed persistable state.
+	///
+	/// Expects the caller to hold the total consistency lock.
+	fn take_pending_msg_events(&self) -> (Vec<MessageSendEvent>, NotifyOption) {
+		// TODO: This behavior should be documented. It's unintuitive that we query
+		// ChannelMonitors when clearing other events.
+		let mut result = self.process_pending_monitor_events();
+
+		if self.maybe_generate_initial_closing_signed() {
+			result = NotifyOption::DoPersist;
+		}
+
+		#[cfg(test)]
+		if self.check_free_holding_cells() {
+			// In tests, we want to ensure that we never forget to free holding cells
+			// immediately, so we check it here.
+			// Note that we can't turn this on for `debug_assertions` because there's a race in
+			// (at least) the fee-update logic in `timer_tick_occurred` which can lead to us
+			// freeing holding cells here while its running.
+			debug_assert!(false, "Holding cells should always be auto-free'd");
+		}
+
+		// Quiescence is an in-memory protocol, so we don't have to persist because of it.
+		self.maybe_send_stfu();
+
+		let mut is_any_peer_connected = false;
+		let mut pending_events = Vec::new();
+		let per_peer_state = self.per_peer_state.read().unwrap();
+		for peer_state_mutex in per_peer_state.values() {
+			let mut peer_state = peer_state_mutex.lock().unwrap();
+			pending_events.append(&mut peer_state.pending_msg_events);
+			is_any_peer_connected |= peer_state.is_connected;
+		}
+
+		// Ensure that we are connected to some peers before getting broadcast messages.
+		if is_any_peer_connected {
+			pending_events.append(&mut self.pending_broadcast_messages.lock().unwrap());
+		}
+
+		(pending_events, result)
+	}
+
 	/// Gets a [`Future`] that completes when this [`ChannelManager`] may need to be persisted or
 	/// may have events that need processing.
 	///
@@ -16649,6 +16723,50 @@ impl<
 	/// indicates this should be checked.
 	pub fn get_and_clear_needs_persistence(&self) -> bool {
 		self.needs_persist_flag.swap(false, Ordering::AcqRel)
+	}
+
+	/// Enables staging of peer messages and user events until the state which produced them has
+	/// been committed.
+	///
+	/// Once enabled, the background processor must call [`Self::prepare_persistence`] and
+	/// [`Self::release_persisted_effects`] before consuming events or messages.
+	pub fn enable_effect_gate(&self) {
+		self.effect_gate_enabled.store(true, Ordering::Release);
+	}
+
+	/// Prepares the current, unpartitioned manager snapshot and takes pending user events and peer
+	/// messages out of the queues visible to event consumers.
+	///
+	/// The returned snapshot can be added to an atomic batch containing monitor and application
+	/// updates. Effects remain unavailable until [`Self::release_persisted_effects`] is called.
+	pub fn prepare_persistence(&self) -> Option<PreparedChannelManagerPersistence> {
+		debug_assert!(self.effect_gate_enabled.load(Ordering::Acquire));
+
+		let _consistency_lock = self.total_consistency_lock.write().unwrap();
+		let background_result = self.process_background_events();
+		let (msg_events, msg_result) = self.take_pending_msg_events();
+		let has_events = !self.pending_events.lock().unwrap().is_empty();
+		let needs_persistence = self.needs_persist_flag.swap(false, Ordering::AcqRel)
+			|| background_result == NotifyOption::DoPersist
+			|| msg_result == NotifyOption::DoPersist
+			|| has_events
+			|| !msg_events.is_empty();
+		if !needs_persistence {
+			return None;
+		}
+
+		let manager_bytes = self.encode_without_consistency_lock();
+		let events = core::mem::take(&mut *self.pending_events.lock().unwrap());
+		Some(PreparedChannelManagerPersistence {
+			manager_bytes,
+			effects: PendingEffects { events, msg_events },
+		})
+	}
+
+	/// Opens the effect gate after the batch containing `prepared` has been durably committed.
+	pub fn release_persisted_effects(&self, prepared: PreparedChannelManagerPersistence) {
+		self.staged_msg_events.lock().unwrap().extend(prepared.effects.msg_events);
+		self.staged_events.lock().unwrap().extend(prepared.effects.events);
 	}
 
 	#[cfg(any(test, feature = "_test_utils"))]
@@ -18278,12 +18396,11 @@ impl<
 		R: Router,
 		MR: MessageRouter,
 		L: Logger,
-	> Writeable for ChannelManager<M, T, ES, NS, SP, F, R, MR, L>
+	> ChannelManager<M, T, ES, NS, SP, F, R, MR, L>
 {
 	#[rustfmt::skip]
-	fn write<W: Writer>(&self, writer: &mut W) -> Result<(), io::Error> {
-		let _consistency_lock = self.total_consistency_lock.write().unwrap();
-
+	fn write_without_consistency_lock<W: Writer>(&self, writer: &mut W) -> Result<(), io::Error> {
+		debug_assert_ne!(self.total_consistency_lock.held_by_thread(), LockHeldState::NotHeldByThread);
 		write_ver_prefix!(writer, SERIALIZATION_VERSION, MIN_SERIALIZATION_VERSION);
 
 		self.chain_hash.write(writer)?;
@@ -18549,6 +18666,30 @@ impl<
 		events.truncate(event_count);
 
 		Ok(())
+	}
+
+	fn encode_without_consistency_lock(&self) -> Vec<u8> {
+		let mut writer = VecWriter(Vec::new());
+		self.write_without_consistency_lock(&mut writer).expect("writing to a Vec cannot fail");
+		writer.0
+	}
+}
+
+impl<
+		M: chain::Watch<SP::EcdsaSigner>,
+		T: BroadcasterInterface,
+		ES: EntropySource,
+		NS: NodeSigner,
+		SP: SignerProvider,
+		F: FeeEstimator,
+		R: Router,
+		MR: MessageRouter,
+		L: Logger,
+	> Writeable for ChannelManager<M, T, ES, NS, SP, F, R, MR, L>
+{
+	fn write<W: Writer>(&self, writer: &mut W) -> Result<(), io::Error> {
+		let _consistency_lock = self.total_consistency_lock.write().unwrap();
+		self.write_without_consistency_lock(writer)
 	}
 }
 
@@ -20507,6 +20648,9 @@ impl<
 
 			pending_events: Mutex::new(pending_events_read),
 			pending_events_processor: AtomicBool::new(false),
+			effect_gate_enabled: AtomicBool::new(false),
+			staged_events: Mutex::new(VecDeque::new()),
+			staged_msg_events: Mutex::new(Vec::new()),
 			pending_htlc_forwards_processor: AtomicBool::new(false),
 			pending_background_events: Mutex::new(pending_background_events),
 			total_consistency_lock: RwLock::new(()),
